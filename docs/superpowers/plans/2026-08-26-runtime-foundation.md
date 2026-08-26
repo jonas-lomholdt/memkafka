@@ -157,7 +157,7 @@ git commit -m "feat: add memkafka runtime configuration"
 - Consumes: `Config` and a shutdown future with `Output = ()`.
 - Produces: `BoundEndpoints { kafka: SocketAddr, schema_registry: SocketAddr, advertised_kafka: AdvertisedAddress }`; `serve<F>(Config, oneshot::Sender<BoundEndpoints>, F) -> anyhow::Result<()>`.
 
-- [ ] **Step 1: Write the failing dual-listener test**
+- [x] **Step 1: Write the failing dual-listener test**
 
 Create `tests/runtime.rs`:
 
@@ -212,13 +212,13 @@ async fn both_endpoints_accept_connections_until_shutdown() {
 
 The production change caught is failing to bind or drive either listener, resolving an omitted advertised port before an ephemeral bind, or leaking listener tasks on shutdown.
 
-- [ ] **Step 2: Run the lifecycle test and verify RED**
+- [x] **Step 2: Run the lifecycle test and verify RED**
 
 Run: `cargo test --test runtime both_endpoints_accept_connections_until_shutdown`
 
 Expected: compilation fails because `memkafka::server::serve` does not exist.
 
-- [ ] **Step 3: Implement listener binding and structured shutdown**
+- [x] **Step 3: Implement listener binding and structured shutdown**
 
 In `src/server.rs`:
 
@@ -235,13 +235,13 @@ In `src/server.rs`:
 
 Do not add a fake health route or claim any Kafka API support.
 
-- [ ] **Step 4: Run the lifecycle test and verify GREEN**
+- [x] **Step 4: Run the lifecycle test and verify GREEN**
 
 Run: `cargo test --test runtime both_endpoints_accept_connections_until_shutdown`
 
 Expected: PASS with no leaked-task warning.
 
-- [ ] **Step 5: Write and verify a bind-failure test**
+- [x] **Step 5: Write and verify a bind-failure test**
 
 Add a test that reserves a local TCP address using `std::net::TcpListener`, configures Kafka to that address, calls `serve`, and asserts:
 
@@ -252,13 +252,13 @@ assert!(ready_rx.await.is_err());
 
 Run it before implementation changes to ensure it fails for the expected missing-context reason, then add the precise context and rerun it to PASS.
 
-- [ ] **Step 6: Run all lifecycle tests**
+- [x] **Step 6: Run all lifecycle tests**
 
 Run: `cargo test --test runtime`
 
 Expected: all runtime tests pass.
 
-- [ ] **Step 7: Commit the lifecycle slice**
+- [x] **Step 7: Commit the lifecycle slice**
 
 ```bash
 git add src/server.rs src/lib.rs tests/runtime.rs

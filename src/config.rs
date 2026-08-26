@@ -91,9 +91,7 @@ impl FromStr for AdvertisedAddress {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let parsed = if let Some(without_opening_bracket) = value.strip_prefix('[') {
-            without_opening_bracket
-                .rsplit_once("]:")
-                .map(|(host, port)| (host, port))
+            without_opening_bracket.rsplit_once("]:")
         } else {
             value
                 .rsplit_once(':')
