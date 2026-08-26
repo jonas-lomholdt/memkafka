@@ -4,7 +4,7 @@
 
 MemKafka is becoming a fast, single-binary, in-memory Kafka-compatible broker for local development and integration tests. The same process will also expose a Confluent-compatible Schema Registry API.
 
-> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes single-member `Subscribe()`/`Consume()`, automatic and explicit offset commits, restart resume, and no-commit redelivery. Kafbat UI v1.5.0 discovers MemKafka and browses an exact produced record. Multi-member rebalancing and Schema Registry routes are next.
+> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes cooperative-sticky A/B/C rebalancing, graceful leave, session expiry, automatic and explicit commits, restart resume, independent groups, seeking, and earliest/latest reset. Kafbat UI v1.5.0 discovers MemKafka and browses an exact produced record. The Avro Schema Registry subset is next.
 
 MemKafka is test infrastructure. It is not intended for production, and all state disappears when the process exits.
 
@@ -77,7 +77,7 @@ The current black-box suite passes independently with Confluent.Kafka 2.15.0, Ap
 - ten sequential records observed at contiguous offsets in partition order;
 - a second read from offset `0` without a commit, demonstrating in-process at-least-once redelivery.
 
-The Confluent.Kafka suite additionally proves a real classic-group Join/Sync/Heartbeat lifecycle with `cooperative-sticky`, automatic commit restart recovery, explicit commit restart recovery, and redelivery after restarting without a commit.
+The Confluent.Kafka suite additionally proves real asynchronous Join/Sync barriers with `cooperative-sticky`; disjoint full coverage of six partitions across consumers A, B, and C; successive incremental rounds; graceful-leave and session-expiry redistribution; explicit seeking and latest reset; automatic and explicit commit restart recovery; independent group offsets; and redelivery after restarting without a commit.
 
 The pinned Kafbat UI v1.5.0 suite independently produces a unique string record, observes its topic through Kafbat's API, and verifies that Kafbat's message browser returns the exact key and value.
 
@@ -87,7 +87,6 @@ CI runs the Confluent.Kafka suite against both the native binary and its Docker 
 
 The remaining planned subset includes:
 
-- multi-member classic consumer groups with cooperative-sticky rebalancing and session expiry;
 - the Schema Registry endpoints needed by Confluent's Avro serializer and deserializer.
 
 It excludes persistence, replication, transactions, authentication, TLS, retention, topic deletion, Protobuf, and JSON Schema.

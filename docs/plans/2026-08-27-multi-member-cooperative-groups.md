@@ -1,10 +1,10 @@
 # Multi-member cooperative groups implementation plan
 
-> **Status:** Approved contract; implementation started 2026-08-27.
+> **Status:** Completed 2026-08-27.
 
 **Goal:** Complete the classic-group behavior in §§8–9 and the mandatory multi-member acceptance scenarios in §§12.2–12.3 of the design specification.
 
-**Architecture:** Keep one Tokio mutex per group, but turn JoinGroup and SyncGroup into real asynchronous barriers. A rebalance epoch tracks which live members have rejoined; one generation is published only after the full cohort arrives. Join and Sync waiters use a per-group notification and always re-check state after waking. Session deadlines are derived from Tokio `Instant`, allowing deterministic paused-time tests and expiry while a join is waiting. Subscription metadata and assignments remain opaque to the coordinator; decoding owned partitions is best-effort and logging-only.
+**Architecture:** Keep one Tokio mutex per group, but turn JoinGroup and SyncGroup into real asynchronous barriers. A rebalance epoch tracks which live members have rejoined; one generation is published only after the full cohort arrives. Join and Sync waiters use a per-group notification and always re-check state after waking. A per-group deadline driver independently enforces generation Join/Sync deadlines using the largest member rebalance timeout and stable-member expiry using the session timeout; all deadlines derive from Tokio `Instant` for deterministic paused-time tests. Subscription metadata and assignments remain opaque to the coordinator; decoding owned partitions is best-effort and logging-only.
 
 **Acceptance boundary:** The real Confluent.Kafka 2.15.0 cooperative-sticky assignor owns partition assignment. MemKafka coordinates generations, forwards subscription metadata, installs leader-provided assignments, fences invalid requests, and never assigns a partition itself.
 
@@ -54,7 +54,7 @@
 - Modify: `src/broker/groups.rs`
 
 1. Add paused-time tests proving heartbeats extend membership and a silent member is retained before, then removed at, its session deadline.
-2. When a join barrier waits, sleep only until the nearest unjoined member deadline or a state notification, then re-check under the group lock.
+2. When a join or sync barrier waits, sleep only until the generation's rebalance deadline or a state notification, then re-check under the group lock.
 3. Also prune expired members at coordinator entry points so a survivor heartbeat or later join observes expiry promptly.
 4. Expiry logs the member, triggers one rebalance for survivors, elects a replacement leader when required, and moves the last-member group to Empty without deleting committed offsets.
 
@@ -84,3 +84,7 @@
 3. Run the Confluent suite natively and against a freshly built Docker image.
 4. Run the Java, Rust, Go, and Kafbat regression suites against that image.
 5. Request an independent correctness review, fix material findings, and commit without pushing.
+
+## Result
+
+The coordinator now provides generation-safe asynchronous Join/Sync barriers, cached retry responses, classic heartbeat fencing, independently driven generation-level rebalance deadlines and session expiry, graceful leave, retained offsets, and cooperative diagnostics. The Confluent.Kafka acceptance suite proves exact disjoint coverage, minimal A/B-to-A/B/C movement, no transfer before revocation, continuous pre-expiry ownership, and eventual redistribution after both graceful and ungraceful departure.

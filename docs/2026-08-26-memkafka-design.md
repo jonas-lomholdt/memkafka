@@ -3,7 +3,7 @@
 **Date:** 2026-08-26  
 **Status:** In progress
 
-**Implementation:** Metadata, topic creation, Produce, Fetch, ListOffsets, single-member classic-group commit/restart flows, and Kafbat UI message browsing complete; multi-member rebalancing is the next Kafka slice
+**Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, and Kafbat UI message browsing complete; the Avro Schema Registry subset is the remaining v0.1 slice
 
 ## 1. Summary
 
@@ -467,6 +467,8 @@ Then verify:
 - removing or timing out a member redistributes all partitions without duplicates.
 
 The primary scenario uses a six-partition topic and consumers A, B, and C. After every stable generation, the intersection of assignments must be empty and their union must equal all six partitions.
+
+The implemented acceptance scenario covers A/B/C joins, successive cooperative assignment rounds, graceful leave, ungraceful session expiry, and full redistribution. It requires the exact partition set `0..5`, proves that adding C moves exactly two partitions, and records every assignment revision to reject any survivor movement during a conservative pre-expiry window. A shared callback observer also fails if a new live member reports a partition before its prior owner reports revocation.
 
 ### 12.4 Schema Registry acceptance
 

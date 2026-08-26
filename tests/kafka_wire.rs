@@ -379,10 +379,7 @@ async fn classic_group_requests_complete_membership_and_offset_lifecycle() {
     let ResponseKind::Heartbeat(response) = response else {
         panic!("expected Heartbeat response")
     };
-    assert_eq!(
-        response.error_code,
-        ResponseError::RebalanceInProgress.code()
-    );
+    assert_eq!(response.error_code, 0);
 
     let response = dispatch_kind(
         &dispatcher,
