@@ -303,6 +303,7 @@ Required semantics:
 - joining, graceful leaving, changed subscriptions, and session expiry trigger rebalances;
 - stale generations and unknown members are fenced with Kafka-compatible errors;
 - OffsetCommit and OffsetFetch persist offsets in memory independently for each group;
+- clients may use automatic commits or disable them and commit offsets explicitly;
 - committed offsets survive consumer restarts within the same MemKafka process;
 - different groups consume and commit independently.
 
@@ -430,9 +431,10 @@ The first four metadata and topic-creation scenarios and the baseline publish/co
 ### 12.2 Consumer-group acceptance
 
 - `Subscribe()` and `Consume()` work through the classic group protocol;
-- manual `Assign()` works without group coordination;
+- manual `Assign()` and seeking to an explicit partition offset work without group coordination;
 - earliest/latest reset behavior works;
-- commits are returned after restarting a consumer within the same process;
+- automatic commits are returned after restarting a consumer within the same process;
+- with automatic commits disabled, an explicit manual commit is returned after restarting a consumer within the same process;
 - restart a consumer without committing and redeliver the previously processed record;
 - commit only after processing, restart the consumer, and resume after the committed record;
 - separate groups consume and commit independently;
