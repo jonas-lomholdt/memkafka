@@ -3,3 +3,4 @@ pub mod codec;
 pub mod connection;
 pub mod dispatcher;
 pub mod frame;
+mod metadata;

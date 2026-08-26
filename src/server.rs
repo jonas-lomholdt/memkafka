@@ -10,6 +10,7 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
+    broker::BrokerState,
     config::{AdvertisedAddress, Config},
     kafka::{connection, dispatcher::Dispatcher},
 };
@@ -73,10 +74,20 @@ where
             .context("failed to derive Kafka advertised address")?,
     );
     let endpoints = BoundEndpoints::new(kafka_address, schema_registry_address, advertised_kafka);
+    let broker = BrokerState::new(
+        config.broker_id,
+        endpoints.advertised_kafka.clone(),
+        config.auto_create_topics,
+        config.default_partitions,
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut servers = JoinSet::new();
-    servers.spawn(run_kafka_listener(kafka_listener, shutdown_rx.clone()));
+    servers.spawn(run_kafka_listener(
+        kafka_listener,
+        Dispatcher::new(broker),
+        shutdown_rx.clone(),
+    ));
     servers.spawn(run_schema_registry_listener(
         schema_registry_listener,
         shutdown_rx,
@@ -105,9 +116,9 @@ where
 
 async fn run_kafka_listener(
     listener: TcpListener,
+    dispatcher: Dispatcher,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let dispatcher = Dispatcher;
     let mut connections = JoinSet::new();
 
     loop {
