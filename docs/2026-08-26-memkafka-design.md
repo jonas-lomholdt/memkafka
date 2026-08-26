@@ -495,3 +495,9 @@ v0.1 is complete when:
 8. the README states the compatibility target, native and container startup paths, ephemeral data model, Rust baseline, and exclusions without implying production suitability.
 
 Implementation must not expand v0.1 merely to imitate Kafka internals. New behavior enters scope only when required by the pinned real-client acceptance suite or added explicitly to this specification.
+
+## 15. Optional future benchmarks
+
+It could be fun to add a small set of useful benchmarks at the bottom of the README after v0.1. This is not a completion requirement.
+
+One useful comparison would measure container startup-to-readiness time for Kafka plus Schema Registry versus MemKafka. Any published result should name the images and versions, define readiness consistently, describe the machine and cold/warm-cache conditions, and include enough repeated runs to avoid presenting a one-off timing as representative.
