@@ -7,9 +7,12 @@ use tokio::{
     sync::{oneshot, watch},
     task::{JoinError, JoinSet},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::config::{AdvertisedAddress, Config};
+use crate::{
+    config::{AdvertisedAddress, Config},
+    kafka::{connection, dispatcher::Dispatcher},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundEndpoints {
@@ -104,19 +107,43 @@ async fn run_kafka_listener(
     listener: TcpListener,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    let dispatcher = Dispatcher;
+    let mut connections = JoinSet::new();
+
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    return Ok(());
+                    break;
                 }
             }
             accepted = listener.accept() => {
-                let (connection, peer) = accepted.context("Kafka listener failed to accept a connection")?;
-                debug!(%peer, "Kafka protocol dispatch is not installed yet; closing connection");
-                drop(connection);
+                let (socket, peer) = accepted.context("Kafka listener failed to accept a connection")?;
+                debug!(%peer, "accepted Kafka connection");
+                let dispatcher = dispatcher.clone();
+                let connection_shutdown = shutdown.clone();
+                connections.spawn(async move {
+                    (peer, connection::serve(socket, dispatcher, connection_shutdown).await)
+                });
+            }
+            completed = connections.join_next(), if !connections.is_empty() => {
+                log_connection_result(completed);
             }
         }
+    }
+
+    while let Some(completed) = connections.join_next().await {
+        log_connection_result(Some(completed));
+    }
+    Ok(())
+}
+
+fn log_connection_result(completed: Option<Result<(SocketAddr, Result<()>), JoinError>>) {
+    match completed {
+        Some(Ok((peer, Ok(())))) => debug!(%peer, "Kafka connection closed"),
+        Some(Ok((peer, Err(error)))) => warn!(%peer, %error, "Kafka connection failed"),
+        Some(Err(error)) => warn!(%error, "Kafka connection task failed"),
+        None => {}
     }
 }
 
