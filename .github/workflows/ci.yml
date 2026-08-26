@@ -10,11 +10,11 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install pinned Rust toolchain
         run: rustup show
@@ -28,6 +28,96 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --all-features
 
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore Confluent.Kafka acceptance runner
+        run: >-
+          dotnet restore tests/confluent/MemKafka.Acceptance.csproj
+          --locked-mode
+          --source https://api.nuget.org/v3/index.json
+
+      - name: Build MemKafka for black-box tests
+        run: cargo build
+
+      - name: Run Confluent.Kafka native black-box tests
+        run: >-
+          dotnet run --no-restore
+          --project tests/confluent/MemKafka.Acceptance.csproj
+
       - name: Build container image
         run: docker build -t memkafka:ci .
 
+      - name: Install Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          cache-dependency-path: tests/java/pom.xml
+
+      - name: Install Go 1.27
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.0"
+          cache-dependency-path: tests/go-client/go.sum
+
+      - name: Check pure-Rust client formatting
+        run: >-
+          cargo fmt
+          --manifest-path tests/rust-client/Cargo.toml
+          -- --check
+
+      - name: Run Clippy on pure-Rust client
+        run: >-
+          cargo clippy --locked
+          --manifest-path tests/rust-client/Cargo.toml
+          --all-targets
+          -- -D warnings
+
+      - name: Check pure-Go client formatting
+        working-directory: tests/go-client
+        run: test -z "$(gofmt -l .)"
+
+      - name: Start container for black-box tests
+        run: >-
+          docker run --detach --rm
+          --name memkafka-acceptance
+          --publish 9092:9092
+          --publish 8081:8081
+          memkafka:ci
+
+      - name: Run Confluent.Kafka container black-box tests
+        env:
+          MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
+        run: >-
+          dotnet run --no-restore
+          --project tests/confluent/MemKafka.Acceptance.csproj
+
+      - name: Run Apache Kafka Java client black-box tests
+        env:
+          MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
+        run: >-
+          mvn --batch-mode
+          --file tests/java/pom.xml
+          test
+
+      - name: Run pure-Rust Kafka client black-box tests
+        env:
+          MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
+        run: >-
+          cargo test --locked
+          --manifest-path tests/rust-client/Cargo.toml
+
+      - name: Run pure-Go Kafka client black-box tests
+        env:
+          MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
+        working-directory: tests/go-client
+        run: go test -mod=readonly ./...
+
+      - name: Stop black-box test container
+        if: always()
+        continue-on-error: true
+        run: docker rm --force memkafka-acceptance

@@ -1,8 +1,8 @@
 # MemKafka v0.1 Design Specification
 
 **Date:** 2026-08-26  
-**Status:** Proposed for review  
-**Implementation:** Not started
+**Status:** In progress
+**Implementation:** Metadata and topic creation complete; Produce/Fetch is the next slice
 
 ## 1. Summary
 
@@ -14,7 +14,7 @@ The central product rule is:
 
 > A feature is supported only when an unmodified real client passes a black-box test against the `memkafka` binary.
 
-v0.1 provides real topics, partitions, offsets, Produce/Fetch behavior, classic consumer groups, cooperative-sticky rebalancing, offset commits, and an Avro-first Schema Registry subset. All state lives in memory and disappears when the process exits.
+v0.1 provides real topics, partitions, offsets, ordered at-least-once Produce/Fetch behavior within one process lifetime, classic consumer groups, cooperative-sticky rebalancing, offset commits, and an Avro-first Schema Registry subset. All state lives in memory and disappears when the process exits.
 
 ## 2. Goals
 
@@ -28,6 +28,7 @@ MemKafka v0.1 must:
 - auto-create unknown topics by default with exactly two partitions;
 - support explicit topic creation with a requested partition count and replication factor `1`;
 - preserve Kafka keys, values, headers, timestamps, compression, partition ordering, and offsets;
+- provide at-least-once delivery for acknowledged records within one MemKafka process lifetime when producers retry unknown outcomes and consumers commit only after processing;
 - implement real classic consumer-group coordination, including multiple members, generations, heartbeats, session expiry, rebalances, and committed offsets;
 - interoperate with the real `cooperative-sticky` assignor in librdkafka and make the selected protocol visible in logs;
 - provide the Schema Registry operations required by Confluent's Avro serializer and deserializer;
@@ -244,6 +245,14 @@ last_stable_offset = next_offset
 
 `ListOffsets` returns offset `0` for earliest and `next_offset` for latest.
 
+### 7.3 Delivery and ordering contract
+
+Within one running MemKafka process, a successful `acks=1` or `acks=all` Produce response means the complete batch was atomically appended before acknowledgement. Every acknowledged record remains fetchable until process shutdown. If the connection or response is lost after append, a retry may append a duplicate; MemKafka guarantees at-least-once delivery, not exactly-once delivery or deduplication.
+
+At-least-once delivery is an end-to-end contract with the real client: the producer must retry requests whose outcome is unknown, and the consumer must commit an offset only after processing the corresponding record. The guarantee does not apply to `acks=0`, a producer that abandons an unknown result, a consumer that commits before processing, or any state after MemKafka exits.
+
+Each partition's assigned offsets define its canonical total order. Appends to one partition are serialized, and Fetch returns stored records in ascending offset order without broker-side reordering. For concurrent producers, this guarantees assigned-offset order rather than wall-clock invocation order. Sequential sends that wait for acknowledgement on the same partition are observed in the same sequence.
+
 ## 8. Classic consumer groups
 
 v0.1 implements the classic Kafka consumer-group protocol as real broker behavior. A single-consumer shortcut is explicitly insufficient.
@@ -375,6 +384,7 @@ The shared state must preserve these invariants:
 - partition indexes are fixed after topic creation;
 - offsets are unique, monotonically increasing, and independent per partition;
 - batches are immutable after append;
+- an acknowledged batch remains fetchable in assigned-offset order until shutdown;
 - group generation changes and member transitions are atomic per group;
 - committed offsets are isolated by group and topic/partition;
 - schema IDs are globally unique and subject versions are ordered.
@@ -395,15 +405,19 @@ Testing has three layers:
 2. **State-machine and concurrency tests** validate interleavings, timeouts, rebalance generations, unique offsets, and wake-up behavior with deterministic time where possible.
 3. **Black-box compatibility tests** start the real compiled `memkafka` process and communicate only through its Kafka and HTTP endpoints using real clients.
 
-Internal Rust tests are necessary but never sufficient to claim client compatibility. The v0.1 acceptance suite pins a supported `Confluent.Kafka` minor line and the matching Confluent Schema Registry Avro packages. The release notes record those exact versions.
+Internal Rust tests are necessary but never sufficient to claim client compatibility. The v0.1 acceptance suite pins a supported `Confluent.Kafka` minor line and the matching Confluent Schema Registry Avro packages. Independent metadata, topic-creation, and baseline delivery checks also pin the Apache Kafka Java client, a pure-Rust client, and a pure-Go client. The release notes record those exact versions.
 
 ### 12.1 Broker and producer acceptance
+
+The first four metadata and topic-creation scenarios and the baseline publish/consume, ordering, and repeated-fetch scenarios run through all four pinned clients: Confluent.Kafka, Apache Kafka Java, pure Rust, and pure Go. The remaining advanced scenarios are mandatory through the primary Confluent.Kafka suite.
 
 - connect and negotiate API versions;
 - auto-create an unknown topic and observe exactly two partitions through the real metadata API;
 - create a topic explicitly with six partitions and replication factor `1`;
 - reject unsupported replication factors;
 - produce and consume one record and multiple batches;
+- publish ten numbered records sequentially to one explicit partition and consume the identical sequence at contiguous offsets;
+- fetch again from the same uncommitted offset and receive the records again, demonstrating at-least-once redelivery;
 - preserve keys, values, headers, timestamps, and per-partition ordering;
 - allocate monotonically increasing offsets across Produce requests;
 - keep offsets independent across partitions;
@@ -419,6 +433,8 @@ Internal Rust tests are necessary but never sufficient to claim client compatibi
 - manual `Assign()` works without group coordination;
 - earliest/latest reset behavior works;
 - commits are returned after restarting a consumer within the same process;
+- restart a consumer without committing and redeliver the previously processed record;
+- commit only after processing, restart the consumer, and resume after the committed record;
 - separate groups consume and commit independently;
 - two or more consumers receive non-overlapping assignments covering every partition;
 - joining and graceful leaving trigger rebalances;
@@ -477,7 +493,7 @@ The following are not implemented or simulated in v0.1:
 - legacy message-set formats predating RecordBatch magic `2`;
 - Protobuf or JSON Schema registry support;
 - schema references, compatibility enforcement, compatibility configuration changes, deletion, or semantic schema normalization;
-- guaranteed compatibility with Java, Go, Python, or other Kafka clients until each has its own black-box suite.
+- Java, Rust, and Go client compatibility beyond their explicitly tested slices, or guaranteed compatibility with Python and other Kafka clients until each has its own black-box suite.
 
 If an excluded Kafka feature is requested, MemKafka must return a clear protocol error or omit the capability from `ApiVersions`. It must not silently claim production semantics it does not provide.
 
@@ -488,11 +504,12 @@ v0.1 is complete when:
 1. a clean build on the pinned latest-stable Rust toolchain produces one distributable `memkafka` executable;
 2. the root Dockerfile produces a non-root runtime image containing that binary, and the documented `docker run` command exposes both endpoints;
 3. the binary starts both endpoints with the documented defaults and reports readiness;
-4. every mandatory black-box test in Section 12 passes against the pinned real Confluent clients;
+4. every mandatory black-box test in Section 12 passes against its pinned real clients;
 5. cooperative-sticky selection and rebalance lifecycle are visible in logs;
 6. unsupported features fail clearly without crashing or corrupting state;
 7. formatting and strict Clippy checks pass across all targets and features;
-8. the README states the compatibility target, native and container startup paths, ephemeral data model, Rust baseline, and exclusions without implying production suitability.
+8. the README states the compatibility target, native and container startup paths, ephemeral data model, Rust baseline, and exclusions without implying production suitability;
+9. acknowledged records remain fetchable in assigned-offset order for the lifetime of the process, and the real-client tests demonstrate at-least-once redelivery.
 
 Implementation must not expand v0.1 merely to imitate Kafka internals. New behavior enters scope only when required by the pinned real-client acceptance suite or added explicitly to this specification.
 

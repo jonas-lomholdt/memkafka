@@ -346,17 +346,23 @@ git commit -m "feat: create kafka topics explicitly"
 
 ---
 
-### Task 6: Confluent.Kafka 2.15.0 black-box acceptance
+### Task 6: Four-client black-box acceptance
 
 **Files:**
 - Create: `tests/confluent/MemKafka.Acceptance.csproj`
 - Create: `tests/confluent/Program.cs`
+- Create: `tests/java/pom.xml`
+- Create: `tests/java/src/test/java/io/memkafka/acceptance/KafkaJavaClientBlackBoxTest.java`
+- Create: `tests/rust-client/Cargo.toml`
+- Create: `tests/rust-client/tests/metadata.rs`
+- Create: `tests/go-client/go.mod`
+- Create: `tests/go-client/metadata_test.go`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `README.md`
 
 **Interfaces:**
-- Consumes: only the compiled `memkafka` process endpoints through Confluent.Kafka 2.15.0.
-- Produces: exit status `0` when negotiation, auto-creation, explicit creation, and rejection semantics pass.
+- Consumes: only the compiled `memkafka` process endpoints through Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6.
+- Produces: a separate passing result from each client for negotiation, auto-creation, explicit creation, and rejection semantics.
 
 - [ ] **Step 1: Add the pinned acceptance runner**
 
@@ -374,7 +380,11 @@ Create a `net10.0` console project with:
 4. print concise progress and return nonzero on any failed assertion;
 5. terminate the child process in `finally`.
 
-- [ ] **Step 2: Verify the black-box runner fails before final wiring fixes**
+- [ ] **Step 2: Add the independent Java, Rust, and Go runners**
+
+Pin Java 25 with Apache Kafka Java client 4.3.1, pure-Rust rskafka 0.6.0 on the repository Rust toolchain, and pure-Go franz-go 1.21.6 on Go 1.27. Each runner uses unique topic names and repeats the same three observable scenarios as the Confluent.Kafka runner without calling MemKafka internals.
+
+- [ ] **Step 3: Verify the black-box runners fail before final wiring fixes**
 
 Run:
 
@@ -383,17 +393,17 @@ cargo build
 dotnet run --project tests/confluent/MemKafka.Acceptance.csproj
 ```
 
-If it passes immediately, confirm it exercised the real binary by temporarily removing Metadata from the advertised API list and observing failure, then restore it.
+If a runner passes immediately, confirm it exercises the real binary by temporarily removing a required API from the advertised list and observing failure, then restore it. The Rust and Go suites must both fail when `CreateTopics` is hidden.
 
-- [ ] **Step 3: Fix only evidence-backed interop gaps**
+- [ ] **Step 4: Fix only evidence-backed interop gaps**
 
 For every observed librdkafka mismatch, add a focused Rust wire regression test first, verify it fails for the same protocol reason, then make the smallest handler/version change. Do not advertise extra APIs to suppress client warnings.
 
-- [ ] **Step 4: Add CI and truthful docs**
+- [ ] **Step 5: Add CI and truthful docs**
 
-Install .NET 10 in CI, restore the pinned project, build MemKafka, and run the acceptance runner after Rust tests. Update README status to list working `ApiVersions`, Metadata auto-creation, and CreateTopics, while stating Produce/Fetch/groups/Schema Registry remain unavailable.
+Install .NET 10, Java 25, and Go 1.27 in CI. Build MemKafka, run Confluent.Kafka against the native binary, build the Docker image, then run all four suites against the image. Update README status to list the four pinned clients and working APIs while stating Produce/Fetch/groups/Schema Registry remain unavailable.
 
-- [ ] **Step 5: Final verification and commit**
+- [ ] **Step 6: Final verification and commit**
 
 Run:
 
@@ -402,19 +412,21 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 dotnet run --project tests/confluent/MemKafka.Acceptance.csproj
+cargo test --locked --manifest-path tests/rust-client/Cargo.toml
+(cd tests/go-client && go test -mod=readonly ./...)
 docker build -t memkafka:local .
 ```
 
 Commit:
 
 ```bash
-git add tests/confluent .github/workflows/ci.yml README.md
-git commit -m "test: verify confluent metadata compatibility"
+git add tests .github/workflows/ci.yml README.md
+git commit -m "test: verify metadata across four clients"
 ```
 
 ## Plan Self-Review
 
-- Coverage: frame bounds, versioned headers, correlation IDs, truthful API negotiation, topic validation, atomic creation, metadata auto-creation, explicit creation, advertised endpoints, Kafka errors, real-client acceptance, CI, and README are included.
+- Coverage: frame bounds, versioned headers, correlation IDs, truthful API negotiation, topic validation, atomic creation, metadata auto-creation, explicit creation, advertised endpoints, Kafka errors, four independent real-client suites, CI, and README are included.
 - Deferred by phase boundary: Produce, Fetch, ListOffsets, partition logs, group coordination, and Schema Registry.
 - Type consistency: `BrokerState`, `TopicCatalog`, `DecodedRequest`, `Dispatcher`, and the three live API ranges are named consistently across tasks.
 - Placeholder scan: every behavior has a literal expected result and an executable verification command.

@@ -4,7 +4,7 @@
 
 MemKafka is becoming a fast, single-binary, in-memory Kafka-compatible broker for local development and integration tests. The same process will also expose a Confluent-compatible Schema Registry API.
 
-> **Current status:** runtime foundation only. Both ports open, configuration and shutdown work, but Kafka protocol handling and Schema Registry routes are not implemented yet.
+> **Current status:** topic discovery and creation work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Produce, Fetch, consumer groups, and Schema Registry routes are not implemented yet.
 
 MemKafka is test infrastructure. It is not intended for production, and all state disappears when the process exits.
 
@@ -66,14 +66,27 @@ docker run --rm \
 
 The v0.1 target is an unmodified real `Confluent.Kafka` client plus Confluent's Avro Schema Registry integration. Compatibility will only be claimed after black-box tests pass against pinned real client versions.
 
+The current black-box suite passes independently with Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, pure-Rust rskafka 0.6.0, and pure-Go franz-go 1.21.6 for:
+
+- `ApiVersions` negotiation;
+- Metadata lookup and automatic topic creation with two default partitions;
+- explicit topic creation with a caller-selected partition count;
+- clear rejection of unsupported replication factors.
+
+The broker currently advertises only `Metadata 0-9`, `ApiVersions 0-4`, and `CreateTopics 2-6`.
+
+CI runs the Confluent.Kafka suite against both the native binary and its Docker image, then runs separate Java 25, Rust, and Go 1.27 suites against the image.
+
 The planned subset includes:
 
-- topic creation, metadata, Produce, Fetch, offsets, and modern RecordBatch storage;
+- topic creation, metadata, ordered at-least-once Produce/Fetch within one process lifetime, offsets, and modern RecordBatch storage;
 - classic consumer groups with cooperative-sticky rebalancing;
 - in-memory offset commits;
 - the Schema Registry endpoints needed by Confluent's Avro serializer and deserializer.
 
 It excludes persistence, replication, transactions, authentication, TLS, retention, topic deletion, Protobuf, and JSON Schema.
+
+The planned at-least-once guarantee applies only to acknowledged records while the MemKafka process remains running. It intentionally permits duplicate delivery after an unknown Produce outcome and does not imply durability across shutdown.
 
 See the [v0.1 design specification](docs/2026-08-26-memkafka-design.md) for the exact acceptance contract and exclusions.
 
