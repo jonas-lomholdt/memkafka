@@ -1,5 +1,7 @@
 # MemKafka
 
+[![CI](https://github.com/jonas-lomholdt/memkafka/actions/workflows/ci.yml/badge.svg)](https://github.com/jonas-lomholdt/memkafka/actions/workflows/ci.yml)
+
 MemKafka is becoming a fast, single-binary, in-memory Kafka-compatible broker for local development and integration tests. The same process will also expose a Confluent-compatible Schema Registry API.
 
 > **Current status:** runtime foundation only. Both ports open, configuration and shutdown work, but Kafka protocol handling and Schema Registry routes are not implemented yet.
@@ -74,3 +76,7 @@ The planned subset includes:
 It excludes persistence, replication, transactions, authentication, TLS, retention, topic deletion, Protobuf, and JSON Schema.
 
 See the [v0.1 design specification](docs/2026-08-26-memkafka-design.md) for the exact acceptance contract and exclusions.
+
+## License
+
+MemKafka is open source under the [MIT License](LICENSE). Copyright © 2026 Jonas Lomholdt.
