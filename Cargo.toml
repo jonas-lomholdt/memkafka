@@ -13,7 +13,7 @@ axum = "0.8"
 bytes = "1"
 clap = { version = "4.5", features = ["derive"] }
 kafka-protocol = { version = "0.18.0", default-features = false, features = ["broker", "client", "messages_enums"] }
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

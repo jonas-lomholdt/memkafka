@@ -8,6 +8,8 @@ use std::{
 
 use tokio::sync::RwLock;
 
+use super::partition::PartitionLog;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TopicMetadata {
     pub name: String,
@@ -38,7 +40,25 @@ impl Error for TopicError {}
 #[derive(Clone, Debug)]
 pub struct TopicCatalog {
     default_partitions: NonZeroU32,
-    topics: Arc<RwLock<BTreeMap<String, TopicMetadata>>>,
+    topics: Arc<RwLock<BTreeMap<String, TopicEntry>>>,
+}
+
+#[derive(Debug)]
+struct TopicEntry {
+    metadata: TopicMetadata,
+    partitions: Vec<Arc<PartitionLog>>,
+}
+
+impl TopicEntry {
+    fn new(metadata: TopicMetadata) -> Self {
+        let partitions = (0..metadata.partition_count)
+            .map(|_| Arc::new(PartitionLog::default()))
+            .collect();
+        Self {
+            metadata,
+            partitions,
+        }
+    }
 }
 
 impl TopicCatalog {
@@ -59,7 +79,7 @@ impl TopicCatalog {
         let mut topics = self.topics.write().await;
         match topics.entry(name.to_owned()) {
             Entry::Vacant(entry) => {
-                entry.insert(metadata.clone());
+                entry.insert(TopicEntry::new(metadata.clone()));
                 Ok(metadata)
             }
             Entry::Occupied(_) => Err(TopicError::AlreadyExists),
@@ -87,27 +107,43 @@ impl TopicCatalog {
     ) -> Result<Option<TopicMetadata>, TopicError> {
         validate_name(name)?;
 
-        if let Some(metadata) = self.topics.read().await.get(name).cloned() {
-            return Ok(Some(metadata));
+        if let Some(entry) = self.topics.read().await.get(name) {
+            return Ok(Some(entry.metadata.clone()));
         }
         if !allow_auto_create {
             return Ok(None);
         }
 
         let mut topics = self.topics.write().await;
-        if let Some(metadata) = topics.get(name) {
-            return Ok(Some(metadata.clone()));
+        if let Some(entry) = topics.get(name) {
+            return Ok(Some(entry.metadata.clone()));
         }
         let metadata = TopicMetadata {
             name: name.to_owned(),
             partition_count: self.default_partitions.get(),
         };
-        topics.insert(name.to_owned(), metadata.clone());
+        topics.insert(name.to_owned(), TopicEntry::new(metadata.clone()));
         Ok(Some(metadata))
     }
 
     pub async fn list(&self) -> Vec<TopicMetadata> {
-        self.topics.read().await.values().cloned().collect()
+        self.topics
+            .read()
+            .await
+            .values()
+            .map(|entry| entry.metadata.clone())
+            .collect()
+    }
+
+    pub(crate) async fn partition(&self, topic: &str, partition: i32) -> Option<Arc<PartitionLog>> {
+        let partition = usize::try_from(partition).ok()?;
+        self.topics
+            .read()
+            .await
+            .get(topic)?
+            .partitions
+            .get(partition)
+            .cloned()
     }
 }
 
@@ -149,7 +185,7 @@ fn validate_name(name: &str) -> Result<(), TopicError> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::{num::NonZeroU32, sync::Arc};
 
     use tokio::task::JoinSet;
 
@@ -251,6 +287,28 @@ mod tests {
             None
         );
         assert!(catalog.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn created_topics_own_one_distinct_log_per_partition() {
+        let catalog = catalog_with_two_defaults();
+        catalog
+            .create_explicit("events", 3, 1)
+            .await
+            .expect("create topic");
+
+        let zero = catalog.partition("events", 0).await.expect("partition 0");
+        let one = catalog.partition("events", 1).await.expect("partition 1");
+        let two = catalog.partition("events", 2).await.expect("partition 2");
+
+        assert!(!Arc::ptr_eq(&zero, &one));
+        assert!(!Arc::ptr_eq(&one, &two));
+        assert_eq!(zero.next_offset().await, 0);
+        assert_eq!(one.next_offset().await, 0);
+        assert_eq!(two.next_offset().await, 0);
+        assert!(catalog.partition("events", -1).await.is_none());
+        assert!(catalog.partition("events", 3).await.is_none());
+        assert!(catalog.partition("missing", 0).await.is_none());
     }
 
     fn catalog_with_two_defaults() -> TopicCatalog {

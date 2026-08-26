@@ -4,7 +4,9 @@ use kafka_protocol::messages::{ApiKey, RequestKind, ResponseKind};
 
 use crate::broker::BrokerState;
 
-use super::{api_versions, codec::DecodedRequest, create_topics, metadata};
+use super::{
+    api_versions, codec::DecodedRequest, create_topics, fetch, list_offsets, metadata, produce,
+};
 
 #[derive(Clone, Debug)]
 pub struct Dispatcher {
@@ -40,6 +42,33 @@ impl Dispatcher {
                 match &request.body {
                     RequestKind::CreateTopics(body) => {
                         Ok(create_topics::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::Produce => {
+                require_version(request.api_key, version, &produce::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::Produce(body) => {
+                        Ok(produce::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::ListOffsets => {
+                require_version(request.api_key, version, &list_offsets::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::ListOffsets(body) => {
+                        Ok(list_offsets::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::Fetch => {
+                require_version(request.api_key, version, &fetch::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::Fetch(body) => {
+                        Ok(fetch::response(body, &self.broker).await.into())
                     }
                     _ => Err(DispatchError::BodyMismatch(request.api_key)),
                 }

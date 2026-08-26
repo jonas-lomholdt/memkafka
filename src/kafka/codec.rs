@@ -12,6 +12,12 @@ pub struct DecodedRequest {
     pub body: RequestKind,
 }
 
+impl DecodedRequest {
+    pub fn expects_response(&self) -> bool {
+        !matches!(&self.body, RequestKind::Produce(request) if request.acks == 0)
+    }
+}
+
 pub fn decode_request(mut frame: Bytes) -> Result<DecodedRequest> {
     let header = decode_request_header_from_buffer(&mut frame)
         .context("failed to decode Kafka request header")?;

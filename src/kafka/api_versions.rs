@@ -1,6 +1,6 @@
 use kafka_protocol::messages::{ApiKey, ApiVersionsResponse, api_versions_response::ApiVersion};
 
-use super::{create_topics, metadata};
+use super::{create_topics, fetch, list_offsets, metadata, produce};
 
 pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=4;
 
@@ -9,6 +9,9 @@ pub(crate) fn response() -> ApiVersionsResponse {
         api_range(ApiKey::Metadata, &metadata::VERSION_RANGE),
         api_range(ApiKey::ApiVersions, &VERSION_RANGE),
         api_range(ApiKey::CreateTopics, &create_topics::VERSION_RANGE),
+        api_range(ApiKey::Produce, &produce::VERSION_RANGE),
+        api_range(ApiKey::ListOffsets, &list_offsets::VERSION_RANGE),
+        api_range(ApiKey::Fetch, &fetch::VERSION_RANGE),
     ])
 }
 

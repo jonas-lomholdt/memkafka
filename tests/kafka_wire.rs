@@ -4,14 +4,25 @@ use bytes::{Bytes, BytesMut};
 use clap::Parser;
 use kafka_protocol::{
     messages::{
-        ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, MetadataRequest, RequestHeader,
-        RequestKind, ResponseHeader, ResponseKind, TopicName,
+        ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, FetchRequest,
+        ListOffsetsRequest, MetadataRequest, ProduceRequest, RequestHeader, RequestKind,
+        ResponseHeader, ResponseKind, TopicName, TransactionalId,
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
+        fetch_request::{FetchPartition, FetchTopic},
+        fetch_response::FetchResponse,
+        list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
+        list_offsets_response::ListOffsetsResponse,
         metadata_request::MetadataRequestTopic,
         metadata_response::MetadataResponse,
+        produce_request::{PartitionProduceData, TopicProduceData},
+        produce_response::ProduceResponse,
     },
     protocol::{Decodable, StrBytes, encode_request_header_into_buffer},
+    records::{
+        Compression, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, Record,
+        RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+    },
 };
 use memkafka::kafka::{
     codec::{decode_request, encode_response},
@@ -23,7 +34,11 @@ use memkafka::{
     config::{AdvertisedAddress, Cli, Config},
     server::serve,
 };
-use tokio::{net::TcpStream, sync::oneshot, time::timeout};
+use tokio::{
+    net::TcpStream,
+    sync::oneshot,
+    time::{advance, timeout},
+};
 
 const API_VERSIONS_VERSION: i16 = 3;
 
@@ -48,10 +63,13 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_eq!(header.correlation_id, 42);
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
-    assert_eq!(response.api_keys.len(), 3);
+    assert_eq!(response.api_keys.len(), 6);
     assert_api_range(&response, ApiKey::Metadata, 0, 9);
     assert_api_range(&response, ApiKey::ApiVersions, 0, 4);
     assert_api_range(&response, ApiKey::CreateTopics, 2, 6);
+    assert_api_range(&response, ApiKey::Produce, 3, 7);
+    assert_api_range(&response, ApiKey::ListOffsets, 1, 3);
+    assert_api_range(&response, ApiKey::Fetch, 4, 4);
 }
 
 #[tokio::test]
@@ -87,10 +105,13 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         let (header, body) = decode_api_versions_response(response);
 
         assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(body.api_keys.len(), 3);
+        assert_eq!(body.api_keys.len(), 6);
         assert_api_range(&body, ApiKey::Metadata, 0, 9);
         assert_api_range(&body, ApiKey::ApiVersions, 0, 4);
         assert_api_range(&body, ApiKey::CreateTopics, 2, 6);
+        assert_api_range(&body, ApiKey::Produce, 3, 7);
+        assert_api_range(&body, ApiKey::ListOffsets, 1, 3);
+        assert_api_range(&body, ApiKey::Fetch, 4, 4);
     }
 
     shutdown_tx.send(()).expect("request server shutdown");
@@ -390,6 +411,517 @@ async fn create_topics_validate_only_reports_success_without_mutating() {
     assert!(broker.topics().list().await.is_empty());
 }
 
+#[tokio::test]
+async fn produce_v7_appends_batches_and_returns_contiguous_base_offsets() {
+    let broker = test_broker_state(true);
+    let dispatcher = Dispatcher::new(broker.clone());
+
+    let first = dispatch_produce_request(
+        &dispatcher,
+        131,
+        -1,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, record_batch(&["first", "second"]))],
+        )],
+    )
+    .await;
+    let second = dispatch_produce_request(
+        &dispatcher,
+        132,
+        1,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, record_batch(&["third"]))],
+        )],
+    )
+    .await;
+
+    assert_eq!(first.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(first.responses[0].partition_responses[0].base_offset, 0);
+    assert_eq!(second.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(second.responses[0].partition_responses[0].base_offset, 2);
+    assert_eq!(broker.topics().list().await[0].partition_count, 2);
+}
+
+#[tokio::test]
+async fn produce_v7_maps_request_and_partition_errors_without_partial_corruption() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("events", 1, 1)
+        .await
+        .expect("create topic");
+    let dispatcher = Dispatcher::new(broker);
+
+    let invalid_acks = dispatch_produce_request(
+        &dispatcher,
+        133,
+        2,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, record_batch(&["not-appended"]))],
+        )],
+    )
+    .await;
+    assert_eq!(
+        invalid_acks.responses[0].partition_responses[0].error_code,
+        21
+    );
+
+    let transactional = dispatch_produce_request(
+        &dispatcher,
+        134,
+        -1,
+        Some(TransactionalId::from(StrBytes::from_static_str("tx"))),
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, record_batch(&["not-appended"]))],
+        )],
+    )
+    .await;
+    assert_eq!(
+        transactional.responses[0].partition_responses[0].error_code,
+        43
+    );
+
+    let mixed = dispatch_produce_request(
+        &dispatcher,
+        135,
+        -1,
+        None,
+        vec![
+            produce_topic(
+                "events",
+                vec![
+                    produce_partition(0, record_batch(&["appended"])),
+                    produce_partition(9, record_batch(&["unknown-partition"])),
+                ],
+            ),
+            produce_topic(
+                "missing",
+                vec![produce_partition(0, record_batch(&["unknown-topic"]))],
+            ),
+            produce_topic(
+                "events",
+                vec![produce_partition(0, Bytes::from_static(b"malformed"))],
+            ),
+        ],
+    )
+    .await;
+
+    assert_eq!(mixed.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(mixed.responses[0].partition_responses[0].base_offset, 0);
+    assert_eq!(mixed.responses[0].partition_responses[1].error_code, 3);
+    assert_eq!(mixed.responses[1].partition_responses[0].error_code, 3);
+    assert_eq!(mixed.responses[2].partition_responses[0].error_code, 2);
+
+    let after_errors = dispatch_produce_request(
+        &dispatcher,
+        136,
+        1,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, record_batch(&["after-errors"]))],
+        )],
+    )
+    .await;
+    assert_eq!(
+        after_errors.responses[0].partition_responses[0].base_offset,
+        1
+    );
+}
+
+#[tokio::test]
+async fn acks_zero_appends_without_writing_a_produce_response() {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut server = tokio::spawn(serve(ephemeral_config(), ready_tx, async {
+        let _ = shutdown_rx.await;
+    }));
+    let endpoints = match timeout(Duration::from_secs(1), ready_rx).await {
+        Ok(Ok(endpoints)) => endpoints,
+        ready_result => {
+            let server_result = timeout(Duration::from_secs(1), &mut server).await;
+            panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
+        }
+    };
+    let mut connection = TcpStream::connect(endpoints.kafka)
+        .await
+        .expect("connect to Kafka endpoint");
+
+    write_frame(
+        &mut connection,
+        &encode_produce_request(
+            140,
+            0,
+            None,
+            vec![produce_topic(
+                "fire-and-forget",
+                vec![produce_partition(0, record_batch(&["stored"]))],
+            )],
+        ),
+    )
+    .await
+    .expect("write acks=0 Produce frame");
+    write_frame(&mut connection, &encode_api_versions_request(141))
+        .await
+        .expect("write ApiVersions frame");
+
+    let response = timeout(Duration::from_secs(1), read_frame(&mut connection))
+        .await
+        .expect("ApiVersions response timed out")
+        .expect("read Kafka response")
+        .expect("server closed before ApiVersions response");
+    let (header, _) = decode_api_versions_response(response);
+    assert_eq!(header.correlation_id, 141);
+
+    write_frame(
+        &mut connection,
+        &encode_fetch_request(
+            142,
+            0,
+            1,
+            i32::MAX,
+            vec![fetch_topic("fire-and-forget", vec![(0, 0, i32::MAX)])],
+        ),
+    )
+    .await
+    .expect("write Fetch frame");
+    let response = timeout(Duration::from_secs(1), read_frame(&mut connection))
+        .await
+        .expect("Fetch response timed out")
+        .expect("read Fetch response")
+        .expect("server closed before Fetch response");
+    let (header, response) = decode_fetch_response(response);
+    assert_eq!(header.correlation_id, 142);
+    let records = decode_records(
+        response.responses[0].partitions[0]
+            .records
+            .clone()
+            .expect("record bytes"),
+    );
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].value, Some(Bytes::from_static(b"stored")));
+
+    shutdown_tx.send(()).expect("request server shutdown");
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server shutdown timed out")
+        .expect("server task panicked")
+        .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn list_offsets_v3_reports_earliest_latest_and_partition_errors() {
+    let broker = test_broker_state(true);
+    let dispatcher = Dispatcher::new(broker);
+    let produced = dispatch_produce_request(
+        &dispatcher,
+        150,
+        -1,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, record_batch(&["zero", "one", "two"]))],
+        )],
+    )
+    .await;
+    assert_eq!(produced.responses[0].partition_responses[0].error_code, 0);
+
+    let response = dispatch_list_offsets_request(
+        &dispatcher,
+        151,
+        vec![
+            list_offsets_topic("events", vec![(0, -2), (0, -1), (0, 1234), (9, -1)]),
+            list_offsets_topic("missing", vec![(0, -1)]),
+        ],
+    )
+    .await;
+    let events = &response.topics[0].partitions;
+
+    assert_eq!((events[0].error_code, events[0].offset), (0, 0));
+    assert_eq!((events[1].error_code, events[1].offset), (0, 3));
+    assert_eq!((events[2].error_code, events[2].offset), (43, -1));
+    assert_eq!((events[3].error_code, events[3].offset), (3, -1));
+    assert_eq!(response.topics[1].partitions[0].error_code, 3);
+    assert_eq!(response.topics[1].partitions[0].offset, -1);
+}
+
+#[tokio::test]
+async fn fetch_v4_returns_ordered_records_watermarks_and_partition_errors() {
+    let broker = test_broker_state(true);
+    let dispatcher = Dispatcher::new(broker);
+    dispatch_produce_request(
+        &dispatcher,
+        160,
+        -1,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, record_batch(&["zero", "one", "two"]))],
+        )],
+    )
+    .await;
+
+    let response = dispatch_fetch_request(
+        &dispatcher,
+        161,
+        0,
+        1,
+        i32::MAX,
+        vec![
+            fetch_topic("events", vec![(0, 0, i32::MAX), (1, -1, i32::MAX)]),
+            fetch_topic("missing", vec![(0, 0, i32::MAX)]),
+        ],
+    )
+    .await;
+    let events = &response.responses[0].partitions;
+    assert_eq!(events[0].error_code, 0);
+    assert_eq!(events[0].high_watermark, 3);
+    assert_eq!(events[0].last_stable_offset, 3);
+    assert_eq!(events[0].aborted_transactions, Some(Vec::new()));
+
+    let records = decode_records(events[0].records.clone().expect("record bytes"));
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        records
+            .iter()
+            .map(
+                |record| String::from_utf8_lossy(record.value.as_ref().expect("value"))
+                    .into_owned()
+            )
+            .collect::<Vec<_>>(),
+        vec!["zero", "one", "two"]
+    );
+    assert_eq!(records[0].key, Some(Bytes::from_static(b"key-0")));
+    assert_eq!(records[0].timestamp, 1_700_000_000_000);
+    assert_eq!(
+        records[0].headers.get(&StrBytes::from_static_str("source")),
+        Some(&Some(Bytes::from_static(b"wire-test")))
+    );
+    assert_eq!(events[1].error_code, 1);
+    assert_eq!(response.responses[1].partitions[0].error_code, 3);
+
+    let at_end = dispatch_fetch_request(
+        &dispatcher,
+        162,
+        0,
+        1,
+        i32::MAX,
+        vec![fetch_topic("events", vec![(0, 3, i32::MAX)])],
+    )
+    .await;
+    let at_end = &at_end.responses[0].partitions[0];
+    assert_eq!(at_end.error_code, 0);
+    assert_eq!(at_end.high_watermark, 3);
+    assert!(at_end.records.as_ref().is_none_or(Bytes::is_empty));
+
+    let past_end = dispatch_fetch_request(
+        &dispatcher,
+        163,
+        0,
+        1,
+        i32::MAX,
+        vec![fetch_topic("events", vec![(0, 4, i32::MAX)])],
+    )
+    .await;
+    assert_eq!(past_end.responses[0].partitions[0].error_code, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fetch_v4_waits_for_min_bytes_and_wakes_after_appends() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("events", 1, 1)
+        .await
+        .expect("create topic");
+    let dispatcher = Dispatcher::new(broker);
+    let first = record_batch(&["first"]);
+    let second = record_batch(&["second"]);
+    let min_bytes = i32::try_from(first.len() + second.len()).expect("small batches");
+
+    let waiting = {
+        let dispatcher = dispatcher.clone();
+        tokio::spawn(async move {
+            dispatch_fetch_request(
+                &dispatcher,
+                164,
+                1_000,
+                min_bytes,
+                i32::MAX,
+                vec![fetch_topic("events", vec![(0, 0, i32::MAX)])],
+            )
+            .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+
+    dispatch_produce_request(
+        &dispatcher,
+        165,
+        -1,
+        None,
+        vec![produce_topic("events", vec![produce_partition(0, first)])],
+    )
+    .await;
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+
+    dispatch_produce_request(
+        &dispatcher,
+        166,
+        -1,
+        None,
+        vec![produce_topic("events", vec![produce_partition(0, second)])],
+    )
+    .await;
+    let response = waiting.await.expect("Fetch task");
+    assert_eq!(
+        decode_records(
+            response.responses[0].partitions[0]
+                .records
+                .clone()
+                .expect("record bytes")
+        )
+        .len(),
+        2
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn fetch_v4_returns_empty_when_max_wait_expires() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("events", 1, 1)
+        .await
+        .expect("create topic");
+    let dispatcher = Dispatcher::new(broker);
+    let waiting = tokio::spawn(async move {
+        dispatch_fetch_request(
+            &dispatcher,
+            167,
+            100,
+            1,
+            i32::MAX,
+            vec![fetch_topic("events", vec![(0, 0, i32::MAX)])],
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+
+    advance(Duration::from_millis(99)).await;
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    advance(Duration::from_millis(1)).await;
+
+    let response = waiting.await.expect("Fetch task");
+    let partition = &response.responses[0].partitions[0];
+    assert_eq!(partition.error_code, 0);
+    assert!(partition.records.as_ref().is_none_or(Bytes::is_empty));
+}
+
+#[tokio::test]
+async fn fetch_v4_honors_byte_limits_but_returns_the_first_oversized_batch() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("events", 2, 1)
+        .await
+        .expect("create topic");
+    let dispatcher = Dispatcher::new(broker);
+    let first = record_batch(&["first"]);
+    let first_len = i32::try_from(first.len()).expect("small batch");
+    dispatch_produce_request(
+        &dispatcher,
+        168,
+        -1,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![
+                produce_partition(0, first),
+                produce_partition(1, record_batch(&["other-partition"])),
+            ],
+        )],
+    )
+    .await;
+    dispatch_produce_request(
+        &dispatcher,
+        169,
+        -1,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, record_batch(&["second"]))],
+        )],
+    )
+    .await;
+
+    let partition_limited = dispatch_fetch_request(
+        &dispatcher,
+        170,
+        0,
+        1,
+        i32::MAX,
+        vec![fetch_topic("events", vec![(0, 0, first_len)])],
+    )
+    .await;
+    assert_eq!(
+        decode_records(
+            partition_limited.responses[0].partitions[0]
+                .records
+                .clone()
+                .expect("record bytes")
+        )
+        .len(),
+        1
+    );
+
+    let request_limited = dispatch_fetch_request(
+        &dispatcher,
+        171,
+        0,
+        1,
+        1,
+        vec![fetch_topic(
+            "events",
+            vec![(0, 0, i32::MAX), (1, 0, i32::MAX)],
+        )],
+    )
+    .await;
+    assert_eq!(
+        decode_records(
+            request_limited.responses[0].partitions[0]
+                .records
+                .clone()
+                .expect("first oversized batch")
+        )
+        .len(),
+        1
+    );
+    assert!(
+        request_limited.responses[0].partitions[1]
+            .records
+            .as_ref()
+            .is_none_or(Bytes::is_empty)
+    );
+}
+
 fn ephemeral_config() -> Config {
     Config::try_from(
         Cli::try_parse_from([
@@ -535,6 +1067,247 @@ fn encode_create_topics_request(
     encoded.freeze()
 }
 
+fn encode_produce_request(
+    correlation_id: i32,
+    acks: i16,
+    transactional_id: Option<TransactionalId>,
+    topics: Vec<TopicProduceData>,
+) -> Bytes {
+    const VERSION: i16 = 7;
+    let header = RequestHeader::default()
+        .with_request_api_key(ApiKey::Produce as i16)
+        .with_request_api_version(VERSION)
+        .with_correlation_id(correlation_id)
+        .with_client_id(Some(StrBytes::from_static_str("memkafka-wire-test")));
+    let request = ProduceRequest::default()
+        .with_transactional_id(transactional_id)
+        .with_acks(acks)
+        .with_timeout_ms(1_000)
+        .with_topic_data(topics);
+    let mut encoded = BytesMut::new();
+
+    encode_request_header_into_buffer(&mut encoded, &header).expect("encode request header");
+    RequestKind::Produce(request)
+        .encode(&mut encoded, VERSION)
+        .expect("encode Produce body");
+    encoded.freeze()
+}
+
+async fn dispatch_produce_request(
+    dispatcher: &Dispatcher,
+    correlation_id: i32,
+    acks: i16,
+    transactional_id: Option<TransactionalId>,
+    topics: Vec<TopicProduceData>,
+) -> ProduceResponse {
+    let decoded = decode_request(encode_produce_request(
+        correlation_id,
+        acks,
+        transactional_id,
+        topics,
+    ))
+    .expect("decode Produce request");
+    let response = dispatcher
+        .dispatch(&decoded)
+        .await
+        .expect("dispatch Produce request");
+    let encoded = encode_response(
+        decoded.api_key,
+        decoded.header.request_api_version,
+        decoded.header.correlation_id,
+        &response,
+    )
+    .expect("encode Produce response");
+    let (header, response) = decode_produce_response(encoded);
+    assert_eq!(header.correlation_id, correlation_id);
+    response
+}
+
+fn encode_list_offsets_request(correlation_id: i32, topics: Vec<ListOffsetsTopic>) -> Bytes {
+    const VERSION: i16 = 3;
+    let header = RequestHeader::default()
+        .with_request_api_key(ApiKey::ListOffsets as i16)
+        .with_request_api_version(VERSION)
+        .with_correlation_id(correlation_id)
+        .with_client_id(Some(StrBytes::from_static_str("memkafka-wire-test")));
+    let request = ListOffsetsRequest::default()
+        .with_replica_id(BrokerId::from(-1))
+        .with_isolation_level(0)
+        .with_topics(topics);
+    let mut encoded = BytesMut::new();
+
+    encode_request_header_into_buffer(&mut encoded, &header).expect("encode request header");
+    RequestKind::ListOffsets(request)
+        .encode(&mut encoded, VERSION)
+        .expect("encode ListOffsets body");
+    encoded.freeze()
+}
+
+async fn dispatch_list_offsets_request(
+    dispatcher: &Dispatcher,
+    correlation_id: i32,
+    topics: Vec<ListOffsetsTopic>,
+) -> ListOffsetsResponse {
+    let decoded = decode_request(encode_list_offsets_request(correlation_id, topics))
+        .expect("decode ListOffsets request");
+    let response = dispatcher
+        .dispatch(&decoded)
+        .await
+        .expect("dispatch ListOffsets request");
+    let encoded = encode_response(
+        decoded.api_key,
+        decoded.header.request_api_version,
+        decoded.header.correlation_id,
+        &response,
+    )
+    .expect("encode ListOffsets response");
+    let (header, response) = decode_list_offsets_response(encoded);
+    assert_eq!(header.correlation_id, correlation_id);
+    response
+}
+
+fn encode_fetch_request(
+    correlation_id: i32,
+    max_wait_ms: i32,
+    min_bytes: i32,
+    max_bytes: i32,
+    topics: Vec<FetchTopic>,
+) -> Bytes {
+    const VERSION: i16 = 4;
+    let header = RequestHeader::default()
+        .with_request_api_key(ApiKey::Fetch as i16)
+        .with_request_api_version(VERSION)
+        .with_correlation_id(correlation_id)
+        .with_client_id(Some(StrBytes::from_static_str("memkafka-wire-test")));
+    let request = FetchRequest::default()
+        .with_replica_id(BrokerId::from(-1))
+        .with_max_wait_ms(max_wait_ms)
+        .with_min_bytes(min_bytes)
+        .with_max_bytes(max_bytes)
+        .with_isolation_level(0)
+        .with_topics(topics);
+    let mut encoded = BytesMut::new();
+
+    encode_request_header_into_buffer(&mut encoded, &header).expect("encode request header");
+    RequestKind::Fetch(request)
+        .encode(&mut encoded, VERSION)
+        .expect("encode Fetch body");
+    encoded.freeze()
+}
+
+async fn dispatch_fetch_request(
+    dispatcher: &Dispatcher,
+    correlation_id: i32,
+    max_wait_ms: i32,
+    min_bytes: i32,
+    max_bytes: i32,
+    topics: Vec<FetchTopic>,
+) -> FetchResponse {
+    let decoded = decode_request(encode_fetch_request(
+        correlation_id,
+        max_wait_ms,
+        min_bytes,
+        max_bytes,
+        topics,
+    ))
+    .expect("decode Fetch request");
+    let response = dispatcher
+        .dispatch(&decoded)
+        .await
+        .expect("dispatch Fetch request");
+    let encoded = encode_response(
+        decoded.api_key,
+        decoded.header.request_api_version,
+        decoded.header.correlation_id,
+        &response,
+    )
+    .expect("encode Fetch response");
+    let (header, response) = decode_fetch_response(encoded);
+    assert_eq!(header.correlation_id, correlation_id);
+    response
+}
+
+fn produce_topic(name: &'static str, partitions: Vec<PartitionProduceData>) -> TopicProduceData {
+    TopicProduceData::default()
+        .with_name(TopicName::from(StrBytes::from_static_str(name)))
+        .with_partition_data(partitions)
+}
+
+fn produce_partition(index: i32, records: Bytes) -> PartitionProduceData {
+    PartitionProduceData::default()
+        .with_index(index)
+        .with_records(Some(records))
+}
+
+fn list_offsets_topic(name: &'static str, partitions: Vec<(i32, i64)>) -> ListOffsetsTopic {
+    ListOffsetsTopic::default()
+        .with_name(TopicName::from(StrBytes::from_static_str(name)))
+        .with_partitions(
+            partitions
+                .into_iter()
+                .map(|(partition_index, timestamp)| {
+                    ListOffsetsPartition::default()
+                        .with_partition_index(partition_index)
+                        .with_timestamp(timestamp)
+                })
+                .collect(),
+        )
+}
+
+fn fetch_topic(name: &'static str, partitions: Vec<(i32, i64, i32)>) -> FetchTopic {
+    FetchTopic::default()
+        .with_topic(TopicName::from(StrBytes::from_static_str(name)))
+        .with_partitions(
+            partitions
+                .into_iter()
+                .map(|(partition, fetch_offset, partition_max_bytes)| {
+                    FetchPartition::default()
+                        .with_partition(partition)
+                        .with_fetch_offset(fetch_offset)
+                        .with_partition_max_bytes(partition_max_bytes)
+                })
+                .collect(),
+        )
+}
+
+fn record_batch(values: &[&str]) -> Bytes {
+    let records = values
+        .iter()
+        .enumerate()
+        .map(|(offset, value)| Record {
+            transactional: false,
+            control: false,
+            delete_horizon: false,
+            partition_leader_epoch: NO_PARTITION_LEADER_EPOCH,
+            producer_id: NO_PRODUCER_ID,
+            producer_epoch: NO_PRODUCER_EPOCH,
+            timestamp_type: TimestampType::Creation,
+            offset: offset as i64,
+            sequence: offset as i32,
+            timestamp: 1_700_000_000_000 + offset as i64,
+            key: Some(Bytes::from(format!("key-{offset}"))),
+            value: Some(Bytes::copy_from_slice(value.as_bytes())),
+            headers: [(
+                StrBytes::from_static_str("source"),
+                Some(Bytes::from_static(b"wire-test")),
+            )]
+            .into_iter()
+            .collect(),
+        })
+        .collect::<Vec<_>>();
+    let mut encoded = BytesMut::new();
+    RecordBatchEncoder::encode(
+        &mut encoded,
+        &records,
+        &RecordEncodeOptions {
+            version: 2,
+            compression: Compression::None,
+        },
+    )
+    .expect("encode RecordBatch");
+    encoded.freeze()
+}
+
 async fn dispatch_create_topics_request(
     dispatcher: &Dispatcher,
     correlation_id: i32,
@@ -614,6 +1387,60 @@ fn decode_create_topics_response(mut encoded: Bytes) -> (ResponseHeader, CreateT
     };
     assert!(encoded.is_empty(), "response has trailing bytes");
     (header, response)
+}
+
+fn decode_produce_response(mut encoded: Bytes) -> (ResponseHeader, ProduceResponse) {
+    const VERSION: i16 = 7;
+    let header = ResponseHeader::decode(
+        &mut encoded,
+        ApiKey::Produce.response_header_version(VERSION),
+    )
+    .expect("decode response header");
+    let response = ResponseKind::decode(ApiKey::Produce, &mut encoded, VERSION)
+        .expect("decode Produce response body");
+    let ResponseKind::Produce(response) = response else {
+        panic!("expected Produce response");
+    };
+    assert!(encoded.is_empty(), "response has trailing bytes");
+    (header, response)
+}
+
+fn decode_list_offsets_response(mut encoded: Bytes) -> (ResponseHeader, ListOffsetsResponse) {
+    const VERSION: i16 = 3;
+    let header = ResponseHeader::decode(
+        &mut encoded,
+        ApiKey::ListOffsets.response_header_version(VERSION),
+    )
+    .expect("decode response header");
+    let response = ResponseKind::decode(ApiKey::ListOffsets, &mut encoded, VERSION)
+        .expect("decode ListOffsets response body");
+    let ResponseKind::ListOffsets(response) = response else {
+        panic!("expected ListOffsets response");
+    };
+    assert!(encoded.is_empty(), "response has trailing bytes");
+    (header, response)
+}
+
+fn decode_fetch_response(mut encoded: Bytes) -> (ResponseHeader, FetchResponse) {
+    const VERSION: i16 = 4;
+    let header =
+        ResponseHeader::decode(&mut encoded, ApiKey::Fetch.response_header_version(VERSION))
+            .expect("decode response header");
+    let response = ResponseKind::decode(ApiKey::Fetch, &mut encoded, VERSION)
+        .expect("decode Fetch response body");
+    let ResponseKind::Fetch(response) = response else {
+        panic!("expected Fetch response");
+    };
+    assert!(encoded.is_empty(), "response has trailing bytes");
+    (header, response)
+}
+
+fn decode_records(mut encoded: Bytes) -> Vec<Record> {
+    RecordBatchDecoder::decode_all(&mut encoded)
+        .expect("decode RecordBatches")
+        .into_iter()
+        .flat_map(|batch| batch.records)
+        .collect()
 }
 
 fn assert_api_range(

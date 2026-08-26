@@ -1,7 +1,10 @@
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, sync::Arc};
+
+use tokio::sync::Notify;
 
 use crate::config::AdvertisedAddress;
 
+pub(crate) mod partition;
 pub mod topics;
 
 use topics::TopicCatalog;
@@ -12,6 +15,7 @@ pub struct BrokerState {
     advertised_kafka: AdvertisedAddress,
     auto_create_topics: bool,
     topics: TopicCatalog,
+    append_notification: Arc<Notify>,
 }
 
 impl BrokerState {
@@ -26,6 +30,7 @@ impl BrokerState {
             advertised_kafka,
             auto_create_topics,
             topics: TopicCatalog::new(default_partitions),
+            append_notification: Arc::new(Notify::new()),
         }
     }
 
@@ -43,5 +48,13 @@ impl BrokerState {
 
     pub fn topics(&self) -> &TopicCatalog {
         &self.topics
+    }
+
+    pub(crate) fn append_notification(&self) -> Arc<Notify> {
+        Arc::clone(&self.append_notification)
+    }
+
+    pub(crate) fn notify_append(&self) {
+        self.append_notification.notify_waiters();
     }
 }

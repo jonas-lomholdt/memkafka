@@ -3,5 +3,8 @@ pub mod codec;
 pub mod connection;
 mod create_topics;
 pub mod dispatcher;
+mod fetch;
 pub mod frame;
+mod list_offsets;
 mod metadata;
+mod produce;

@@ -37,6 +37,9 @@ async fn handle_one(connection: &mut TcpStream, dispatcher: &Dispatcher) -> Resu
     };
     let request = decode_request(frame)?;
     let response = dispatcher.dispatch(&request).await?;
+    if !request.expects_response() {
+        return Ok(true);
+    }
     let encoded = encode_response(
         request.api_key,
         request.header.request_api_version,
