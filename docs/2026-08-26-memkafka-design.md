@@ -1,9 +1,9 @@
 # MemKafka v0.1 Design Specification
 
 **Date:** 2026-08-26  
-**Status:** In progress
+**Status:** Implemented
 
-**Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, and Kafbat UI message browsing complete; the Avro Schema Registry subset is the remaining v0.1 slice
+**Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, Kafbat UI message browsing, and the Avro Schema Registry subset are complete and covered by pinned black-box clients
 
 ## 1. Summary
 

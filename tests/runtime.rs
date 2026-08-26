@@ -5,7 +5,12 @@ use memkafka::{
     config::{AdvertisedAddress, Cli, Config},
     server::{BoundEndpoints, readiness_message, serve},
 };
-use tokio::{net::TcpStream, sync::oneshot, time::timeout};
+use tokio::{
+    io::AsyncWriteExt,
+    net::TcpStream,
+    sync::oneshot,
+    time::{sleep, timeout},
+};
 
 fn ephemeral_config() -> Config {
     Config::try_from(
@@ -86,4 +91,36 @@ async fn kafka_bind_failure_is_reported_before_readiness() {
 
     assert!(error.to_string().contains("failed to bind Kafka listener"));
     assert!(ready_rx.await.is_err());
+}
+
+#[tokio::test]
+async fn shutdown_bounds_an_incomplete_schema_registry_request() {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(serve(ephemeral_config(), ready_tx, async {
+        let _ = shutdown_rx.await;
+    }));
+    let endpoints = timeout(Duration::from_secs(1), ready_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut client = TcpStream::connect(endpoints.schema_registry).await.unwrap();
+    client
+        .write_all(
+            b"POST /subjects/slow/versions HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Content-Type: application/json\r\n\
+              Content-Length: 1000\r\n\r\n\
+              {\"schema\":\"",
+        )
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(25)).await;
+
+    shutdown_tx.send(()).unwrap();
+    timeout(Duration::from_secs(2), server)
+        .await
+        .expect("server exceeded its HTTP shutdown grace period")
+        .unwrap()
+        .unwrap();
 }

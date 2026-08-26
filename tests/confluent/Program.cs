@@ -1,8 +1,17 @@
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using Avro;
+using Avro.Generic;
 using Confluent.Kafka;
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.SyncOverAsync;
+using Confluent.SchemaRegistry;
+using Confluent.SchemaRegistry.Serdes;
 
 var repositoryRoot = FindRepositoryRoot();
 Process? process = null;
@@ -10,6 +19,7 @@ ProcessOutput? processOutput = null;
 try
 {
     var bootstrapServers = Environment.GetEnvironmentVariable("MEMKAFKA_BOOTSTRAP_SERVERS");
+    var schemaRegistryUrl = Environment.GetEnvironmentVariable("MEMKAFKA_SCHEMA_REGISTRY_URL");
     if (string.IsNullOrWhiteSpace(bootstrapServers))
     {
         var binaryName = OperatingSystem.IsWindows() ? "memkafka.exe" : "memkafka";
@@ -24,9 +34,15 @@ try
 
         process = StartMemKafka(binary, repositoryRoot);
         processOutput = new ProcessOutput(process);
-        bootstrapServers = await processOutput.ReadBootstrapServersAsync();
+        var endpoints = await processOutput.ReadEndpointsAsync();
+        bootstrapServers = endpoints.BootstrapServers;
+        schemaRegistryUrl = endpoints.SchemaRegistryUrl;
     }
-    Console.WriteLine($"ready  {bootstrapServers}");
+    if (string.IsNullOrWhiteSpace(schemaRegistryUrl))
+    {
+        schemaRegistryUrl = "http://127.0.0.1:8081";
+    }
+    Console.WriteLine($"ready  kafka={bootstrapServers} schema_registry={schemaRegistryUrl}");
 
     var config = new AdminClientConfig
     {
@@ -103,7 +119,10 @@ try
         Console.WriteLine("pass   cooperative selection is visible in the broker info log");
     }
 
-    Console.WriteLine("PASS   Confluent.Kafka 2.15.0 black-box acceptance");
+    await AssertSchemaRegistryAndAvro(admin, bootstrapServers, schemaRegistryUrl);
+    Console.WriteLine("pass   Schema Registry IDs, versions, errors, and real Avro publish/consume round-trip");
+
+    Console.WriteLine("PASS   Confluent.Kafka and Schema Registry Avro 2.15.0 black-box acceptance");
 }
 finally
 {
@@ -137,7 +156,10 @@ static Process StartMemKafka(string binary, string workingDirectory)
         ?? throw new InvalidOperationException("failed to start MemKafka");
 }
 
-static void AssertTopicPartitions(Metadata metadata, string topicName, int expectedPartitions)
+static void AssertTopicPartitions(
+    Confluent.Kafka.Metadata metadata,
+    string topicName,
+    int expectedPartitions)
 {
     var topic = metadata.Topics.SingleOrDefault(topic => topic.Topic == topicName)
         ?? throw new InvalidOperationException($"metadata omitted topic '{topicName}'");
@@ -150,6 +172,218 @@ static void AssertTopicPartitions(Metadata metadata, string topicName, int expec
     {
         throw new InvalidOperationException(
             $"topic '{topicName}' has {topic.Partitions.Count} partitions, expected {expectedPartitions}");
+    }
+}
+
+static async Task AssertSchemaRegistryAndAvro(
+    IAdminClient admin,
+    string bootstrapServers,
+    string schemaRegistryUrl)
+{
+    var topic = $"avro-{Guid.NewGuid():N}";
+    await admin.CreateTopicsAsync(
+        [
+            new TopicSpecification
+            {
+                Name = topic,
+                NumPartitions = 1,
+                ReplicationFactor = 1,
+            },
+        ],
+        new CreateTopicsOptions { RequestTimeout = TimeSpan.FromSeconds(5) });
+
+    const string schemaText = """
+        {
+          "type": "record",
+          "name": "OrderCreated",
+          "namespace": "MemKafka.Acceptance",
+          "fields": [
+            { "name": "orderId", "type": "string" },
+            { "name": "sequence", "type": "long" }
+          ]
+        }
+        """;
+    const string secondSchemaText = """
+        {
+          "type": "record",
+          "name": "OrderCancelled",
+          "namespace": "MemKafka.Acceptance",
+          "fields": [
+            { "name": "orderId", "type": "string" }
+          ]
+        }
+        """;
+    var avroSchema = (RecordSchema)RecordSchema.Parse(schemaText);
+    var record = new GenericRecord(avroSchema);
+    record.Add("orderId", "order-42");
+    record.Add("sequence", 7L);
+    var subject = $"{topic}-value";
+
+    using var registry = new CachedSchemaRegistryClient(
+        new SchemaRegistryConfig { Url = schemaRegistryUrl });
+    DeliveryResult<Null, GenericRecord> delivery;
+    using (var producer = new ProducerBuilder<Null, GenericRecord>(new ProducerConfig
+    {
+        BootstrapServers = bootstrapServers,
+        Acks = Acks.All,
+        EnableIdempotence = false,
+        MaxInFlight = 1,
+        MessageTimeoutMs = 5_000,
+        SocketTimeoutMs = 5_000,
+        AllowAutoCreateTopics = false,
+    })
+        .SetValueSerializer(new AvroSerializer<GenericRecord>(registry))
+        .Build())
+    {
+        delivery = await producer.ProduceAsync(
+            new TopicPartition(topic, new Partition(0)),
+            new Message<Null, GenericRecord> { Value = record });
+    }
+    if (delivery.Offset != new Offset(0))
+    {
+        throw new InvalidOperationException($"Avro delivery returned {delivery.Offset}, expected 0");
+    }
+
+    var subjects = await registry.GetAllSubjectsAsync();
+    if (!subjects.Contains(subject, StringComparer.Ordinal))
+    {
+        throw new InvalidOperationException($"subjects omitted auto-registered '{subject}'");
+    }
+    var versions = await registry.GetSubjectVersionsAsync(subject);
+    if (!versions.SequenceEqual([1]))
+    {
+        throw new InvalidOperationException(
+            $"auto-registered versions were [{string.Join(',', versions)}], expected [1]");
+    }
+    var latest = await registry.GetLatestSchemaAsync(subject);
+    if (latest.Id <= 0 || latest.Version != 1 || latest.Subject != subject)
+    {
+        throw new InvalidOperationException(
+            $"unexpected latest schema: subject={latest.Subject} version={latest.Version} id={latest.Id}");
+    }
+    var byId = await registry.GetSchemaAsync(latest.Id);
+    var byVersion = await registry.GetRegisteredSchemaAsync(subject, 1);
+    if (byId.SchemaString != latest.Schema.SchemaString
+        || byVersion.Id != latest.Id
+        || byVersion.Schema.SchemaString != latest.Schema.SchemaString)
+    {
+        throw new InvalidOperationException("schema fetch by ID or subject version changed the schema");
+    }
+
+    using (var freshRegistry = new CachedSchemaRegistryClient(
+        new SchemaRegistryConfig { Url = schemaRegistryUrl }))
+    {
+        var duplicateId = await freshRegistry.RegisterSchemaAsync(subject, latest.Schema);
+        if (duplicateId != latest.Id
+            || !(await freshRegistry.GetSubjectVersionsAsync(subject)).SequenceEqual([1]))
+        {
+            throw new InvalidOperationException("identical schema registration was not deduplicated");
+        }
+
+        var secondId = await freshRegistry.RegisterSchemaAsync(
+            subject,
+            new Confluent.SchemaRegistry.Schema(secondSchemaText, SchemaType.Avro));
+        if (secondId <= latest.Id
+            || !(await freshRegistry.GetSubjectVersionsAsync(subject)).SequenceEqual([1, 2]))
+        {
+            throw new InvalidOperationException("distinct schema did not allocate the next ID and version");
+        }
+
+        var otherSubject = $"other-{Guid.NewGuid():N}-value";
+        var reusedId = await freshRegistry.RegisterSchemaAsync(otherSubject, latest.Schema);
+        if (reusedId != latest.Id
+            || !(await freshRegistry.GetSubjectVersionsAsync(otherSubject)).SequenceEqual([1]))
+        {
+            throw new InvalidOperationException("exact schema text did not reuse its global ID across subjects");
+        }
+    }
+
+    using (var wireConsumer = new ConsumerBuilder<Ignore, byte[]>(new ConsumerConfig
+    {
+        BootstrapServers = bootstrapServers,
+        GroupId = $"avro-wire-{Guid.NewGuid():N}",
+        EnableAutoCommit = false,
+        AllowAutoCreateTopics = false,
+        SocketTimeoutMs = 5_000,
+    }).Build())
+    {
+        wireConsumer.Assign(new TopicPartitionOffset(topic, 0, Offset.Beginning));
+        var wireRecord = wireConsumer.Consume(TimeSpan.FromSeconds(5));
+        var payload = wireRecord?.Message.Value;
+        if (payload is null || payload.Length < 5 || payload[0] != 0)
+        {
+            throw new InvalidOperationException("Avro record omitted the Confluent wire-format header");
+        }
+        var wireSchemaId = BinaryPrimitives.ReadInt32BigEndian(payload.AsSpan(1, 4));
+        if (wireSchemaId != latest.Id)
+        {
+            throw new InvalidOperationException(
+                $"wire schema ID was {wireSchemaId}, expected {latest.Id}");
+        }
+    }
+
+    using var deserializerRegistry = new CachedSchemaRegistryClient(
+        new SchemaRegistryConfig { Url = schemaRegistryUrl });
+    using (var avroConsumer = new ConsumerBuilder<Ignore, GenericRecord>(new ConsumerConfig
+    {
+        BootstrapServers = bootstrapServers,
+        GroupId = $"avro-value-{Guid.NewGuid():N}",
+        EnableAutoCommit = false,
+        AllowAutoCreateTopics = false,
+        SocketTimeoutMs = 5_000,
+    })
+        .SetValueDeserializer(
+            new AvroDeserializer<GenericRecord>(deserializerRegistry).AsSyncOverAsync())
+        .Build())
+    {
+        avroConsumer.Assign(new TopicPartitionOffset(topic, 0, Offset.Beginning));
+        var consumed = avroConsumer.Consume(TimeSpan.FromSeconds(5));
+        if (consumed?.Message.Value["orderId"]?.ToString() != "order-42"
+            || !Equals(consumed.Message.Value["sequence"], 7L))
+        {
+            throw new InvalidOperationException("real Avro deserializer did not recover the record");
+        }
+    }
+
+    try
+    {
+        await registry.GetSchemaAsync(int.MaxValue);
+        throw new InvalidOperationException("missing schema ID unexpectedly succeeded");
+    }
+    catch (SchemaRegistryException exception) when (exception.ErrorCode == 40403)
+    {
+    }
+    try
+    {
+        await registry.GetSubjectVersionsAsync($"missing-{Guid.NewGuid():N}");
+        throw new InvalidOperationException("missing subject unexpectedly succeeded");
+    }
+    catch (SchemaRegistryException exception) when (exception.ErrorCode == 40401)
+    {
+    }
+    try
+    {
+        await registry.GetRegisteredSchemaAsync(subject, int.MaxValue);
+        throw new InvalidOperationException("missing subject version unexpectedly succeeded");
+    }
+    catch (SchemaRegistryException exception) when (exception.ErrorCode == 40402)
+    {
+    }
+
+    using var http = new HttpClient
+    {
+        BaseAddress = new Uri(schemaRegistryUrl.TrimEnd('/') + "/"),
+        Timeout = TimeSpan.FromSeconds(5),
+    };
+    var unsupported = await http.PostAsJsonAsync(
+        $"subjects/{Uri.EscapeDataString(subject)}/versions",
+        new { schema = schemaText, schemaType = "PROTOBUF" });
+    var error = JsonDocument.Parse(await unsupported.Content.ReadAsStringAsync()).RootElement;
+    if (unsupported.StatusCode != HttpStatusCode.UnprocessableEntity
+        || error.GetProperty("error_code").GetInt32() != 42201)
+    {
+        throw new InvalidOperationException(
+            $"unsupported schema type returned HTTP {(int)unsupported.StatusCode}: {error}");
     }
 }
 
@@ -781,7 +1015,7 @@ sealed class ProcessOutput
     private const string ReadyMarker = "MemKafka ready kafka=";
     private readonly ConcurrentQueue<string> standardOutput = new();
     private readonly ConcurrentQueue<string> standardError = new();
-    private readonly TaskCompletionSource<string> readiness = new(
+    private readonly TaskCompletionSource<MemKafkaEndpoints> readiness = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task outputPump;
     private readonly Task errorPump;
@@ -792,7 +1026,7 @@ sealed class ProcessOutput
         errorPump = PumpAsync(process.StandardError, standardError);
     }
 
-    public async Task<string> ReadBootstrapServersAsync()
+    public async Task<MemKafkaEndpoints> ReadEndpointsAsync()
     {
         try
         {
@@ -846,10 +1080,14 @@ sealed class ProcessOutput
                 continue;
             }
 
-            var match = Regex.Match(line, @"kafka=(?<address>\S+)");
+            var match = Regex.Match(
+                line,
+                @"kafka=(?<kafka>\S+) schema_registry=(?<schemaRegistry>\S+)");
             if (match.Success)
             {
-                readiness.TrySetResult(match.Groups["address"].Value);
+                readiness.TrySetResult(new MemKafkaEndpoints(
+                    match.Groups["kafka"].Value,
+                    match.Groups["schemaRegistry"].Value));
             }
             else
             {
@@ -870,6 +1108,8 @@ sealed class ProcessOutput
             + $"stderr={string.Join(" | ", standardError)}";
     }
 }
+
+sealed record MemKafkaEndpoints(string BootstrapServers, string SchemaRegistryUrl);
 
 sealed class CooperativeAssignmentObserver
 {

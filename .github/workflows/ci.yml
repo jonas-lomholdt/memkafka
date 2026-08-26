@@ -95,6 +95,7 @@ jobs:
       - name: Run Confluent.Kafka container black-box tests
         env:
           MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
+          MEMKAFKA_SCHEMA_REGISTRY_URL: http://127.0.0.1:8081
         run: >-
           dotnet run --no-restore
           --project tests/confluent/MemKafka.Acceptance.csproj

@@ -1,11 +1,11 @@
-use std::{future::Future, net::SocketAddr};
+use std::{future::Future, net::SocketAddr, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
-use axum::Router;
 use tokio::{
     net::TcpListener,
     sync::{oneshot, watch},
     task::{JoinError, JoinSet},
+    time::timeout,
 };
 use tracing::{debug, info, warn};
 
@@ -13,7 +13,10 @@ use crate::{
     broker::BrokerState,
     config::{AdvertisedAddress, Config},
     kafka::{connection, dispatcher::Dispatcher},
+    schema_registry::{Registry, router as schema_registry_router},
 };
+
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundEndpoints {
@@ -90,6 +93,7 @@ where
     ));
     servers.spawn(run_schema_registry_listener(
         schema_registry_listener,
+        Registry::new(),
         shutdown_rx,
     ));
 
@@ -103,15 +107,36 @@ where
     };
 
     let _ = shutdown_tx.send(true);
+    let mut drain_result = Ok(());
+    if timeout(
+        SHUTDOWN_GRACE_PERIOD,
+        drain_servers(&mut servers, &mut drain_result),
+    )
+    .await
+    .is_err()
+    {
+        warn!(
+            grace_period_ms = SHUTDOWN_GRACE_PERIOD.as_millis(),
+            "server shutdown grace period elapsed; aborting remaining tasks"
+        );
+        servers.abort_all();
+        while servers.join_next().await.is_some() {}
+    }
+    if result.is_ok() {
+        result = drain_result;
+    }
+
+    result
+}
+
+async fn drain_servers(servers: &mut JoinSet<Result<()>>, result: &mut Result<()>) {
     while let Some(completed) = servers.join_next().await {
         if result.is_ok() {
-            result = completed
+            *result = completed
                 .map_err(join_error_to_anyhow)
                 .and_then(|task| task);
         }
     }
-
-    result
 }
 
 async fn run_kafka_listener(
@@ -160,9 +185,10 @@ fn log_connection_result(completed: Option<Result<(SocketAddr, Result<()>), Join
 
 async fn run_schema_registry_listener(
     listener: TcpListener,
+    registry: Registry,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    axum::serve(listener, Router::new())
+    axum::serve(listener, schema_registry_router(registry))
         .with_graceful_shutdown(wait_for_shutdown(shutdown))
         .await
         .context("Schema Registry server failed")
