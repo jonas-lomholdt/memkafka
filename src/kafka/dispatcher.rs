@@ -4,7 +4,7 @@ use kafka_protocol::messages::{ApiKey, RequestKind, ResponseKind};
 
 use crate::broker::BrokerState;
 
-use super::{api_versions, codec::DecodedRequest, metadata};
+use super::{api_versions, codec::DecodedRequest, create_topics, metadata};
 
 #[derive(Clone, Debug)]
 pub struct Dispatcher {
@@ -31,6 +31,15 @@ impl Dispatcher {
                 match &request.body {
                     RequestKind::Metadata(body) => {
                         Ok(metadata::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::CreateTopics => {
+                require_version(request.api_key, version, &create_topics::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::CreateTopics(body) => {
+                        Ok(create_topics::response(body, &self.broker).await.into())
                     }
                     _ => Err(DispatchError::BodyMismatch(request.api_key)),
                 }

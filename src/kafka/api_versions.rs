@@ -1,6 +1,6 @@
 use kafka_protocol::messages::{ApiKey, ApiVersionsResponse, api_versions_response::ApiVersion};
 
-use super::metadata;
+use super::{create_topics, metadata};
 
 pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=4;
 
@@ -8,6 +8,7 @@ pub(crate) fn response() -> ApiVersionsResponse {
     ApiVersionsResponse::default().with_api_keys(vec![
         api_range(ApiKey::Metadata, &metadata::VERSION_RANGE),
         api_range(ApiKey::ApiVersions, &VERSION_RANGE),
+        api_range(ApiKey::CreateTopics, &create_topics::VERSION_RANGE),
     ])
 }
 

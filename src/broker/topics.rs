@@ -55,20 +55,7 @@ impl TopicCatalog {
         partitions: i32,
         replication_factor: i16,
     ) -> Result<TopicMetadata, TopicError> {
-        validate_name(name)?;
-        let partition_count =
-            u32::try_from(partitions).map_err(|_| TopicError::InvalidPartitions)?;
-        if partition_count == 0 {
-            return Err(TopicError::InvalidPartitions);
-        }
-        if replication_factor != 1 {
-            return Err(TopicError::InvalidReplicationFactor);
-        }
-
-        let metadata = TopicMetadata {
-            name: name.to_owned(),
-            partition_count,
-        };
+        let metadata = validate_explicit_metadata(name, partitions, replication_factor)?;
         let mut topics = self.topics.write().await;
         match topics.entry(name.to_owned()) {
             Entry::Vacant(entry) => {
@@ -76,6 +63,20 @@ impl TopicCatalog {
                 Ok(metadata)
             }
             Entry::Occupied(_) => Err(TopicError::AlreadyExists),
+        }
+    }
+
+    pub async fn validate_explicit(
+        &self,
+        name: &str,
+        partitions: i32,
+        replication_factor: i16,
+    ) -> Result<TopicMetadata, TopicError> {
+        let metadata = validate_explicit_metadata(name, partitions, replication_factor)?;
+        if self.topics.read().await.contains_key(name) {
+            Err(TopicError::AlreadyExists)
+        } else {
+            Ok(metadata)
         }
     }
 
@@ -108,6 +109,26 @@ impl TopicCatalog {
     pub async fn list(&self) -> Vec<TopicMetadata> {
         self.topics.read().await.values().cloned().collect()
     }
+}
+
+fn validate_explicit_metadata(
+    name: &str,
+    partitions: i32,
+    replication_factor: i16,
+) -> Result<TopicMetadata, TopicError> {
+    validate_name(name)?;
+    let partition_count = u32::try_from(partitions).map_err(|_| TopicError::InvalidPartitions)?;
+    if partition_count == 0 {
+        return Err(TopicError::InvalidPartitions);
+    }
+    if replication_factor != 1 {
+        return Err(TopicError::InvalidReplicationFactor);
+    }
+
+    Ok(TopicMetadata {
+        name: name.to_owned(),
+        partition_count,
+    })
 }
 
 fn validate_name(name: &str) -> Result<(), TopicError> {
