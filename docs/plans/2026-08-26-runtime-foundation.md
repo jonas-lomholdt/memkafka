@@ -350,7 +350,7 @@ git commit -m "feat: report readiness and graceful shutdown"
 - Consumes: the release-mode `memkafka` binary and its stable CLI.
 - Produces: a non-root image with ports `9092` and `8081`, plus reproducible validation commands.
 
-- [ ] **Step 1: Add the Docker packaging**
+- [x] **Step 1: Add the Docker packaging**
 
 Use a multi-stage `rust:1.98.0-bookworm` builder, build with `cargo build --locked --release`, and copy only `/build/target/release/memkafka` from the builder into a maintained small runtime image. Create and select a non-root `memkafka` user. Use:
 
@@ -362,7 +362,7 @@ CMD ["--kafka-listen", "0.0.0.0:9092", "--schema-registry-listen", "0.0.0.0:8081
 
 Exclude `.git`, `target`, editor metadata, logs, and local environment files in `.dockerignore`.
 
-- [ ] **Step 2: Add CI**
+- [x] **Step 2: Add CI**
 
 Create one workflow that runs on pushes and pull requests and executes:
 
@@ -373,11 +373,11 @@ cargo test --all-targets --all-features
 docker build -t memkafka:ci .
 ```
 
-- [ ] **Step 3: Add the README**
+- [x] **Step 3: Add the README**
 
 Document native and Docker startup, all defaults and CLI options, memory-only state, the pinned Rust baseline, and the explicit warning that protocol compatibility is not implemented by this foundation phase yet. Link the design spec for the v0.1 target. Do not describe empty listener boundaries as a working Kafka broker or Schema Registry.
 
-- [ ] **Step 4: Verify the complete foundation**
+- [x] **Step 4: Verify the complete foundation**
 
 Run:
 
@@ -390,7 +390,7 @@ docker build -t memkafka:local .
 
 Expected: every command exits `0`; the runtime image reports a non-root user and contains no Rust toolchain or source tree.
 
-- [ ] **Step 5: Commit packaging and documentation**
+- [x] **Step 5: Commit packaging and documentation**
 
 ```bash
 git add Dockerfile .dockerignore .github/workflows/ci.yml README.md

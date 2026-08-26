@@ -1,0 +1,12 @@
+.git
+.github
+.worktrees
+target
+docs
+.DS_Store
+.env
+.env.*
+.idea
+.vscode
+*.log
+
