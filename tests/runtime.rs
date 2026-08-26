@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use memkafka::{
-    config::{Cli, Config},
-    server::serve,
+    config::{AdvertisedAddress, Cli, Config},
+    server::{BoundEndpoints, readiness_message, serve},
 };
 use tokio::{net::TcpStream, sync::oneshot, time::timeout};
 
@@ -19,6 +19,20 @@ fn ephemeral_config() -> Config {
         .unwrap(),
     )
     .unwrap()
+}
+
+#[test]
+fn readiness_message_names_both_resolved_endpoints() {
+    let endpoints = BoundEndpoints::new(
+        "127.0.0.1:19092".parse().unwrap(),
+        "127.0.0.1:18081".parse().unwrap(),
+        AdvertisedAddress::new("broker", 19092).unwrap(),
+    );
+
+    assert_eq!(
+        readiness_message(&endpoints),
+        "MemKafka ready kafka=127.0.0.1:19092 schema_registry=http://127.0.0.1:18081 advertised_kafka=broker:19092"
+    );
 }
 
 #[tokio::test]

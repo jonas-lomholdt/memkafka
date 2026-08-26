@@ -7,7 +7,7 @@ use tokio::{
     sync::{oneshot, watch},
     task::{JoinError, JoinSet},
 };
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::config::{AdvertisedAddress, Config};
 
@@ -30,6 +30,13 @@ impl BoundEndpoints {
             advertised_kafka,
         }
     }
+}
+
+pub fn readiness_message(endpoints: &BoundEndpoints) -> String {
+    format!(
+        "MemKafka ready kafka={} schema_registry=http://{} advertised_kafka={}",
+        endpoints.kafka, endpoints.schema_registry, endpoints.advertised_kafka
+    )
 }
 
 pub async fn serve<F>(
@@ -72,6 +79,7 @@ where
         shutdown_rx,
     ));
 
+    info!("{}", readiness_message(&endpoints));
     let _ = ready.send(endpoints);
 
     tokio::pin!(shutdown);

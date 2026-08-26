@@ -279,7 +279,7 @@ git commit -m "feat: run kafka and registry listeners"
 - Consumes: `LogLevel`, `quiet`, and `BoundEndpoints`.
 - Produces: `logging::init(LogLevel, bool) -> anyhow::Result<()>`; `readiness_message(&BoundEndpoints) -> String`; executable exit status `0` after normal shutdown and `1` after runtime failure.
 
-- [ ] **Step 1: Write the failing readiness-message test**
+- [x] **Step 1: Write the failing readiness-message test**
 
 Add a literal assertion to `tests/runtime.rs` using fixed socket addresses:
 
@@ -303,13 +303,13 @@ Prefer a normal public constructor over a test-only production method when imple
 
 The production change caught is omitting or confusing the bound and advertised endpoints in the one readiness event.
 
-- [ ] **Step 2: Run the readiness test and verify RED**
+- [x] **Step 2: Run the readiness test and verify RED**
 
 Run: `cargo test --test runtime readiness_message_names_both_resolved_endpoints`
 
 Expected: compilation fails because `readiness_message` is missing.
 
-- [ ] **Step 3: Implement the process boundary**
+- [x] **Step 3: Implement the process boundary**
 
 - Give `BoundEndpoints` a regular public constructor used by the test and the server.
 - Add `readiness_message` with the exact literal format above.
@@ -319,17 +319,17 @@ Expected: compilation fails because `readiness_message` is missing.
 - On failure, print `memkafka: {error:#}` to stderr even under `--quiet` and return `ExitCode::FAILURE`.
 - On normal shutdown, return `ExitCode::SUCCESS`.
 
-- [ ] **Step 4: Run tests and verify GREEN**
+- [x] **Step 4: Run tests and verify GREEN**
 
 Run: `cargo test --all-targets --all-features`
 
 Expected: all tests pass with no warnings.
 
-- [ ] **Step 5: Manually verify startup and shutdown at process level**
+- [x] **Step 5: Manually verify startup and shutdown at process level**
 
 Run the binary with ephemeral ports and debug logging, observe exactly one readiness line, connect to both reported ports, then send Ctrl-C. Expected: exit status `0`, no panic, and no fatal output.
 
-- [ ] **Step 6: Commit the process slice**
+- [x] **Step 6: Commit the process slice**
 
 ```bash
 git add src/main.rs src/logging.rs src/server.rs tests/runtime.rs
