@@ -3,7 +3,7 @@
 **Date:** 2026-08-26  
 **Status:** In progress
 
-**Implementation:** Metadata, topic creation, Produce, Fetch, and ListOffsets complete; consumer groups are the next Kafka slice
+**Implementation:** Metadata, topic creation, Produce, Fetch, ListOffsets, and single-member classic-group commit/restart flows complete; multi-member rebalancing is the next Kafka slice
 
 ## 1. Summary
 
@@ -480,6 +480,21 @@ Using the real `CachedSchemaRegistryClient`, `AvroSerializer`, and `AvroDeserial
 - fetch the record and deserialize it successfully through the real Avro deserializer;
 - return Confluent-compatible errors for missing resources and unsupported schema types.
 
+### 12.5 Kafbat UI acceptance
+
+The CI black-box suite pins a released `ghcr.io/kafbat/kafka-ui` image and runs it with MemKafka on an isolated Docker network. Kafbat receives only MemKafka's advertised Kafka address and Schema Registry URL; it must not use an internal test hook or direct access to broker state.
+
+The test must:
+
+- wait for Kafbat's `/actuator/health` readiness endpoint;
+- observe the configured MemKafka cluster and a uniquely named topic through Kafbat's HTTP API;
+- publish a uniquely identifiable string key and value through a real Kafka client;
+- query Kafbat's `/api/clusters/{cluster}/topics/{topic}/messages/v2` endpoint;
+- assert that Kafbat fetched and returned the exact key and value;
+- retain Kafbat and MemKafka logs as CI diagnostics, but never treat a connection log alone as proof that message browsing works.
+
+MemKafka implements the smallest additional read-only administrative API subset needed for this scenario. Every such API must be advertised honestly and covered by protocol tests. Kafbat operations outside cluster/topic discovery and message browsing may remain unavailable unless added explicitly to this specification.
+
 ## 13. Explicit v0.1 exclusions
 
 The following are not implemented or simulated in v0.1:
@@ -490,7 +505,7 @@ The following are not implemented or simulated in v0.1:
 - transactions, exactly-once semantics, idempotent producers, producer IDs, or epochs;
 - KIP-848's newer consumer group protocol, `ConsumerGroupHeartbeat`, or broker-side assignors;
 - retention policies, log compaction, segment files, tiered storage, or DeleteRecords;
-- partition-count increases, topic deletion, ACLs, quotas, or most administrative/configuration APIs;
+- partition-count increases, topic deletion, ACLs, quotas, or administrative/configuration APIs beyond the explicitly tested Kafbat compatibility subset;
 - TLS, SASL, authentication, authorization, or multi-tenant isolation;
 - realistic latency, network faults, disk faults, broker restarts, or performance benchmarking against Kafka;
 - legacy message-set formats predating RecordBatch magic `2`;
@@ -513,6 +528,7 @@ v0.1 is complete when:
 7. formatting and strict Clippy checks pass across all targets and features;
 8. the README states the compatibility target, native and container startup paths, ephemeral data model, Rust baseline, and exclusions without implying production suitability;
 9. acknowledged records remain fetchable in assigned-offset order for the lifetime of the process, and the real-client tests demonstrate at-least-once redelivery.
+10. the pinned Kafbat UI image discovers MemKafka and returns a produced record through its message-browsing API.
 
 Implementation must not expand v0.1 merely to imitate Kafka internals. New behavior enters scope only when required by the pinned real-client acceptance suite or added explicitly to this specification.
 

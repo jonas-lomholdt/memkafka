@@ -3,20 +3,28 @@ use std::{num::NonZeroU32, time::Duration};
 use bytes::{Bytes, BytesMut};
 use clap::Parser;
 use kafka_protocol::{
+    ResponseError,
     messages::{
         ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, FetchRequest,
-        ListOffsetsRequest, MetadataRequest, ProduceRequest, RequestHeader, RequestKind,
-        ResponseHeader, ResponseKind, TopicName, TransactionalId,
+        FindCoordinatorRequest, GroupId, HeartbeatRequest, JoinGroupRequest, LeaveGroupRequest,
+        ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
+        ProduceRequest, RequestHeader, RequestKind, ResponseHeader, ResponseKind, SyncGroupRequest,
+        TopicName, TransactionalId,
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
         fetch_request::{FetchPartition, FetchTopic},
         fetch_response::FetchResponse,
+        join_group_request::JoinGroupRequestProtocol,
+        leave_group_request::MemberIdentity,
         list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
         list_offsets_response::ListOffsetsResponse,
         metadata_request::MetadataRequestTopic,
         metadata_response::MetadataResponse,
+        offset_commit_request::{OffsetCommitRequestPartition, OffsetCommitRequestTopic},
+        offset_fetch_request::OffsetFetchRequestTopic,
         produce_request::{PartitionProduceData, TopicProduceData},
         produce_response::ProduceResponse,
+        sync_group_request::SyncGroupRequestAssignment,
     },
     protocol::{Decodable, StrBytes, encode_request_header_into_buffer},
     records::{
@@ -63,13 +71,20 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_eq!(header.correlation_id, 42);
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
-    assert_eq!(response.api_keys.len(), 6);
+    assert_eq!(response.api_keys.len(), 13);
     assert_api_range(&response, ApiKey::Metadata, 0, 9);
     assert_api_range(&response, ApiKey::ApiVersions, 0, 4);
     assert_api_range(&response, ApiKey::CreateTopics, 2, 6);
     assert_api_range(&response, ApiKey::Produce, 3, 7);
     assert_api_range(&response, ApiKey::ListOffsets, 1, 3);
     assert_api_range(&response, ApiKey::Fetch, 4, 4);
+    assert_api_range(&response, ApiKey::FindCoordinator, 0, 2);
+    assert_api_range(&response, ApiKey::JoinGroup, 0, 5);
+    assert_api_range(&response, ApiKey::SyncGroup, 0, 3);
+    assert_api_range(&response, ApiKey::Heartbeat, 0, 3);
+    assert_api_range(&response, ApiKey::LeaveGroup, 0, 3);
+    assert_api_range(&response, ApiKey::OffsetCommit, 2, 7);
+    assert_api_range(&response, ApiKey::OffsetFetch, 1, 5);
 }
 
 #[tokio::test]
@@ -105,13 +120,20 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         let (header, body) = decode_api_versions_response(response);
 
         assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(body.api_keys.len(), 6);
+        assert_eq!(body.api_keys.len(), 13);
         assert_api_range(&body, ApiKey::Metadata, 0, 9);
         assert_api_range(&body, ApiKey::ApiVersions, 0, 4);
         assert_api_range(&body, ApiKey::CreateTopics, 2, 6);
         assert_api_range(&body, ApiKey::Produce, 3, 7);
         assert_api_range(&body, ApiKey::ListOffsets, 1, 3);
         assert_api_range(&body, ApiKey::Fetch, 4, 4);
+        assert_api_range(&body, ApiKey::FindCoordinator, 0, 2);
+        assert_api_range(&body, ApiKey::JoinGroup, 0, 5);
+        assert_api_range(&body, ApiKey::SyncGroup, 0, 3);
+        assert_api_range(&body, ApiKey::Heartbeat, 0, 3);
+        assert_api_range(&body, ApiKey::LeaveGroup, 0, 3);
+        assert_api_range(&body, ApiKey::OffsetCommit, 2, 7);
+        assert_api_range(&body, ApiKey::OffsetFetch, 1, 5);
     }
 
     shutdown_tx.send(()).expect("request server shutdown");
@@ -120,6 +142,261 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         .expect("server shutdown timed out")
         .expect("server task panicked")
         .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn classic_group_requests_complete_membership_and_offset_lifecycle() {
+    let dispatcher = test_dispatcher();
+    let group_id = GroupId::from(StrBytes::from_static_str("orders-group"));
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::FindCoordinator,
+        2,
+        RequestKind::FindCoordinator(
+            FindCoordinatorRequest::default()
+                .with_key(StrBytes::from_static_str("orders-group"))
+                .with_key_type(0),
+        ),
+    )
+    .await;
+    let ResponseKind::FindCoordinator(response) = response else {
+        panic!("expected FindCoordinator response")
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.node_id, 1);
+    assert_eq!(response.host.as_str(), "127.0.0.1");
+    assert_eq!(response.port, 9092);
+
+    let join = |member_id: StrBytes| {
+        JoinGroupRequest::default()
+            .with_group_id(group_id.clone())
+            .with_session_timeout_ms(10_000)
+            .with_rebalance_timeout_ms(30_000)
+            .with_member_id(member_id)
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("cooperative-sticky"))
+                    .with_metadata(Bytes::from_static(b"subscription")),
+            ])
+    };
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::JoinGroup,
+        5,
+        RequestKind::JoinGroup(join(StrBytes::default())),
+    )
+    .await;
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+    assert_eq!(response.error_code, 79);
+    assert!(!response.member_id.is_empty());
+    let member_id = response.member_id;
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::JoinGroup,
+        5,
+        RequestKind::JoinGroup(join(member_id.clone())),
+    )
+    .await;
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.generation_id, 1);
+    assert_eq!(response.leader, member_id);
+    assert_eq!(response.members.len(), 1);
+    let generation_id = response.generation_id;
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::Heartbeat,
+        3,
+        RequestKind::Heartbeat(
+            HeartbeatRequest::default()
+                .with_group_id(group_id.clone())
+                .with_generation_id(generation_id)
+                .with_member_id(member_id.clone()),
+        ),
+    )
+    .await;
+    let ResponseKind::Heartbeat(response) = response else {
+        panic!("expected Heartbeat response")
+    };
+    assert_eq!(
+        response.error_code,
+        ResponseError::RebalanceInProgress.code()
+    );
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::SyncGroup,
+        3,
+        RequestKind::SyncGroup(
+            SyncGroupRequest::default()
+                .with_group_id(group_id.clone())
+                .with_generation_id(generation_id)
+                .with_member_id(member_id.clone()),
+        ),
+    )
+    .await;
+    let ResponseKind::SyncGroup(response) = response else {
+        panic!("expected SyncGroup response")
+    };
+    assert_eq!(response.error_code, ResponseError::InvalidRequest.code());
+
+    let assignment = Bytes::from_static(b"assignment");
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::SyncGroup,
+        3,
+        RequestKind::SyncGroup(
+            SyncGroupRequest::default()
+                .with_group_id(group_id.clone())
+                .with_generation_id(generation_id)
+                .with_member_id(member_id.clone())
+                .with_assignments(vec![
+                    SyncGroupRequestAssignment::default()
+                        .with_member_id(member_id.clone())
+                        .with_assignment(assignment.clone()),
+                ]),
+        ),
+    )
+    .await;
+    let ResponseKind::SyncGroup(response) = response else {
+        panic!("expected SyncGroup response")
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.assignment, assignment);
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::Heartbeat,
+        3,
+        RequestKind::Heartbeat(
+            HeartbeatRequest::default()
+                .with_group_id(group_id.clone())
+                .with_generation_id(generation_id)
+                .with_member_id(member_id.clone()),
+        ),
+    )
+    .await;
+    let ResponseKind::Heartbeat(response) = response else {
+        panic!("expected Heartbeat response")
+    };
+    assert_eq!(response.error_code, 0);
+
+    for (heartbeat_member, heartbeat_generation, expected_error) in [
+        (
+            member_id.clone(),
+            generation_id + 1,
+            ResponseError::IllegalGeneration,
+        ),
+        (
+            StrBytes::from_static_str("missing-member"),
+            generation_id,
+            ResponseError::UnknownMemberId,
+        ),
+    ] {
+        let response = dispatch_kind(
+            &dispatcher,
+            ApiKey::Heartbeat,
+            3,
+            RequestKind::Heartbeat(
+                HeartbeatRequest::default()
+                    .with_group_id(group_id.clone())
+                    .with_generation_id(heartbeat_generation)
+                    .with_member_id(heartbeat_member),
+            ),
+        )
+        .await;
+        let ResponseKind::Heartbeat(response) = response else {
+            panic!("expected Heartbeat response")
+        };
+        assert_eq!(response.error_code, expected_error.code());
+    }
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::OffsetCommit,
+        7,
+        RequestKind::OffsetCommit(
+            OffsetCommitRequest::default()
+                .with_group_id(group_id.clone())
+                .with_generation_id_or_member_epoch(generation_id)
+                .with_member_id(member_id.clone())
+                .with_topics(vec![
+                    OffsetCommitRequestTopic::default()
+                        .with_name(TopicName::from(StrBytes::from_static_str("events")))
+                        .with_partitions(vec![
+                            OffsetCommitRequestPartition::default()
+                                .with_partition_index(0)
+                                .with_committed_offset(4),
+                        ]),
+                ]),
+        ),
+    )
+    .await;
+    let ResponseKind::OffsetCommit(response) = response else {
+        panic!("expected OffsetCommit response")
+    };
+    assert_eq!(response.topics[0].partitions[0].error_code, 0);
+
+    let offset_fetch = || {
+        OffsetFetchRequest::default()
+            .with_group_id(group_id.clone())
+            .with_topics(Some(vec![
+                OffsetFetchRequestTopic::default()
+                    .with_name(TopicName::from(StrBytes::from_static_str("events")))
+                    .with_partition_indexes(vec![0]),
+            ]))
+    };
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::OffsetFetch,
+        5,
+        RequestKind::OffsetFetch(offset_fetch()),
+    )
+    .await;
+    let ResponseKind::OffsetFetch(response) = response else {
+        panic!("expected OffsetFetch response")
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.topics[0].partitions[0].committed_offset, 4);
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::LeaveGroup,
+        3,
+        RequestKind::LeaveGroup(
+            LeaveGroupRequest::default()
+                .with_group_id(group_id.clone())
+                .with_members(vec![
+                    MemberIdentity::default().with_member_id(member_id.clone()),
+                ]),
+        ),
+    )
+    .await;
+    let ResponseKind::LeaveGroup(response) = response else {
+        panic!("expected LeaveGroup response")
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.members[0].error_code, 0);
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::OffsetFetch,
+        5,
+        RequestKind::OffsetFetch(offset_fetch()),
+    )
+    .await;
+    let ResponseKind::OffsetFetch(response) = response else {
+        panic!("expected OffsetFetch response")
+    };
+    assert_eq!(response.topics[0].partitions[0].committed_offset, 4);
 }
 
 #[tokio::test]
@@ -938,6 +1215,38 @@ fn ephemeral_config() -> Config {
 
 fn test_dispatcher() -> Dispatcher {
     Dispatcher::new(test_broker_state(true))
+}
+
+async fn dispatch_kind(
+    dispatcher: &Dispatcher,
+    api_key: ApiKey,
+    version: i16,
+    body: RequestKind,
+) -> ResponseKind {
+    let header = RequestHeader::default()
+        .with_request_api_key(api_key as i16)
+        .with_request_api_version(version)
+        .with_correlation_id(1)
+        .with_client_id(Some(StrBytes::from_static_str("memkafka-wire-test")));
+    let mut encoded_request = BytesMut::new();
+    encode_request_header_into_buffer(&mut encoded_request, &header)
+        .expect("encode request header");
+    body.encode(&mut encoded_request, version)
+        .expect("encode request body");
+    let decoded = decode_request(encoded_request.freeze()).expect("decode Kafka request");
+    let response = dispatcher
+        .dispatch(&decoded)
+        .await
+        .expect("dispatch Kafka request");
+    let mut encoded_response =
+        encode_response(api_key, version, 1, &response).expect("encode Kafka response");
+    let response_header = ResponseHeader::decode(
+        &mut encoded_response,
+        api_key.response_header_version(version),
+    )
+    .expect("decode response header");
+    assert_eq!(response_header.correlation_id, 1);
+    ResponseKind::decode(api_key, &mut encoded_response, version).expect("decode response body")
 }
 
 fn test_broker_state(auto_create_topics: bool) -> BrokerState {

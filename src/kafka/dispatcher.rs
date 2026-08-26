@@ -5,7 +5,9 @@ use kafka_protocol::messages::{ApiKey, RequestKind, ResponseKind};
 use crate::broker::BrokerState;
 
 use super::{
-    api_versions, codec::DecodedRequest, create_topics, fetch, list_offsets, metadata, produce,
+    api_versions, codec::DecodedRequest, create_topics, fetch, find_coordinator, heartbeat,
+    join_group, leave_group, list_offsets, metadata, offset_commit, offset_fetch, produce,
+    sync_group,
 };
 
 #[derive(Clone, Debug)]
@@ -69,6 +71,80 @@ impl Dispatcher {
                 match &request.body {
                     RequestKind::Fetch(body) => {
                         Ok(fetch::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::FindCoordinator => {
+                require_version(request.api_key, version, &find_coordinator::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::FindCoordinator(body) => {
+                        Ok(find_coordinator::response(body, &self.broker).into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::JoinGroup => {
+                require_version(request.api_key, version, &join_group::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::JoinGroup(body) => Ok(join_group::response(
+                        body,
+                        version,
+                        request
+                            .header
+                            .client_id
+                            .as_ref()
+                            .map(|value| value.as_str()),
+                        &self.broker,
+                    )
+                    .await
+                    .into()),
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::SyncGroup => {
+                require_version(request.api_key, version, &sync_group::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::SyncGroup(body) => {
+                        Ok(sync_group::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::Heartbeat => {
+                require_version(request.api_key, version, &heartbeat::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::Heartbeat(body) => {
+                        Ok(heartbeat::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::LeaveGroup => {
+                require_version(request.api_key, version, &leave_group::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::LeaveGroup(body) => {
+                        Ok(leave_group::response(body, version, &self.broker)
+                            .await
+                            .into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::OffsetCommit => {
+                require_version(request.api_key, version, &offset_commit::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::OffsetCommit(body) => {
+                        Ok(offset_commit::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::OffsetFetch => {
+                require_version(request.api_key, version, &offset_fetch::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::OffsetFetch(body) => {
+                        Ok(offset_fetch::response(body, &self.broker).await.into())
                     }
                     _ => Err(DispatchError::BodyMismatch(request.api_key)),
                 }

@@ -4,9 +4,11 @@ use tokio::sync::Notify;
 
 use crate::config::AdvertisedAddress;
 
+pub(crate) mod groups;
 pub(crate) mod partition;
 pub mod topics;
 
+use groups::GroupCoordinator;
 use topics::TopicCatalog;
 
 #[derive(Clone, Debug)]
@@ -15,6 +17,7 @@ pub struct BrokerState {
     advertised_kafka: AdvertisedAddress,
     auto_create_topics: bool,
     topics: TopicCatalog,
+    groups: GroupCoordinator,
     append_notification: Arc<Notify>,
 }
 
@@ -30,6 +33,7 @@ impl BrokerState {
             advertised_kafka,
             auto_create_topics,
             topics: TopicCatalog::new(default_partitions),
+            groups: GroupCoordinator::new(),
             append_notification: Arc::new(Notify::new()),
         }
     }
@@ -48,6 +52,10 @@ impl BrokerState {
 
     pub fn topics(&self) -> &TopicCatalog {
         &self.topics
+    }
+
+    pub(crate) fn groups(&self) -> &GroupCoordinator {
+        &self.groups
     }
 
     pub(crate) fn append_notification(&self) -> Arc<Notify> {

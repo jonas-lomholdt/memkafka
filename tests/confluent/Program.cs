@@ -90,6 +90,9 @@ try
     await AssertOrderedDeliveryTwice(bootstrapServers, deliveryTopic);
     Console.WriteLine("pass   publish/consume is ordered and uncommitted records can be read again");
 
+    await AssertConsumerGroupOffsets(admin, bootstrapServers);
+    Console.WriteLine("pass   group auto/manual commits resume and no-commit restarts redeliver");
+
     Console.WriteLine("PASS   Confluent.Kafka 2.15.0 black-box acceptance");
 }
 finally
@@ -208,6 +211,170 @@ static async Task AssertOrderedDeliveryTwice(string bootstrapServers, string top
 
     consumer.Assign(new TopicPartitionOffset(partition, new Offset(0)));
     AssertSequence(ConsumeExactly(consumer, 10), topic);
+}
+
+static async Task AssertConsumerGroupOffsets(
+    IAdminClient admin,
+    string bootstrapServers)
+{
+    await AssertAutoCommitResume(admin, bootstrapServers);
+    await AssertManualCommitResume(admin, bootstrapServers);
+    await AssertNoCommitRedelivery(admin, bootstrapServers);
+}
+
+static async Task AssertAutoCommitResume(IAdminClient admin, string bootstrapServers)
+{
+    var topic = await CreateGroupTopic(admin, bootstrapServers, "auto-commit");
+    var groupId = $"auto-{Guid.NewGuid():N}";
+
+    using (var consumer = BuildGroupConsumer(bootstrapServers, groupId, true, 100))
+    {
+        consumer.Subscribe(topic);
+        AssertGroupRecord(consumer.Consume(TimeSpan.FromSeconds(5)), topic, 0);
+        AssertGroupRecord(consumer.Consume(TimeSpan.FromSeconds(5)), topic, 1);
+        await WaitForCommittedOffset(consumer, topic, 2);
+        consumer.Close();
+    }
+
+    using var restarted = BuildGroupConsumer(bootstrapServers, groupId, false);
+    restarted.Subscribe(topic);
+    AssertGroupRecord(restarted.Consume(TimeSpan.FromSeconds(5)), topic, 2);
+    restarted.Close();
+}
+
+static async Task WaitForCommittedOffset(
+    IConsumer<string, string> consumer,
+    string topic,
+    long expectedOffset)
+{
+    var partition = new TopicPartition(topic, new Partition(0));
+    var deadline = Stopwatch.StartNew();
+    while (deadline.Elapsed < TimeSpan.FromSeconds(5))
+    {
+        var committed = consumer.Committed([partition], TimeSpan.FromSeconds(1)).Single();
+        if (committed.Offset == new Offset(expectedOffset))
+        {
+            return;
+        }
+        await Task.Delay(25);
+    }
+    throw new InvalidOperationException(
+        $"auto commit for {partition} did not reach offset {expectedOffset}");
+}
+
+static async Task AssertManualCommitResume(IAdminClient admin, string bootstrapServers)
+{
+    var topic = await CreateGroupTopic(admin, bootstrapServers, "manual-commit");
+    var groupId = $"manual-{Guid.NewGuid():N}";
+
+    using (var consumer = BuildGroupConsumer(bootstrapServers, groupId, false))
+    {
+        consumer.Subscribe(topic);
+        var first = consumer.Consume(TimeSpan.FromSeconds(5));
+        AssertGroupRecord(first, topic, 0);
+        consumer.Commit(first);
+        consumer.Close();
+    }
+
+    using var restarted = BuildGroupConsumer(bootstrapServers, groupId, false);
+    restarted.Subscribe(topic);
+    AssertGroupRecord(restarted.Consume(TimeSpan.FromSeconds(5)), topic, 1);
+    restarted.Close();
+}
+
+static async Task AssertNoCommitRedelivery(IAdminClient admin, string bootstrapServers)
+{
+    var topic = await CreateGroupTopic(admin, bootstrapServers, "no-commit");
+    var groupId = $"uncommitted-{Guid.NewGuid():N}";
+
+    using (var consumer = BuildGroupConsumer(bootstrapServers, groupId, false))
+    {
+        consumer.Subscribe(topic);
+        AssertGroupRecord(consumer.Consume(TimeSpan.FromSeconds(5)), topic, 0);
+        consumer.Close();
+    }
+
+    using var restarted = BuildGroupConsumer(bootstrapServers, groupId, false);
+    restarted.Subscribe(topic);
+    AssertGroupRecord(restarted.Consume(TimeSpan.FromSeconds(5)), topic, 0);
+    restarted.Close();
+}
+
+static async Task<string> CreateGroupTopic(
+    IAdminClient admin,
+    string bootstrapServers,
+    string prefix)
+{
+    var topic = $"{prefix}-{Guid.NewGuid():N}";
+    await admin.CreateTopicsAsync(
+        [
+            new TopicSpecification
+            {
+                Name = topic,
+                NumPartitions = 1,
+                ReplicationFactor = 1,
+            },
+        ],
+        new CreateTopicsOptions { RequestTimeout = TimeSpan.FromSeconds(5) });
+
+    using var producer = new ProducerBuilder<string, string>(new ProducerConfig
+    {
+        BootstrapServers = bootstrapServers,
+        Acks = Acks.All,
+        EnableIdempotence = false,
+        MaxInFlight = 1,
+        MessageTimeoutMs = 5_000,
+        SocketTimeoutMs = 5_000,
+        AllowAutoCreateTopics = false,
+    }).Build();
+    for (var index = 0; index < 4; index++)
+    {
+        await producer.ProduceAsync(
+            new TopicPartition(topic, new Partition(0)),
+            new Message<string, string>
+            {
+                Key = $"group-key-{index}",
+                Value = $"group-message-{index}",
+            });
+    }
+    return topic;
+}
+
+static IConsumer<string, string> BuildGroupConsumer(
+    string bootstrapServers,
+    string groupId,
+    bool enableAutoCommit,
+    int? autoCommitIntervalMs = null)
+{
+    return new ConsumerBuilder<string, string>(new ConsumerConfig
+    {
+        BootstrapServers = bootstrapServers,
+        GroupId = groupId,
+        EnableAutoCommit = enableAutoCommit,
+        AutoCommitIntervalMs = autoCommitIntervalMs,
+        AutoOffsetReset = AutoOffsetReset.Earliest,
+        PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky,
+        AllowAutoCreateTopics = false,
+        SocketTimeoutMs = 5_000,
+        SessionTimeoutMs = 6_000,
+    }).Build();
+}
+
+static void AssertGroupRecord(
+    ConsumeResult<string, string>? record,
+    string topic,
+    int expectedOffset)
+{
+    if (record is null
+        || record.Topic != topic
+        || record.Partition != new Partition(0)
+        || record.Offset != new Offset(expectedOffset)
+        || record.Message.Key != $"group-key-{expectedOffset}"
+        || record.Message.Value != $"group-message-{expectedOffset}")
+    {
+        throw new InvalidOperationException(
+            $"expected {topic}[0]@{expectedOffset}, received {record?.TopicPartitionOffset}");
+    }
 }
 
 static List<ConsumeResult<string, string>> ConsumeExactly(

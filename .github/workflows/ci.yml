@@ -88,6 +88,9 @@ jobs:
           --publish 9092:9092
           --publish 8081:8081
           memkafka:ci
+          --kafka-listen 0.0.0.0:9092
+          --schema-registry-listen 0.0.0.0:8081
+          --kafka-advertised-address 127.0.0.1:9092
 
       - name: Run Confluent.Kafka container black-box tests
         env:
