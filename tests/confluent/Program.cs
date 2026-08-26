@@ -76,7 +76,21 @@ try
         Console.WriteLine("pass   replication factor 2 is rejected");
     }
 
-    Console.WriteLine("PASS   Confluent.Kafka 2.15.0 metadata acceptance");
+    var deliveryTopic = $"delivery-{Guid.NewGuid():N}";
+    await admin.CreateTopicsAsync(
+        [
+            new TopicSpecification
+            {
+                Name = deliveryTopic,
+                NumPartitions = 1,
+                ReplicationFactor = 1,
+            },
+        ],
+        new CreateTopicsOptions { RequestTimeout = TimeSpan.FromSeconds(5) });
+    await AssertOrderedDeliveryTwice(bootstrapServers, deliveryTopic);
+    Console.WriteLine("pass   publish/consume is ordered and uncommitted records can be read again");
+
+    Console.WriteLine("PASS   Confluent.Kafka 2.15.0 black-box acceptance");
 }
 finally
 {
@@ -145,6 +159,93 @@ static void AssertTopicPartitions(Metadata metadata, string topicName, int expec
     {
         throw new InvalidOperationException(
             $"topic '{topicName}' has {topic.Partitions.Count} partitions, expected {expectedPartitions}");
+    }
+}
+
+static async Task AssertOrderedDeliveryTwice(string bootstrapServers, string topic)
+{
+    var partition = new TopicPartition(topic, new Partition(0));
+    using (var producer = new ProducerBuilder<string, string>(new ProducerConfig
+    {
+        BootstrapServers = bootstrapServers,
+        Acks = Acks.All,
+        EnableIdempotence = false,
+        MaxInFlight = 1,
+        MessageTimeoutMs = 5_000,
+        SocketTimeoutMs = 5_000,
+        AllowAutoCreateTopics = false,
+    }).Build())
+    {
+        for (var index = 0; index < 10; index++)
+        {
+            var delivery = await producer.ProduceAsync(
+                partition,
+                new Message<string, string>
+                {
+                    Key = $"key-{index}",
+                    Value = $"message-{index}",
+                });
+            if (delivery.Offset != new Offset(index))
+            {
+                throw new InvalidOperationException(
+                    $"Produce returned offset {delivery.Offset}, expected {index}");
+            }
+        }
+    }
+
+    using var consumer = new ConsumerBuilder<string, string>(new ConsumerConfig
+    {
+        BootstrapServers = bootstrapServers,
+        GroupId = $"direct-{Guid.NewGuid():N}",
+        EnableAutoCommit = false,
+        AutoOffsetReset = AutoOffsetReset.Earliest,
+        AllowAutoCreateTopics = false,
+        SocketTimeoutMs = 5_000,
+    }).Build();
+
+    consumer.Assign(new TopicPartitionOffset(partition, Offset.Beginning));
+    AssertSequence(ConsumeExactly(consumer, 10), topic);
+
+    consumer.Assign(new TopicPartitionOffset(partition, new Offset(0)));
+    AssertSequence(ConsumeExactly(consumer, 10), topic);
+}
+
+static List<ConsumeResult<string, string>> ConsumeExactly(
+    IConsumer<string, string> consumer,
+    int count)
+{
+    var deadline = Stopwatch.StartNew();
+    var records = new List<ConsumeResult<string, string>>(count);
+    while (records.Count < count && deadline.Elapsed < TimeSpan.FromSeconds(5))
+    {
+        var record = consumer.Consume(TimeSpan.FromMilliseconds(250));
+        if (record is not null)
+        {
+            records.Add(record);
+        }
+    }
+    if (records.Count != count)
+    {
+        throw new InvalidOperationException($"consumed {records.Count} records, expected {count}");
+    }
+    return records;
+}
+
+static void AssertSequence(List<ConsumeResult<string, string>> records, string topic)
+{
+    for (var index = 0; index < records.Count; index++)
+    {
+        var record = records[index];
+        if (record.Topic != topic
+            || record.Partition != new Partition(0)
+            || record.Offset != new Offset(index)
+            || record.Message.Key != $"key-{index}"
+            || record.Message.Value != $"message-{index}")
+        {
+            throw new InvalidOperationException(
+                $"unexpected record at index {index}: {record.TopicPartitionOffset}, "
+                + $"key={record.Message.Key}, value={record.Message.Value}");
+        }
     }
 }
 

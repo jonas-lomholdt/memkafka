@@ -4,7 +4,7 @@
 
 MemKafka is becoming a fast, single-binary, in-memory Kafka-compatible broker for local development and integration tests. The same process will also expose a Confluent-compatible Schema Registry API.
 
-> **Current status:** topic discovery and creation work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Produce, Fetch, consumer groups, and Schema Registry routes are not implemented yet.
+> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Consumer groups and Schema Registry routes are not implemented yet.
 
 MemKafka is test infrastructure. It is not intended for production, and all state disappears when the process exits.
 
@@ -71,22 +71,25 @@ The current black-box suite passes independently with Confluent.Kafka 2.15.0, Ap
 - `ApiVersions` negotiation;
 - Metadata lookup and automatic topic creation with two default partitions;
 - explicit topic creation with a caller-selected partition count;
-- clear rejection of unsupported replication factors.
+- clear rejection of unsupported replication factors;
+- acknowledged Produce to an explicit partition;
+- Fetch from an earliest or manually selected offset;
+- ten sequential records observed at contiguous offsets in partition order;
+- a second read from offset `0` without a commit, demonstrating in-process at-least-once redelivery.
 
-The broker currently advertises only `Metadata 0-9`, `ApiVersions 0-4`, and `CreateTopics 2-6`.
+The broker currently advertises only `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, and `CreateTopics 2-6`.
 
 CI runs the Confluent.Kafka suite against both the native binary and its Docker image, then runs separate Java 25, Rust, and Go 1.27 suites against the image.
 
 The planned subset includes:
 
-- topic creation, metadata, ordered at-least-once Produce/Fetch within one process lifetime, offsets, and modern RecordBatch storage;
 - classic consumer groups with cooperative-sticky rebalancing;
 - in-memory offset commits;
 - the Schema Registry endpoints needed by Confluent's Avro serializer and deserializer.
 
 It excludes persistence, replication, transactions, authentication, TLS, retention, topic deletion, Protobuf, and JSON Schema.
 
-The planned at-least-once guarantee applies only to acknowledged records while the MemKafka process remains running. It intentionally permits duplicate delivery after an unknown Produce outcome and does not imply durability across shutdown.
+The at-least-once guarantee applies only to acknowledged records while the MemKafka process remains running. It intentionally permits duplicate delivery after an unknown Produce outcome and does not imply durability across shutdown. `acks=0` is supported but is outside that guarantee. Automatic commits, explicit commits, and consumer-group restart behavior are not implemented yet.
 
 See the [v0.1 design specification](docs/2026-08-26-memkafka-design.md) for the exact acceptance contract and exclusions.
 

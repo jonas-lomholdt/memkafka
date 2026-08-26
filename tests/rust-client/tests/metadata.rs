@@ -4,9 +4,15 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{DateTime, Utc};
 use rskafka::{
     BackoffConfig,
-    client::{Client, ClientBuilder, error::Error, partition::UnknownTopicHandling},
+    client::{
+        Client, ClientBuilder,
+        error::Error,
+        partition::{Compression, OffsetAt, UnknownTopicHandling},
+    },
+    record::{Record, RecordAndOffset},
 };
 
 #[tokio::test]
@@ -60,6 +66,89 @@ async fn admin_rejects_replication_factor_two() {
             assert_eq!(protocol_error.to_string(), "InvalidReplicationFactor");
         }
         other => panic!("expected InvalidReplicationFactor, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn publishes_and_fetches_in_order_then_reads_uncommitted_records_again() {
+    let client = client().await;
+    let topic = unique_topic("rust-delivery");
+    client
+        .controller_client()
+        .expect("controller client")
+        .create_topic(topic.clone(), 1, 1, 5_000)
+        .await
+        .expect("single-partition topic should be created");
+    let partition = client
+        .partition_client(topic, 0, UnknownTopicHandling::Error)
+        .await
+        .expect("partition client");
+
+    for index in 0..10_i64 {
+        let offsets = partition
+            .produce(
+                vec![Record {
+                    key: Some(format!("key-{index}").into_bytes()),
+                    value: Some(format!("message-{index}").into_bytes()),
+                    headers: [("source".to_owned(), b"rust-test".to_vec())]
+                        .into_iter()
+                        .collect(),
+                    timestamp: DateTime::<Utc>::from_timestamp_millis(index)
+                        .expect("small timestamp"),
+                }],
+                Compression::NoCompression,
+            )
+            .await
+            .expect("produce acknowledged record");
+        assert_eq!(offsets, vec![index]);
+    }
+
+    assert_eq!(
+        partition
+            .get_offset(OffsetAt::Earliest)
+            .await
+            .expect("earliest offset"),
+        0
+    );
+    assert_eq!(
+        partition
+            .get_offset(OffsetAt::Latest)
+            .await
+            .expect("latest offset"),
+        10
+    );
+
+    let first = partition
+        .fetch_records(0, 1..1_000_000, 1_000)
+        .await
+        .expect("first fetch")
+        .0;
+    assert_sequence(&first);
+
+    let repeated = partition
+        .fetch_records(0, 1..1_000_000, 1_000)
+        .await
+        .expect("repeated fetch")
+        .0;
+    assert_sequence(&repeated);
+}
+
+fn assert_sequence(records: &[RecordAndOffset]) {
+    assert_eq!(records.len(), 10);
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(record.offset, index as i64);
+        assert_eq!(
+            record.record.key.as_deref(),
+            Some(format!("key-{index}").as_bytes())
+        );
+        assert_eq!(
+            record.record.value.as_deref(),
+            Some(format!("message-{index}").as_bytes())
+        );
+        assert_eq!(
+            record.record.headers.get("source").map(Vec::as_slice),
+            Some(b"rust-test".as_slice())
+        );
     }
 }
 

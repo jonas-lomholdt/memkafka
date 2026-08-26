@@ -115,7 +115,7 @@ jobs:
         env:
           MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
         working-directory: tests/go-client
-        run: go test -mod=readonly ./...
+        run: go test -count=1 -mod=readonly ./...
 
       - name: Stop black-box test container
         if: always()

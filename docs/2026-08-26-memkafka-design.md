@@ -2,7 +2,8 @@
 
 **Date:** 2026-08-26  
 **Status:** In progress
-**Implementation:** Metadata and topic creation complete; Produce/Fetch is the next slice
+
+**Implementation:** Metadata, topic creation, Produce, Fetch, and ListOffsets complete; consumer groups are the next Kafka slice
 
 ## 1. Summary
 
