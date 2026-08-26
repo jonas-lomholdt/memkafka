@@ -4,7 +4,7 @@
 
 MemKafka is becoming a fast, single-binary, in-memory Kafka-compatible broker for local development and integration tests. The same process will also expose a Confluent-compatible Schema Registry API.
 
-> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes single-member `Subscribe()`/`Consume()`, automatic and explicit offset commits, restart resume, and no-commit redelivery. Multi-member rebalancing and Schema Registry routes are next.
+> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes single-member `Subscribe()`/`Consume()`, automatic and explicit offset commits, restart resume, and no-commit redelivery. Kafbat UI v1.5.0 discovers MemKafka and browses an exact produced record. Multi-member rebalancing and Schema Registry routes are next.
 
 MemKafka is test infrastructure. It is not intended for production, and all state disappears when the process exits.
 
@@ -79,15 +79,16 @@ The current black-box suite passes independently with Confluent.Kafka 2.15.0, Ap
 
 The Confluent.Kafka suite additionally proves a real classic-group Join/Sync/Heartbeat lifecycle with `cooperative-sticky`, automatic commit restart recovery, explicit commit restart recovery, and redelivery after restarting without a commit.
 
-The broker advertises `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, `CreateTopics 2-6`, `FindCoordinator 0-2`, `JoinGroup 0-5`, `SyncGroup 0-3`, `Heartbeat 0-3`, `LeaveGroup 0-3`, `OffsetCommit 2-7`, and `OffsetFetch 1-5`.
+The pinned Kafbat UI v1.5.0 suite independently produces a unique string record, observes its topic through Kafbat's API, and verifies that Kafbat's message browser returns the exact key and value.
 
-CI runs the Confluent.Kafka suite against both the native binary and its Docker image, then runs separate Java 25, Rust, and Go 1.27 suites against the image.
+The broker advertises `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, `CreateTopics 2-6`, `FindCoordinator 0-2`, `JoinGroup 0-5`, `SyncGroup 0-3`, `Heartbeat 0-3`, `LeaveGroup 0-3`, `OffsetCommit 2-7`, `OffsetFetch 1-5`, `ListGroups 0`, and read-only `DescribeConfigs 1`.
+
+CI runs the Confluent.Kafka suite against both the native binary and its Docker image, then runs separate Java 25, Rust, Go 1.27, and Kafbat UI suites against the image.
 
 The remaining planned subset includes:
 
 - multi-member classic consumer groups with cooperative-sticky rebalancing and session expiry;
 - the Schema Registry endpoints needed by Confluent's Avro serializer and deserializer.
-- a pinned Kafbat UI black-box test that discovers a topic and returns a produced record through Kafbat's message API.
 
 It excludes persistence, replication, transactions, authentication, TLS, retention, topic deletion, Protobuf, and JSON Schema.
 

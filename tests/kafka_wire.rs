@@ -5,13 +5,14 @@ use clap::Parser;
 use kafka_protocol::{
     ResponseError,
     messages::{
-        ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, FetchRequest,
-        FindCoordinatorRequest, GroupId, HeartbeatRequest, JoinGroupRequest, LeaveGroupRequest,
-        ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
-        ProduceRequest, RequestHeader, RequestKind, ResponseHeader, ResponseKind, SyncGroupRequest,
-        TopicName, TransactionalId,
+        ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeConfigsRequest,
+        FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest, JoinGroupRequest,
+        LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest, MetadataRequest,
+        OffsetCommitRequest, OffsetFetchRequest, ProduceRequest, RequestHeader, RequestKind,
+        ResponseHeader, ResponseKind, SyncGroupRequest, TopicName, TransactionalId,
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
+        describe_configs_request::DescribeConfigsResource,
         fetch_request::{FetchPartition, FetchTopic},
         fetch_response::FetchResponse,
         join_group_request::JoinGroupRequestProtocol,
@@ -71,7 +72,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_eq!(header.correlation_id, 42);
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
-    assert_eq!(response.api_keys.len(), 13);
+    assert_eq!(response.api_keys.len(), 15);
     assert_api_range(&response, ApiKey::Metadata, 0, 9);
     assert_api_range(&response, ApiKey::ApiVersions, 0, 4);
     assert_api_range(&response, ApiKey::CreateTopics, 2, 6);
@@ -85,6 +86,8 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_api_range(&response, ApiKey::LeaveGroup, 0, 3);
     assert_api_range(&response, ApiKey::OffsetCommit, 2, 7);
     assert_api_range(&response, ApiKey::OffsetFetch, 1, 5);
+    assert_api_range(&response, ApiKey::ListGroups, 0, 0);
+    assert_api_range(&response, ApiKey::DescribeConfigs, 1, 1);
 }
 
 #[tokio::test]
@@ -120,7 +123,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         let (header, body) = decode_api_versions_response(response);
 
         assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(body.api_keys.len(), 13);
+        assert_eq!(body.api_keys.len(), 15);
         assert_api_range(&body, ApiKey::Metadata, 0, 9);
         assert_api_range(&body, ApiKey::ApiVersions, 0, 4);
         assert_api_range(&body, ApiKey::CreateTopics, 2, 6);
@@ -134,6 +137,8 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         assert_api_range(&body, ApiKey::LeaveGroup, 0, 3);
         assert_api_range(&body, ApiKey::OffsetCommit, 2, 7);
         assert_api_range(&body, ApiKey::OffsetFetch, 1, 5);
+        assert_api_range(&body, ApiKey::ListGroups, 0, 0);
+        assert_api_range(&body, ApiKey::DescribeConfigs, 1, 1);
     }
 
     shutdown_tx.send(()).expect("request server shutdown");
@@ -142,6 +147,154 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         .expect("server shutdown timed out")
         .expect("server task panicked")
         .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn list_groups_v0_returns_an_empty_successful_listing() {
+    let response = dispatch_kind(
+        &test_dispatcher(),
+        ApiKey::ListGroups,
+        0,
+        RequestKind::ListGroups(ListGroupsRequest::default()),
+    )
+    .await;
+    let ResponseKind::ListGroups(response) = response else {
+        panic!("expected ListGroups response")
+    };
+
+    assert_eq!(response.error_code, 0);
+    assert!(response.groups.is_empty());
+}
+
+#[tokio::test]
+async fn list_groups_v0_returns_existing_group_ids_and_protocol_types() {
+    let dispatcher = test_dispatcher();
+    let group_id = GroupId::from(StrBytes::from_static_str("listed-group"));
+    let join = |member_id: StrBytes| {
+        JoinGroupRequest::default()
+            .with_group_id(group_id.clone())
+            .with_session_timeout_ms(10_000)
+            .with_rebalance_timeout_ms(30_000)
+            .with_member_id(member_id)
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("cooperative-sticky"))
+                    .with_metadata(Bytes::from_static(b"subscription")),
+            ])
+    };
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::JoinGroup,
+        5,
+        RequestKind::JoinGroup(join(StrBytes::default())),
+    )
+    .await;
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::JoinGroup,
+        5,
+        RequestKind::JoinGroup(join(response.member_id)),
+    )
+    .await;
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+    assert_eq!(response.error_code, 0);
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::ListGroups,
+        0,
+        RequestKind::ListGroups(ListGroupsRequest::default()),
+    )
+    .await;
+    let ResponseKind::ListGroups(response) = response else {
+        panic!("expected ListGroups response")
+    };
+
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.groups.len(), 1);
+    assert_eq!(response.groups[0].group_id.as_str(), "listed-group");
+    assert_eq!(response.groups[0].protocol_type.as_str(), "consumer");
+}
+
+#[tokio::test]
+async fn describe_configs_v1_returns_read_only_results_for_every_requested_resource() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("events", 1, 1)
+        .await
+        .expect("create topic");
+    let response = dispatch_kind(
+        &Dispatcher::new(broker),
+        ApiKey::DescribeConfigs,
+        1,
+        RequestKind::DescribeConfigs(DescribeConfigsRequest::default().with_resources(vec![
+                DescribeConfigsResource::default()
+                    .with_resource_type(4)
+                    .with_resource_name(StrBytes::from_static_str("1")),
+                DescribeConfigsResource::default()
+                    .with_resource_type(2)
+                    .with_resource_name(StrBytes::from_static_str("events")),
+            ])),
+    )
+    .await;
+    let ResponseKind::DescribeConfigs(response) = response else {
+        panic!("expected DescribeConfigs response")
+    };
+
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.results[0].error_code, 0);
+    assert_eq!(response.results[0].resource_type, 4);
+    assert_eq!(response.results[0].resource_name.as_str(), "1");
+    assert!(response.results[0].configs.is_empty());
+    assert_eq!(response.results[1].error_code, 0);
+    assert_eq!(response.results[1].resource_type, 2);
+    assert_eq!(response.results[1].resource_name.as_str(), "events");
+    assert!(response.results[1].configs.is_empty());
+}
+
+#[tokio::test]
+async fn describe_configs_v1_rejects_unknown_or_unsupported_resources() {
+    let response = dispatch_kind(
+        &test_dispatcher(),
+        ApiKey::DescribeConfigs,
+        1,
+        RequestKind::DescribeConfigs(DescribeConfigsRequest::default().with_resources(vec![
+                DescribeConfigsResource::default()
+                    .with_resource_type(2)
+                    .with_resource_name(StrBytes::from_static_str("missing-topic")),
+                DescribeConfigsResource::default()
+                    .with_resource_type(4)
+                    .with_resource_name(StrBytes::from_static_str("2")),
+                DescribeConfigsResource::default()
+                    .with_resource_type(8)
+                    .with_resource_name(StrBytes::from_static_str("unsupported")),
+            ])),
+    )
+    .await;
+    let ResponseKind::DescribeConfigs(response) = response else {
+        panic!("expected DescribeConfigs response")
+    };
+
+    assert_eq!(
+        response.results[0].error_code,
+        ResponseError::UnknownTopicOrPartition.code()
+    );
+    assert_eq!(
+        response.results[1].error_code,
+        ResponseError::BrokerNotAvailable.code()
+    );
+    assert_eq!(
+        response.results[2].error_code,
+        ResponseError::InvalidRequest.code()
+    );
 }
 
 #[tokio::test]

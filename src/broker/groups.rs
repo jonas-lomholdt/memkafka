@@ -91,6 +91,12 @@ pub(crate) struct JoinedMember {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GroupSummary {
+    pub(crate) group_id: String,
+    pub(crate) protocol_type: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SyncAssignment {
     pub(crate) member_id: String,
     pub(crate) assignment: Bytes,
@@ -151,6 +157,28 @@ impl GroupCoordinator {
                 next_member_id: AtomicU64::new(1),
             }),
         }
+    }
+
+    pub(crate) async fn list(&self) -> Vec<GroupSummary> {
+        let mut groups = self
+            .inner
+            .groups
+            .read()
+            .await
+            .iter()
+            .map(|(group_id, group)| (group_id.clone(), Arc::clone(group)))
+            .collect::<Vec<_>>();
+        groups.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+        let mut summaries = Vec::with_capacity(groups.len());
+        for (group_id, group) in groups {
+            let group = group.lock().await;
+            summaries.push(GroupSummary {
+                group_id,
+                protocol_type: group.protocol_type.clone(),
+            });
+        }
+        summaries
     }
 
     pub(crate) async fn join(

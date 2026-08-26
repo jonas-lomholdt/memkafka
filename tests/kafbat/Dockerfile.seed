@@ -1,0 +1,11 @@
+FROM golang:1.27.0-bookworm AS builder
+
+WORKDIR /build
+COPY tests/go-client/go.mod tests/go-client/go.sum ./
+RUN go mod download
+COPY tests/go-client/cmd/kafbat-seed ./cmd/kafbat-seed
+RUN CGO_ENABLED=0 go build -trimpath -o /kafbat-seed ./cmd/kafbat-seed
+
+FROM scratch
+COPY --from=builder /kafbat-seed /kafbat-seed
+ENTRYPOINT ["/kafbat-seed"]

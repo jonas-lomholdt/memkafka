@@ -5,9 +5,9 @@ use kafka_protocol::messages::{ApiKey, RequestKind, ResponseKind};
 use crate::broker::BrokerState;
 
 use super::{
-    api_versions, codec::DecodedRequest, create_topics, fetch, find_coordinator, heartbeat,
-    join_group, leave_group, list_offsets, metadata, offset_commit, offset_fetch, produce,
-    sync_group,
+    api_versions, codec::DecodedRequest, create_topics, describe_configs, fetch, find_coordinator,
+    heartbeat, join_group, leave_group, list_groups, list_offsets, metadata, offset_commit,
+    offset_fetch, produce, sync_group,
 };
 
 #[derive(Clone, Debug)]
@@ -145,6 +145,24 @@ impl Dispatcher {
                 match &request.body {
                     RequestKind::OffsetFetch(body) => {
                         Ok(offset_fetch::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::ListGroups => {
+                require_version(request.api_key, version, &list_groups::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::ListGroups(_) => {
+                        Ok(list_groups::response(&self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::DescribeConfigs => {
+                require_version(request.api_key, version, &describe_configs::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::DescribeConfigs(body) => {
+                        Ok(describe_configs::response(body, &self.broker).await.into())
                     }
                     _ => Err(DispatchError::BodyMismatch(request.api_key)),
                 }

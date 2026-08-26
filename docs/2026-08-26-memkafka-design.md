@@ -3,7 +3,7 @@
 **Date:** 2026-08-26  
 **Status:** In progress
 
-**Implementation:** Metadata, topic creation, Produce, Fetch, ListOffsets, and single-member classic-group commit/restart flows complete; multi-member rebalancing is the next Kafka slice
+**Implementation:** Metadata, topic creation, Produce, Fetch, ListOffsets, single-member classic-group commit/restart flows, and Kafbat UI message browsing complete; multi-member rebalancing is the next Kafka slice
 
 ## 1. Summary
 
@@ -178,6 +178,8 @@ The initial Kafka API surface includes the narrow version set needed for these b
 - `LeaveGroup`
 - `OffsetCommit`
 - `OffsetFetch`
+- `ListGroups`
+- `DescribeConfigs`
 
 The precise numeric versions are an interoperability decision: tests pin a `Confluent.Kafka` minor line, record what librdkafka negotiates, and lock the smallest working version set. Adding an API version requires corresponding black-box coverage and must never change existing semantics silently.
 
@@ -482,7 +484,7 @@ Using the real `CachedSchemaRegistryClient`, `AvroSerializer`, and `AvroDeserial
 
 ### 12.5 Kafbat UI acceptance
 
-The CI black-box suite pins a released `ghcr.io/kafbat/kafka-ui` image and runs it with MemKafka on an isolated Docker network. Kafbat receives only MemKafka's advertised Kafka address and Schema Registry URL; it must not use an internal test hook or direct access to broker state.
+The CI black-box suite pins `ghcr.io/kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1` and runs it with MemKafka on an isolated Docker network. Kafbat receives only MemKafka's advertised Kafka address and Schema Registry URL; it must not use an internal test hook or direct access to broker state.
 
 The test must:
 
@@ -494,6 +496,8 @@ The test must:
 - retain Kafbat and MemKafka logs as CI diagnostics, but never treat a connection log alone as proof that message browsing works.
 
 MemKafka implements the smallest additional read-only administrative API subset needed for this scenario. Every such API must be advertised honestly and covered by protocol tests. Kafbat operations outside cluster/topic discovery and message browsing may remain unavailable unless added explicitly to this specification.
+
+The implemented compatibility subset is `ListGroups v0` plus read-only `DescribeConfigs v1` for known topic and broker resources. The producer is an independent pinned franz-go client, and the test asserts the returned SSE `MESSAGE` event rather than a Kafbat or MemKafka log line.
 
 ## 13. Explicit v0.1 exclusions
 

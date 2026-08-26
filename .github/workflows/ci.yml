@@ -120,6 +120,26 @@ jobs:
         working-directory: tests/go-client
         run: go test -count=1 -mod=readonly ./...
 
+      - name: Build Kafbat probe producer image
+        run: >-
+          docker build
+          --file tests/kafbat/Dockerfile.seed
+          --tag memkafka-kafbat-seed:ci
+          .
+
+      - name: Run Kafbat UI black-box test
+        env:
+          MEMKAFKA_KAFBAT_LOG_DIR: artifacts/kafbat
+        run: tests/kafbat/run.sh
+
+      - name: Upload Kafbat diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kafbat-diagnostics
+          path: artifacts/kafbat
+          if-no-files-found: warn
+
       - name: Stop black-box test container
         if: always()
         continue-on-error: true
