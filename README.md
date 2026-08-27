@@ -76,7 +76,7 @@ The v0.1 target is an unmodified real `Confluent.Kafka` client plus Confluent's 
 | Apache Kafka Java client | 4.3.1 | ✅ | ✅ | — | — | — |
 | rskafka (Rust) | 0.6.0 | ✅ | ✅ | — | — | — |
 | franz-go (Go) | 1.21.6 | ✅ | ✅ | — | — | — |
-| Kafbat UI | 1.5.0 | ✅ | Fetch only | — | — | ✅ |
+| Kafbat UI | 1.5.0 | ✅ | Fetch only | ✅ read-only | — | ✅ |
 
 `✅` means the capability is verified by a black-box CI test. `—` means it is not covered by that integration's suite, not that it is known to be incompatible. The Kafbat test browses a record produced by an independent franz-go client.
 
@@ -95,9 +95,9 @@ The Confluent.Kafka suite additionally proves real asynchronous Join/Sync barrie
 
 The same pinned .NET suite uses `CachedSchemaRegistryClient`, `AvroSerializer<GenericRecord>`, and `AvroDeserializer<GenericRecord>` to prove automatic registration, global IDs, subject versions, exact-schema deduplication, Confluent wire framing, successful Kafka publish/consume, and missing/unsupported-resource errors.
 
-The pinned Kafbat UI v1.5.0 suite independently produces a unique string record, observes its topic through Kafbat's API, and verifies that Kafbat's message browser returns the exact key and value.
+The pinned Kafbat UI v1.5.0 suite keeps its cluster online with an active consumer group, verifies that the group is visible read-only, independently produces a unique string record, observes its topic through Kafbat's API, and verifies that Kafbat's message browser returns the exact key and value.
 
-The broker advertises `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, `CreateTopics 2-6`, `FindCoordinator 0-2`, `JoinGroup 0-5`, `SyncGroup 0-3`, `Heartbeat 0-3`, `LeaveGroup 0-3`, `OffsetCommit 2-7`, `OffsetFetch 1-5`, `ListGroups 0`, and read-only `DescribeConfigs 1`.
+The broker advertises `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, `CreateTopics 2-6`, `FindCoordinator 0-2`, `JoinGroup 0-5`, `SyncGroup 0-3`, `Heartbeat 0-3`, `LeaveGroup 0-3`, `OffsetCommit 2-7`, `OffsetFetch 1-5`, `ListGroups 0`, `DescribeGroups 0`, and read-only `DescribeConfigs 1`.
 
 CI runs the Confluent Kafka + Avro suite against both the native binary and its Docker image, then runs separate Java 25, Rust, Go 1.27, and Kafbat UI suites against the image.
 
