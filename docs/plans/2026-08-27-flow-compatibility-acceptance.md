@@ -375,3 +375,4 @@ Expected: no uncommitted changes and branch `main` is ahead only by the reviewed
 Record the initial real-client RED command and its first protocol failure here during Task 1, then append the final GREEN command and PASS line during Task 2. Do not paste transient secrets, full broker logs, or application data.
 
 - 2026-08-27 Task 1 RED: `cargo build && dotnet run --no-restore --project tests/flow-compat/MemKafka.FlowCompatibility.csproj` failed before readiness as intended. The current binary exits `2` because `--force-auto-create-topics` is an unknown CLI argument; the runner captured the broker diagnostic and did not weaken any later group or idempotent-produce assertions.
+- 2026-08-27 Task 2 GREEN: `cargo build` exited `0`, then `env -u NO_COLOR CI=true GITHUB_ACTIONS=true dotnet run --no-restore --project tests/flow-compat/MemKafka.FlowCompatibility.csproj` exited `0` with `PASS   Confluent.Kafka 2.13.2 forced subscriptions and idempotent produce/consume`.
