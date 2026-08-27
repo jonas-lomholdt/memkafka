@@ -96,6 +96,7 @@ struct ProducerPartitionState {
 struct RecentAppend {
     base_sequence: i32,
     fingerprints: Vec<RetryFingerprint>,
+    encoded_batches: Vec<Bytes>,
     result: AppendResult,
 }
 
@@ -147,6 +148,10 @@ impl PartitionLog {
                 crc: batch.crc,
             })
             .collect::<Vec<_>>();
+        let encoded_batches = validated
+            .iter()
+            .map(|batch| batch.bytes.clone())
+            .collect::<Vec<_>>();
 
         let mut inner = self.inner.lock().await;
         let next_sequence = if let Some(producer) = producer {
@@ -158,13 +163,17 @@ impl PartitionLog {
                     return Err(AppendError::OutOfOrderSequence);
                 }
                 if let Some(recent) = state.recent.iter().find(|recent| {
-                    recent.base_sequence == base_sequence && recent.fingerprints == fingerprints
+                    recent.base_sequence == base_sequence
+                        && recent.fingerprints == fingerprints
+                        && recent.encoded_batches == encoded_batches
                 }) {
                     return Ok(AppendResult {
                         appended: false,
                         ..recent.result
                     });
                 }
+            } else if base_sequence != 0 {
+                return Err(AppendError::OutOfOrderSequence);
             }
 
             validate_sequences(&validated, expected_sequence)?;
@@ -219,6 +228,7 @@ impl PartitionLog {
             state.recent.push_back(RecentAppend {
                 base_sequence,
                 fingerprints,
+                encoded_batches,
                 result,
             });
         }
@@ -622,6 +632,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idempotent_retry_with_colliding_fingerprint_is_rejected_without_mutation() {
+        let log = PartitionLog::default();
+        let original = idempotent_batch(7, 0, 0, &["original-value"]);
+        let collision = same_length_batch_with_matching_crc(original.clone());
+
+        assert_ne!(collision, original);
+        assert_eq!(batch_length(&collision), batch_length(&original));
+        assert_eq!(record_count(&collision), record_count(&original));
+        assert_eq!(batch_crc(&collision), batch_crc(&original));
+
+        log.append(original).await.expect("append original");
+        let next_offset = log.next_offset().await;
+        let fetched = log.fetch(0, usize::MAX).await.expect("fetch original");
+
+        assert_eq!(
+            log.append(collision).await,
+            Err(AppendError::DuplicateSequence)
+        );
+        assert_eq!(log.next_offset().await, next_offset);
+        assert_eq!(
+            log.fetch(0, usize::MAX).await.expect("fetch after retry"),
+            fetched
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_first_high_sequence_is_a_gap_without_mutation() {
+        let log = PartitionLog::default();
+
+        assert_eq!(
+            log.append(idempotent_batch(7, 0, 1 << 30, &["gap"])).await,
+            Err(AppendError::OutOfOrderSequence)
+        );
+        assert_eq!(log.next_offset().await, 0);
+        assert!(
+            log.fetch(0, usize::MAX)
+                .await
+                .expect("fetch empty log")
+                .records
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn idempotent_discontinuous_record_set_is_rejected_without_partial_append() {
         let log = PartitionLog::default();
         let records = record_set(&[
@@ -969,6 +1023,23 @@ mod tests {
         extended[suffix_start..].copy_from_slice(&suffix);
         assert_eq!(crc32c(&extended[21..]), crc);
         extended.freeze()
+    }
+
+    fn same_length_batch_with_matching_crc(batch: Bytes) -> Bytes {
+        let crc = batch_crc(&batch);
+        let mut changed = BytesMut::from(batch.as_ref());
+        let value_start = batch
+            .windows(b"original-value".len())
+            .position(|window| window == b"original-value")
+            .expect("encoded value");
+        changed[value_start] ^= 1;
+
+        let suffix_start = changed.len() - 4;
+        let suffix = crc32c_suffix(&changed[21..suffix_start], crc);
+        changed[suffix_start..].copy_from_slice(&suffix);
+        assert_eq!(changed.len(), batch.len());
+        assert_eq!(crc32c(&changed[21..]), crc);
+        changed.freeze()
     }
 
     fn batch_length(batch: &Bytes) -> i32 {
