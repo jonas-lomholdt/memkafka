@@ -66,6 +66,16 @@ docker run --rm \
 
 The v0.1 target is an unmodified real `Confluent.Kafka` client plus Confluent's Avro Schema Registry integration, proven by black-box tests against pinned real client versions.
 
+| Integration | Pinned version | Metadata and topics | Produce and Fetch | Groups and commits | Schema Registry and Avro | UI message browsing |
+| --- | --- | --- | --- | --- | --- | --- |
+| Confluent.Kafka (.NET) | 2.15.0 | ✅ | ✅ | ✅ | ✅ | — |
+| Apache Kafka Java client | 4.3.1 | ✅ | ✅ | — | — | — |
+| rskafka (Rust) | 0.6.0 | ✅ | ✅ | — | — | — |
+| franz-go (Go) | 1.21.6 | ✅ | ✅ | — | — | — |
+| Kafbat UI | 1.5.0 | ✅ | Fetch only | — | — | ✅ |
+
+`✅` means the capability is verified by a black-box CI test. `—` means it is not covered by that integration's suite, not that it is known to be incompatible. The Kafbat test browses a record produced by an independent franz-go client.
+
 The current black-box suite passes independently with Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, pure-Rust rskafka 0.6.0, and pure-Go franz-go 1.21.6 for:
 
 - `ApiVersions` negotiation;
