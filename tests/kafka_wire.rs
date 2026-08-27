@@ -7,9 +7,10 @@ use kafka_protocol::{
     messages::{
         ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeConfigsRequest,
         DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest,
-        JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest,
-        MetadataRequest, OffsetCommitRequest, OffsetFetchRequest, ProduceRequest, RequestHeader,
-        RequestKind, ResponseHeader, ResponseKind, SyncGroupRequest, TopicName, TransactionalId,
+        InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
+        ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
+        ProduceRequest, RequestHeader, RequestKind, ResponseHeader, ResponseKind, SyncGroupRequest,
+        TopicName, TransactionalId,
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
         describe_configs_request::DescribeConfigsResource,
@@ -72,7 +73,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_eq!(header.correlation_id, 42);
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
-    assert_eq!(response.api_keys.len(), 16);
+    assert_eq!(response.api_keys.len(), 17);
     assert_api_range(&response, ApiKey::Metadata, 0, 9);
     assert_api_range(&response, ApiKey::ApiVersions, 0, 4);
     assert_api_range(&response, ApiKey::CreateTopics, 2, 6);
@@ -88,6 +89,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_api_range(&response, ApiKey::OffsetFetch, 1, 5);
     assert_api_range(&response, ApiKey::ListGroups, 0, 0);
     assert_api_range(&response, ApiKey::DescribeGroups, 0, 0);
+    assert_api_range(&response, ApiKey::InitProducerId, 0, 0);
     assert_api_range(&response, ApiKey::DescribeConfigs, 1, 1);
 }
 
@@ -154,7 +156,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         let (header, body) = decode_api_versions_response(response);
 
         assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(body.api_keys.len(), 16);
+        assert_eq!(body.api_keys.len(), 17);
         assert_api_range(&body, ApiKey::Metadata, 0, 9);
         assert_api_range(&body, ApiKey::ApiVersions, 0, 4);
         assert_api_range(&body, ApiKey::CreateTopics, 2, 6);
@@ -170,6 +172,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         assert_api_range(&body, ApiKey::OffsetFetch, 1, 5);
         assert_api_range(&body, ApiKey::ListGroups, 0, 0);
         assert_api_range(&body, ApiKey::DescribeGroups, 0, 0);
+        assert_api_range(&body, ApiKey::InitProducerId, 0, 0);
         assert_api_range(&body, ApiKey::DescribeConfigs, 1, 1);
     }
 
@@ -179,6 +182,65 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         .expect("server shutdown timed out")
         .expect("server task panicked")
         .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn init_producer_id_v0_allocates_distinct_epoch_zero_identities() {
+    let dispatcher = test_dispatcher();
+    let request = || {
+        RequestKind::InitProducerId(InitProducerIdRequest::default().with_transactional_id(None))
+    };
+
+    let first = dispatch_kind(&dispatcher, ApiKey::InitProducerId, 0, request()).await;
+    let ResponseKind::InitProducerId(first) = first else {
+        panic!("expected InitProducerId response")
+    };
+    assert_eq!(first.error_code, 0);
+    assert_eq!(i64::from(first.producer_id), 1);
+    assert_eq!(first.producer_epoch, 0);
+
+    let second = dispatch_kind(&dispatcher, ApiKey::InitProducerId, 0, request()).await;
+    let ResponseKind::InitProducerId(second) = second else {
+        panic!("expected InitProducerId response")
+    };
+    assert_eq!(second.error_code, 0);
+    assert_eq!(i64::from(second.producer_id), 2);
+    assert_eq!(second.producer_epoch, 0);
+}
+
+#[tokio::test]
+async fn init_producer_id_v0_rejects_transactional_ids_without_allocating() {
+    let dispatcher = test_dispatcher();
+    let transactional = dispatch_kind(
+        &dispatcher,
+        ApiKey::InitProducerId,
+        0,
+        RequestKind::InitProducerId(InitProducerIdRequest::default().with_transactional_id(Some(
+            TransactionalId::from(StrBytes::from_static_str("transactional")),
+        ))),
+    )
+    .await;
+    let ResponseKind::InitProducerId(transactional) = transactional else {
+        panic!("expected InitProducerId response")
+    };
+    assert_eq!(
+        transactional.error_code,
+        ResponseError::UnsupportedForMessageFormat.code()
+    );
+    assert_eq!(i64::from(transactional.producer_id), -1);
+    assert_eq!(transactional.producer_epoch, -1);
+
+    let next = dispatch_kind(
+        &dispatcher,
+        ApiKey::InitProducerId,
+        0,
+        RequestKind::InitProducerId(InitProducerIdRequest::default().with_transactional_id(None)),
+    )
+    .await;
+    let ResponseKind::InitProducerId(next) = next else {
+        panic!("expected InitProducerId response")
+    };
+    assert_eq!(i64::from(next.producer_id), 1);
 }
 
 #[tokio::test]

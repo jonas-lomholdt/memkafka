@@ -6,8 +6,8 @@ use crate::broker::BrokerState;
 
 use super::{
     api_versions, codec::DecodedRequest, create_topics, describe_configs, describe_groups, fetch,
-    find_coordinator, heartbeat, join_group, leave_group, list_groups, list_offsets, metadata,
-    offset_commit, offset_fetch, produce, sync_group,
+    find_coordinator, heartbeat, init_producer_id, join_group, leave_group, list_groups,
+    list_offsets, metadata, offset_commit, offset_fetch, produce, sync_group,
 };
 
 #[derive(Clone, Debug)]
@@ -163,6 +163,15 @@ impl Dispatcher {
                 match &request.body {
                     RequestKind::DescribeGroups(body) => {
                         Ok(describe_groups::response(body, &self.broker).await.into())
+                    }
+                    _ => Err(DispatchError::BodyMismatch(request.api_key)),
+                }
+            }
+            ApiKey::InitProducerId => {
+                require_version(request.api_key, version, &init_producer_id::VERSION_RANGE)?;
+                match &request.body {
+                    RequestKind::InitProducerId(body) => {
+                        Ok(init_producer_id::response(body, &self.broker).await.into())
                     }
                     _ => Err(DispatchError::BodyMismatch(request.api_key)),
                 }

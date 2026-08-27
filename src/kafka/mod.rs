@@ -10,6 +10,7 @@ mod find_coordinator;
 pub mod frame;
 mod group_error;
 mod heartbeat;
+mod init_producer_id;
 mod join_group;
 mod leave_group;
 mod list_groups;

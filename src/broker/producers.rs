@@ -2,18 +2,18 @@ use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
 use tokio::sync::Mutex;
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProducerIdentity {
     pub(crate) producer_id: i64,
     pub(crate) producer_epoch: i16,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProducerError {
     IdExhausted,
+    #[allow(dead_code)]
     UnknownProducerId,
+    #[allow(dead_code)]
     InvalidProducerEpoch,
 }
 
@@ -29,20 +29,17 @@ impl fmt::Display for ProducerError {
 
 impl Error for ProducerError {}
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct ProducerCoordinator {
     inner: Arc<Mutex<ProducerCoordinatorInner>>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 struct ProducerCoordinatorInner {
     next_id: i64,
     epochs: HashMap<i64, i16>,
 }
 
-#[allow(dead_code)]
 impl ProducerCoordinator {
     pub(crate) fn new() -> Self {
         Self {
@@ -67,6 +64,7 @@ impl ProducerCoordinator {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn validate(
         &self,
         producer_id: i64,

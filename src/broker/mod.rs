@@ -21,7 +21,6 @@ pub struct BrokerState {
     force_auto_create_topics: bool,
     topics: TopicCatalog,
     groups: GroupCoordinator,
-    #[allow(dead_code)]
     producers: ProducerCoordinator,
     append_notification: Arc<Notify>,
 }
@@ -70,7 +69,6 @@ impl BrokerState {
         &self.groups
     }
 
-    #[allow(dead_code)]
     pub(crate) fn producers(&self) -> &ProducerCoordinator {
         &self.producers
     }

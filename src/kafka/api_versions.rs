@@ -2,8 +2,8 @@ use kafka_protocol::messages::{ApiKey, ApiVersionsResponse, api_versions_respons
 
 use super::{
     create_topics, describe_configs, describe_groups, fetch, find_coordinator, heartbeat,
-    join_group, leave_group, list_groups, list_offsets, metadata, offset_commit, offset_fetch,
-    produce, sync_group,
+    init_producer_id, join_group, leave_group, list_groups, list_offsets, metadata, offset_commit,
+    offset_fetch, produce, sync_group,
 };
 
 pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=4;
@@ -25,6 +25,7 @@ pub(crate) fn response() -> ApiVersionsResponse {
         api_range(ApiKey::OffsetFetch, &offset_fetch::VERSION_RANGE),
         api_range(ApiKey::ListGroups, &list_groups::VERSION_RANGE),
         api_range(ApiKey::DescribeGroups, &describe_groups::VERSION_RANGE),
+        api_range(ApiKey::InitProducerId, &init_producer_id::VERSION_RANGE),
         api_range(ApiKey::DescribeConfigs, &describe_configs::VERSION_RANGE),
     ])
 }
