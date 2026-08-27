@@ -95,8 +95,15 @@ struct ProducerPartitionState {
 #[derive(Debug)]
 struct RecentAppend {
     base_sequence: i32,
-    fingerprints: Vec<(i32, u32)>,
+    fingerprints: Vec<RetryFingerprint>,
     result: AppendResult,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct RetryFingerprint {
+    batch_length: i32,
+    record_count: i32,
+    crc: u32,
 }
 
 #[derive(Debug)]
@@ -109,6 +116,7 @@ struct StoredBatch {
 
 #[derive(Debug)]
 struct ValidatedBatch {
+    batch_length: i32,
     record_count: i32,
     producer_id: i64,
     producer_epoch: i16,
@@ -133,7 +141,11 @@ impl PartitionLog {
         let base_sequence = first.base_sequence;
         let fingerprints = validated
             .iter()
-            .map(|batch| (batch.record_count, batch.crc))
+            .map(|batch| RetryFingerprint {
+                batch_length: batch.batch_length,
+                record_count: batch.record_count,
+                crc: batch.crc,
+            })
             .collect::<Vec<_>>();
 
         let mut inner = self.inner.lock().await;
@@ -308,12 +320,13 @@ fn validate_record_set(records: Bytes) -> Result<Vec<ValidatedBatch>, AppendErro
             return Err(AppendError::Malformed);
         }
 
-        let batch_length = i32::from_be_bytes(
+        let encoded_batch_length = i32::from_be_bytes(
             remaining[BATCH_LENGTH_OFFSET..BATCH_LENGTH_OFFSET + 4]
                 .try_into()
                 .expect("four-byte slice"),
         );
-        let batch_length = usize::try_from(batch_length).map_err(|_| AppendError::Malformed)?;
+        let batch_length =
+            usize::try_from(encoded_batch_length).map_err(|_| AppendError::Malformed)?;
         let total_length = 12_usize
             .checked_add(batch_length)
             .ok_or(AppendError::Malformed)?;
@@ -365,6 +378,7 @@ fn validate_record_set(records: Bytes) -> Result<Vec<ValidatedBatch>, AppendErro
         }
 
         validated.push(ValidatedBatch {
+            batch_length: encoded_batch_length,
             record_count,
             producer_id: info.producer_id,
             producer_epoch: info.producer_epoch,
@@ -582,6 +596,26 @@ mod tests {
 
         assert_eq!(
             log.append(idempotent_batch(7, 0, 0, &["changed"])).await,
+            Err(AppendError::DuplicateSequence)
+        );
+        assert_eq!(log.next_offset().await, next_offset);
+    }
+
+    #[tokio::test]
+    async fn idempotent_retry_with_matching_crc_but_different_batch_length_is_rejected() {
+        let log = PartitionLog::default();
+        let original = idempotent_batch(7, 0, 0, &["original"]);
+        let changed_length = length_extended_batch_with_matching_crc(original.clone());
+
+        assert_eq!(batch_length(&changed_length), batch_length(&original) + 4);
+        assert_eq!(record_count(&changed_length), record_count(&original));
+        assert_eq!(batch_crc(&changed_length), batch_crc(&original));
+
+        log.append(original).await.expect("append original");
+        let next_offset = log.next_offset().await;
+
+        assert_eq!(
+            log.append(changed_length).await,
             Err(AppendError::DuplicateSequence)
         );
         assert_eq!(log.next_offset().await, next_offset);
@@ -920,6 +954,79 @@ mod tests {
         )
         .expect("encode records");
         encoded.freeze()
+    }
+
+    fn length_extended_batch_with_matching_crc(batch: Bytes) -> Bytes {
+        let original_length = batch_length(&batch);
+        let crc = batch_crc(&batch);
+        let mut extended = BytesMut::with_capacity(batch.len() + 4);
+        extended.extend_from_slice(&batch);
+        extended.extend_from_slice(&[0; 4]);
+        extended[8..12].copy_from_slice(&(original_length + 4).to_be_bytes());
+
+        let suffix_start = extended.len() - 4;
+        let suffix = crc32c_suffix(&extended[21..suffix_start], crc);
+        extended[suffix_start..].copy_from_slice(&suffix);
+        assert_eq!(crc32c(&extended[21..]), crc);
+        extended.freeze()
+    }
+
+    fn batch_length(batch: &Bytes) -> i32 {
+        i32::from_be_bytes(batch[8..12].try_into().expect("batch length"))
+    }
+
+    fn batch_crc(batch: &Bytes) -> u32 {
+        u32::from_be_bytes(batch[17..21].try_into().expect("batch crc"))
+    }
+
+    fn record_count(batch: &Bytes) -> i32 {
+        i32::from_be_bytes(batch[57..61].try_into().expect("record count"))
+    }
+
+    fn crc32c_suffix(prefix: &[u8], target: u32) -> [u8; 4] {
+        let baseline = crc32c(&[prefix, &[0; 4]].concat());
+        let mut rows = [0_u64; 32];
+        for input_bit in 0..32 {
+            let mut suffix = [0; 4];
+            suffix[input_bit / 8] = 1 << (input_bit % 8);
+            let effect = crc32c(&[prefix, &suffix].concat()) ^ baseline;
+            for (output_bit, row) in rows.iter_mut().enumerate() {
+                *row |= u64::from((effect >> output_bit) & 1) << input_bit;
+            }
+        }
+
+        let delta = target ^ baseline;
+        for (output_bit, row) in rows.iter_mut().enumerate() {
+            *row |= u64::from((delta >> output_bit) & 1) << 32;
+        }
+
+        for pivot in 0..32 {
+            let row = (pivot..32)
+                .find(|&row| rows[row] & (1_u64 << pivot) != 0)
+                .expect("CRC suffix matrix is invertible");
+            rows.swap(pivot, row);
+            for row in 0..32 {
+                if row != pivot && rows[row] & (1_u64 << pivot) != 0 {
+                    rows[row] ^= rows[pivot];
+                }
+            }
+        }
+
+        let solution = rows.iter().enumerate().fold(0_u32, |solution, (bit, row)| {
+            solution | (u32::from((row >> 32) & 1 != 0) << bit)
+        });
+        solution.to_le_bytes()
+    }
+
+    fn crc32c(bytes: &[u8]) -> u32 {
+        let mut crc = !0_u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0x82F6_3B78 & (0_u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
     }
 
     fn batch_base_offsets(mut records: Bytes) -> Vec<i64> {
