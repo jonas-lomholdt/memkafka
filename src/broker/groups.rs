@@ -110,6 +110,37 @@ pub(crate) struct GroupSummary {
     pub(crate) protocol_type: String,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "DescribeGroups wire-protocol integration is implemented in a later task."
+    )
+)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GroupDescription {
+    pub(crate) group_id: String,
+    pub(crate) state: &'static str,
+    pub(crate) protocol_type: String,
+    pub(crate) protocol_name: String,
+    pub(crate) members: Vec<GroupMemberDescription>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "DescribeGroups wire-protocol integration is implemented in a later task."
+    )
+)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GroupMemberDescription {
+    pub(crate) member_id: String,
+    pub(crate) client_id: String,
+    pub(crate) metadata: Bytes,
+    pub(crate) assignment: Bytes,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SyncAssignment {
     pub(crate) member_id: String,
@@ -193,6 +224,52 @@ impl GroupCoordinator {
             });
         }
         summaries
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "DescribeGroups wire-protocol integration is implemented in a later task."
+        )
+    )]
+    pub(crate) async fn describe(&self, group_id: &str) -> Option<GroupDescription> {
+        let group = self.group(group_id).await?;
+        let mut group = group.lock().await;
+        expire_stale_members(&mut group, Instant::now(), group_id, None);
+
+        let mut members = group
+            .members
+            .iter()
+            .map(|(member_id, member)| GroupMemberDescription {
+                member_id: member_id.clone(),
+                client_id: member.client_id.clone(),
+                metadata: member
+                    .protocols
+                    .iter()
+                    .find(|protocol| protocol.name == group.selected_protocol)
+                    .map_or_else(Bytes::new, |protocol| protocol.metadata.clone()),
+                assignment: group
+                    .assignments
+                    .get(member_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        members.sort_unstable_by(|left, right| left.member_id.cmp(&right.member_id));
+
+        Some(GroupDescription {
+            group_id: group_id.to_owned(),
+            state: match group.state {
+                GroupState::Empty => "Empty",
+                GroupState::PreparingRebalance => "PreparingRebalance",
+                GroupState::CompletingRebalance => "CompletingRebalance",
+                GroupState::Stable => "Stable",
+            },
+            protocol_type: group.protocol_type.clone(),
+            protocol_name: group.selected_protocol.clone(),
+            members,
+        })
     }
 
     pub(crate) async fn join(
@@ -1162,6 +1239,64 @@ mod tests {
         let snapshot = coordinator.snapshot("orders").await.unwrap();
         assert_eq!(snapshot.state, GroupState::CompletingRebalance);
         assert_eq!(snapshot.generation_id, 1);
+    }
+
+    #[tokio::test]
+    async fn describes_stable_group_without_mutating_it() {
+        let coordinator = GroupCoordinator::new();
+        let mut handshake = join_request("");
+        handshake.group_id = "described-group".to_owned();
+        handshake.client_id = "describe-client".to_owned();
+        handshake.protocols[0].metadata = Bytes::from_static(b"subscription");
+        let member_id = match coordinator.join(handshake, true).await.unwrap() {
+            JoinResult::MemberIdRequired { member_id } => member_id,
+            JoinResult::Joined(_) => unreachable!(),
+        };
+        let mut request = join_request(&member_id);
+        request.group_id = "described-group".to_owned();
+        request.client_id = "describe-client".to_owned();
+        request.protocols[0].metadata = Bytes::from_static(b"subscription");
+        let joined = match coordinator.join(request, true).await.unwrap() {
+            JoinResult::Joined(joined) => joined,
+            JoinResult::MemberIdRequired { .. } => unreachable!(),
+        };
+        coordinator
+            .sync(
+                "described-group",
+                joined.generation_id,
+                &member_id,
+                vec![SyncAssignment {
+                    member_id: member_id.clone(),
+                    assignment: Bytes::from_static(b"assignment"),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let before = coordinator.snapshot("described-group").await.unwrap();
+        let description = coordinator
+            .describe("described-group")
+            .await
+            .expect("group exists");
+        assert_eq!(description.group_id, "described-group");
+        assert_eq!(description.state, "Stable");
+        assert_eq!(description.protocol_type, "consumer");
+        assert_eq!(description.protocol_name, "cooperative-sticky");
+        assert_eq!(description.members.len(), 1);
+        assert_eq!(description.members[0].client_id, "describe-client");
+        assert_eq!(
+            description.members[0].metadata,
+            Bytes::from_static(b"subscription")
+        );
+        assert_eq!(
+            description.members[0].assignment,
+            Bytes::from_static(b"assignment")
+        );
+        assert_eq!(
+            coordinator.snapshot("described-group").await.unwrap(),
+            before
+        );
+        assert!(coordinator.describe("missing-group").await.is_none());
     }
 
     #[tokio::test]
