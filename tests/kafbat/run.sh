@@ -14,6 +14,7 @@ readonly TOPIC="kafbat-probe-${SUFFIX}"
 readonly KEY="kafbat-key-${SUFFIX}"
 readonly VALUE="kafbat-value-${SUFFIX}"
 readonly CLUSTER_RESPONSE="$(mktemp)"
+readonly GROUP_RESPONSE="$(mktemp)"
 readonly TOPICS_RESPONSE="$(mktemp)"
 readonly MESSAGES_RESPONSE="$(mktemp)"
 readonly LOG_DIR="${MEMKAFKA_KAFBAT_LOG_DIR:-${TMPDIR:-/tmp}/memkafka-kafbat-${SUFFIX}}"
@@ -27,6 +28,7 @@ cleanup() {
   docker logs "${UI_CONTAINER}" >"${LOG_DIR}/kafbat.log" 2>&1 || true
   docker logs "${SEED_CONTAINER}" >"${LOG_DIR}/seed.log" 2>&1 || true
   cp "${CLUSTER_RESPONSE}" "${LOG_DIR}/cluster-response.json" || true
+  cp "${GROUP_RESPONSE}" "${LOG_DIR}/group-response.json" || true
   cp "${TOPICS_RESPONSE}" "${LOG_DIR}/topics-response.json" || true
   cp "${MESSAGES_RESPONSE}" "${LOG_DIR}/messages-response.txt" || true
 
@@ -37,7 +39,7 @@ cleanup() {
   fi
   docker rm --force "${BROKER_CONTAINER}" "${UI_CONTAINER}" "${SEED_CONTAINER}" >/dev/null 2>&1 || true
   docker network rm "${NETWORK}" >/dev/null 2>&1 || true
-  rm -f "${CLUSTER_RESPONSE}" "${TOPICS_RESPONSE}" "${MESSAGES_RESPONSE}"
+  rm -f "${CLUSTER_RESPONSE}" "${GROUP_RESPONSE}" "${TOPICS_RESPONSE}" "${MESSAGES_RESPONSE}"
   echo "Kafbat diagnostics: ${LOG_DIR}"
   return "${exit_code}"
 }
@@ -128,6 +130,26 @@ if [[ "${online}" != true ]]; then
   exit 1
 fi
 assert_seed_running "after Kafbat reported the cluster online"
+
+group_visible=false
+for _ in {1..30}; do
+  assert_seed_running "while waiting for Kafbat consumer-group visibility"
+  if curl --fail --silent --show-error --max-time 5 \
+      "${KAFBAT_URL}/api/clusters/memkafka/consumer-groups/${GROUP_ID}" \
+      >"${GROUP_RESPONSE}" \
+      && jq --exit-status --arg group_id "${GROUP_ID}" \
+        '.groupId == $group_id and .members >= 1' \
+        "${GROUP_RESPONSE}" >/dev/null; then
+    group_visible=true
+    break
+  fi
+  sleep 1
+done
+if [[ "${group_visible}" != true ]]; then
+  echo "Kafbat did not expose the active consumer group ${GROUP_ID}" >&2
+  exit 1
+fi
+assert_seed_running "after exact consumer-group visibility"
 
 curl --fail --silent --show-error \
   "${KAFBAT_URL}/api/clusters/memkafka/topics?perPage=100" >"${TOPICS_RESPONSE}"
