@@ -4,7 +4,7 @@
 
 MemKafka is a fast, single-binary, in-memory Kafka-compatible broker for local development and integration tests. The same process exposes a Confluent-compatible Avro Schema Registry API.
 
-> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes cooperative-sticky A/B/C rebalancing, automatic and explicit commits, and real Avro Schema Registry publish/consume through the pinned 2.15.0 serializer. Kafbat UI v1.5.0 discovers MemKafka and browses an exact produced record.
+> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes cooperative-sticky A/B/C rebalancing, automatic and explicit commits, and real Avro Schema Registry publish/consume through the pinned 2.15.0 serializer. A separate Confluent.Kafka 2.13.2 flow-profile suite proves consumer subscription auto-creation in force mode and idempotent publish/consume. Kafbat UI v1.5.0 discovers MemKafka and browses an exact produced record with an active consumer group.
 
 MemKafka is test infrastructure. It is not intended for production, and all state disappears when the process exits.
 
@@ -73,12 +73,13 @@ The v0.1 target is an unmodified real `Confluent.Kafka` client plus Confluent's 
 | Integration | Pinned version | Metadata and topics | Produce and Fetch | Groups and commits | Schema Registry and Avro | UI message browsing |
 | --- | --- | --- | --- | --- | --- | --- |
 | Confluent.Kafka (.NET) | 2.15.0 | ✅ | ✅ | ✅ | ✅ | — |
+| Confluent.Kafka flow profile (.NET) | 2.13.2 | ✅ forced subscriptions | ✅ idempotent | ✅ | — | — |
 | Apache Kafka Java client | 4.3.1 | ✅ | ✅ | — | — | — |
 | rskafka (Rust) | 0.6.0 | ✅ | ✅ | — | — | — |
 | franz-go (Go) | 1.21.6 | ✅ | ✅ | — | — | — |
 | Kafbat UI | 1.5.0 | ✅ | Fetch only | ✅ read-only | — | ✅ |
 
-`✅` means the capability is verified by a black-box CI test. `—` means it is not covered by that integration's suite, not that it is known to be incompatible. The Kafbat test browses a record produced by an independent franz-go client.
+`✅` means the capability is verified by a black-box CI test. `✅ forced subscriptions` requires starting MemKafka with `--force-auto-create-topics true`. `—` means it is not covered by that integration's suite, not that it is known to be incompatible. The Kafbat test browses a record produced by an independent franz-go client.
 
 The current black-box suite passes independently with Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, pure-Rust rskafka 0.6.0, and pure-Go franz-go 1.21.6 for:
 
@@ -95,13 +96,15 @@ The Confluent.Kafka suite additionally proves real asynchronous Join/Sync barrie
 
 The same pinned .NET suite uses `CachedSchemaRegistryClient`, `AvroSerializer<GenericRecord>`, and `AvroDeserializer<GenericRecord>` to prove automatic registration, global IDs, subject versions, exact-schema deduplication, Confluent wire framing, successful Kafka publish/consume, and missing/unsupported-resource errors.
 
+The separate pinned Confluent.Kafka 2.13.2 flow-profile suite proves that consumer subscriptions auto-create absent named topics in force mode, receive a real group assignment, and publish and consume ordered records through an idempotent producer.
+
 The pinned Kafbat UI v1.5.0 suite keeps its cluster online with an active consumer group, verifies that the group is visible read-only, independently produces a unique string record, observes its topic through Kafbat's API, and verifies that Kafbat's message browser returns the exact key and value.
 
 MemKafka supports non-transactional idempotent production: it allocates process-local producer IDs at epoch `0`, validates producer identity and per-partition sequence numbers, and deduplicates exact recent retries without appending them again.
 
 The broker advertises `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, `CreateTopics 2-6`, `FindCoordinator 0-2`, `JoinGroup 0-5`, `SyncGroup 0-3`, `Heartbeat 0-3`, `LeaveGroup 0-3`, `OffsetCommit 2-7`, `OffsetFetch 1-5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, and read-only `DescribeConfigs 1`.
 
-CI runs the Confluent Kafka + Avro suite against both the native binary and its Docker image, then runs separate Java 25, Rust, Go 1.27, and Kafbat UI suites against the image.
+CI runs the Confluent Kafka + Avro suite against both the native binary and its Docker image, runs the pinned Confluent.Kafka 2.13.2 flow-profile runner against a native broker in forced-topic mode, then runs separate Java 25, Rust, Go 1.27, and Kafbat UI suites against the image.
 
 It excludes persistence, replication, transactional IDs, transactional and control batches, transactions, exactly-once semantics, producer epoch recovery, authentication, TLS, retention, topic deletion, Protobuf, and JSON Schema.
 

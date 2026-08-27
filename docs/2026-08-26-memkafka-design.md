@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-26  
 **Updated:** 2026-08-27
-**Status:** Approved; baseline implemented, flow-compatibility extension pending
+**Status:** Implemented
 
-**Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, clean-cluster Kafbat UI message browsing, and the Avro Schema Registry subset are complete and covered by pinned black-box clients. Forced consumer-topic creation, group-aware Kafbat browsing, and idempotent production are approved next steps.
+**Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, forced consumer-topic creation, group-aware Kafbat UI message browsing, non-transactional idempotent production, and the Avro Schema Registry subset are complete and covered by pinned black-box clients and focused protocol tests.
 
 ## 1. Summary
 
