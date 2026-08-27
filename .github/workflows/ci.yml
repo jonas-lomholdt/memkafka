@@ -39,6 +39,10 @@ jobs:
           --locked-mode
           --source https://api.nuget.org/v3/index.json
 
+      - name: Restore flow compatibility acceptance runner
+        working-directory: tests/flow-compat
+        run: dotnet restore --locked-mode
+
       - name: Build MemKafka for black-box tests
         run: cargo build
 
@@ -46,6 +50,11 @@ jobs:
         run: >-
           dotnet run --no-restore
           --project tests/confluent/MemKafka.Acceptance.csproj
+
+      - name: Run Confluent.Kafka 2.13.2 flow compatibility tests
+        run: >-
+          dotnet run --no-restore
+          --project tests/flow-compat/MemKafka.FlowCompatibility.csproj
 
       - name: Build container image
         run: docker build -t memkafka:ci .
