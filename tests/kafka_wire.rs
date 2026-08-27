@@ -647,6 +647,37 @@ async fn metadata_requires_server_and_request_auto_creation_flags() {
 }
 
 #[tokio::test]
+async fn metadata_force_overrides_only_the_named_request_opt_out() {
+    let forced = test_broker_state_with_force(true, true);
+    let response = dispatch_metadata_request(
+        &Dispatcher::new(forced.clone()),
+        104,
+        Some(vec!["forced-topic"]),
+        false,
+    )
+    .await;
+    assert_eq!(response.topics[0].error_code, 0);
+    assert_eq!(response.topics[0].partitions.len(), 2);
+
+    let server_disabled = test_broker_state_with_force(false, true);
+    let response = dispatch_metadata_request(
+        &Dispatcher::new(server_disabled.clone()),
+        105,
+        Some(vec!["still-disabled"]),
+        false,
+    )
+    .await;
+    assert_eq!(response.topics[0].error_code, 3);
+    assert!(server_disabled.topics().list().await.is_empty());
+
+    let before = forced.topics().list().await.len();
+    let response =
+        dispatch_metadata_request(&Dispatcher::new(forced.clone()), 106, None, false).await;
+    assert_eq!(response.topics.len(), before);
+    assert_eq!(forced.topics().list().await.len(), before);
+}
+
+#[tokio::test]
 async fn metadata_null_topics_lists_catalog_in_name_order_without_mutating() {
     let broker = test_broker_state(true);
     broker

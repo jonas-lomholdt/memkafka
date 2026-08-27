@@ -27,8 +27,8 @@ pub(crate) async fn response(request: &MetadataRequest, broker: &BrokerState) ->
             .collect(),
         Some(requested_topics) => {
             let mut topics = Vec::with_capacity(requested_topics.len());
-            let allow_auto_create =
-                broker.auto_create_topics() && request.allow_auto_topic_creation;
+            let allow_auto_create = broker.auto_create_topics()
+                && (request.allow_auto_topic_creation || broker.force_auto_create_topics());
             for requested in requested_topics {
                 let Some(name) = requested.name.as_ref() else {
                     topics.push(error_topic(None, ResponseError::InvalidTopicException));
