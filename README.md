@@ -45,6 +45,7 @@ docker run --rm \
 | Schema Registry | `http://127.0.0.1:8081` |
 | Broker ID | `1` |
 | Auto-create topics | `true` |
+| Force consumer topic creation | `false` |
 | Default partitions | `2` |
 | Storage | Memory only |
 
@@ -55,10 +56,13 @@ docker run --rm \
 --kafka-advertised-address <host:port>
 --schema-registry-listen <host:port>
 --auto-create-topics <true|false>
+--force-auto-create-topics <true|false>
 --default-partitions <positive integer>
 --log-level <error|warn|info|debug|trace>
 --quiet
 ```
+
+`--force-auto-create-topics true` is an explicit integration-test convenience. When server auto-creation is enabled, it lets named consumer subscriptions create missing topics even if the client sends `allow_auto_topic_creation=false`. The default remains Kafka-compatible and honors the client opt-out.
 
 `--quiet` suppresses informational logs. Fatal startup errors still go to stderr.
 
