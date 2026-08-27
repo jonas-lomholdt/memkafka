@@ -16,6 +16,7 @@ pub struct BrokerState {
     broker_id: i32,
     advertised_kafka: AdvertisedAddress,
     auto_create_topics: bool,
+    force_auto_create_topics: bool,
     topics: TopicCatalog,
     groups: GroupCoordinator,
     append_notification: Arc<Notify>,
@@ -26,12 +27,14 @@ impl BrokerState {
         broker_id: i32,
         advertised_kafka: AdvertisedAddress,
         auto_create_topics: bool,
+        force_auto_create_topics: bool,
         default_partitions: NonZeroU32,
     ) -> Self {
         Self {
             broker_id,
             advertised_kafka,
             auto_create_topics,
+            force_auto_create_topics,
             topics: TopicCatalog::new(default_partitions),
             groups: GroupCoordinator::new(),
             append_notification: Arc::new(Notify::new()),
@@ -48,6 +51,10 @@ impl BrokerState {
 
     pub fn auto_create_topics(&self) -> bool {
         self.auto_create_topics
+    }
+
+    pub fn force_auto_create_topics(&self) -> bool {
+        self.force_auto_create_topics
     }
 
     pub fn topics(&self) -> &TopicCatalog {

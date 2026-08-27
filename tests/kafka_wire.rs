@@ -1400,10 +1400,18 @@ async fn dispatch_kind(
 }
 
 fn test_broker_state(auto_create_topics: bool) -> BrokerState {
+    test_broker_state_with_force(auto_create_topics, false)
+}
+
+fn test_broker_state_with_force(
+    auto_create_topics: bool,
+    force_auto_create_topics: bool,
+) -> BrokerState {
     BrokerState::new(
         1,
         AdvertisedAddress::new("127.0.0.1", 9092).expect("valid test address"),
         auto_create_topics,
+        force_auto_create_topics,
         NonZeroU32::new(2).expect("nonzero literal"),
     )
 }

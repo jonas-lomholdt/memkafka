@@ -22,6 +22,14 @@ pub struct Cli {
     )]
     auto_create_topics: bool,
 
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::Set,
+        value_parser = BoolishValueParser::new()
+    )]
+    force_auto_create_topics: bool,
+
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..))]
     default_partitions: u32,
 
@@ -123,6 +131,7 @@ pub struct Config {
     pub kafka_advertised_address: Option<AdvertisedAddress>,
     pub schema_registry_listen: SocketAddr,
     pub auto_create_topics: bool,
+    pub force_auto_create_topics: bool,
     pub default_partitions: NonZeroU32,
     pub log_level: LogLevel,
     pub quiet: bool,
@@ -144,6 +153,7 @@ impl TryFrom<Cli> for Config {
             kafka_advertised_address,
             schema_registry_listen: cli.schema_registry_listen,
             auto_create_topics: cli.auto_create_topics,
+            force_auto_create_topics: cli.force_auto_create_topics,
             default_partitions: NonZeroU32::new(cli.default_partitions)
                 .expect("clap rejects a zero partition count"),
             log_level: cli.log_level,
@@ -195,9 +205,20 @@ mod tests {
         );
         assert_eq!(config.kafka_advertised_address, None);
         assert!(config.auto_create_topics);
+        assert!(!config.force_auto_create_topics);
         assert_eq!(config.default_partitions.get(), 2);
         assert_eq!(config.log_level, LogLevel::Info);
         assert!(!config.quiet);
+    }
+
+    #[test]
+    fn force_auto_create_topics_accepts_an_explicit_true_value() {
+        let config = Config::try_from(
+            Cli::try_parse_from(["memkafka", "--force-auto-create-topics", "true"]).unwrap(),
+        )
+        .unwrap();
+
+        assert!(config.force_auto_create_topics);
     }
 
     #[test]

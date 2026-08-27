@@ -81,6 +81,7 @@ where
         config.broker_id,
         endpoints.advertised_kafka.clone(),
         config.auto_create_topics,
+        config.force_auto_create_topics,
         config.default_partitions,
     );
 
