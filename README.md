@@ -73,7 +73,7 @@ The v0.1 target is an unmodified real `Confluent.Kafka` client plus Confluent's 
 | Integration | Pinned version | Metadata and topics | Produce and Fetch | Groups and commits | Schema Registry and Avro | UI message browsing |
 | --- | --- | --- | --- | --- | --- | --- |
 | Confluent.Kafka (.NET) | 2.15.0 | ✅ | ✅ | ✅ | ✅ | — |
-| Confluent.Kafka flow profile (.NET) | 2.13.2 | ✅ forced subscriptions | ✅ idempotent | ✅ | — | — |
+| Confluent.Kafka flow profile (.NET) | 2.13.2 | ✅ forced subscriptions | ✅ idempotent | ✅ assignment | — | — |
 | Apache Kafka Java client | 4.3.1 | ✅ | ✅ | — | — | — |
 | rskafka (Rust) | 0.6.0 | ✅ | ✅ | — | — | — |
 | franz-go (Go) | 1.21.6 | ✅ | ✅ | — | — | — |
