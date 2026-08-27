@@ -15,10 +15,14 @@ func main() {
 	topic := requiredEnvironment("MEMKAFKA_KAFBAT_TOPIC")
 	key := requiredEnvironment("MEMKAFKA_KAFBAT_KEY")
 	value := requiredEnvironment("MEMKAFKA_KAFBAT_VALUE")
+	groupID := requiredEnvironment("MEMKAFKA_KAFBAT_GROUP")
 
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(bootstrapServers),
 		kgo.DisableIdempotentWrite(),
+		kgo.ConsumerGroup(groupID),
+		kgo.ConsumeTopics(topic),
+		kgo.SessionTimeout(60*time.Second),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.MaxProduceRequestsInflightPerBroker(1),
 		kgo.RequestTimeoutOverhead(5*time.Second),
@@ -46,6 +50,23 @@ func main() {
 		panic(fmt.Errorf("probe record offset = %d, expected 0", record.Offset))
 	}
 	fmt.Printf("seeded %s[0]@0\n", topic)
+
+	for {
+		fetches := client.PollRecords(context.Background(), 10)
+		if errs := fetches.Errors(); len(errs) != 0 {
+			panic(fmt.Errorf("group poll: %v", errs))
+		}
+		for _, consumed := range fetches.Records() {
+			if consumed.Topic == topic && string(consumed.Key) == key && string(consumed.Value) == value {
+				fmt.Printf("group active %s\n", groupID)
+				for {
+					if errs := client.PollRecords(context.Background(), 10).Errors(); len(errs) != 0 {
+						panic(fmt.Errorf("group heartbeat poll: %v", errs))
+					}
+				}
+			}
+		}
+	}
 }
 
 func requiredEnvironment(name string) string {

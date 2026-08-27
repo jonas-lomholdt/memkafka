@@ -8,6 +8,8 @@ readonly SUFFIX="$$"
 readonly NETWORK="memkafka-kafbat-${SUFFIX}"
 readonly BROKER_CONTAINER="memkafka-kafbat-broker-${SUFFIX}"
 readonly UI_CONTAINER="memkafka-kafbat-ui-${SUFFIX}"
+readonly SEED_CONTAINER="memkafka-kafbat-seed-${SUFFIX}"
+readonly GROUP_ID="kafbat-group-${SUFFIX}"
 readonly TOPIC="kafbat-probe-${SUFFIX}"
 readonly KEY="kafbat-key-${SUFFIX}"
 readonly VALUE="kafbat-value-${SUFFIX}"
@@ -23,6 +25,7 @@ cleanup() {
 
   docker logs "${BROKER_CONTAINER}" >"${LOG_DIR}/memkafka.log" 2>&1 || true
   docker logs "${UI_CONTAINER}" >"${LOG_DIR}/kafbat.log" 2>&1 || true
+  docker logs "${SEED_CONTAINER}" >"${LOG_DIR}/seed.log" 2>&1 || true
   cp "${CLUSTER_RESPONSE}" "${LOG_DIR}/cluster-response.json" || true
   cp "${TOPICS_RESPONSE}" "${LOG_DIR}/topics-response.json" || true
   cp "${MESSAGES_RESPONSE}" "${LOG_DIR}/messages-response.txt" || true
@@ -30,8 +33,9 @@ cleanup() {
   if (( exit_code != 0 )); then
     cat "${LOG_DIR}/memkafka.log" >&2 || true
     cat "${LOG_DIR}/kafbat.log" >&2 || true
+    cat "${LOG_DIR}/seed.log" >&2 || true
   fi
-  docker rm --force "${BROKER_CONTAINER}" "${UI_CONTAINER}" >/dev/null 2>&1 || true
+  docker rm --force "${BROKER_CONTAINER}" "${UI_CONTAINER}" "${SEED_CONTAINER}" >/dev/null 2>&1 || true
   docker network rm "${NETWORK}" >/dev/null 2>&1 || true
   rm -f "${CLUSTER_RESPONSE}" "${TOPICS_RESPONSE}" "${MESSAGES_RESPONSE}"
   echo "Kafbat diagnostics: ${LOG_DIR}"
@@ -77,13 +81,28 @@ if [[ "${ready}" != true ]]; then
   exit 1
 fi
 
-docker run --rm \
+docker run --detach \
+  --name "${SEED_CONTAINER}" \
   --network "${NETWORK}" \
   --env "MEMKAFKA_BOOTSTRAP_SERVERS=${BROKER_CONTAINER}:9092" \
   --env "MEMKAFKA_KAFBAT_TOPIC=${TOPIC}" \
   --env "MEMKAFKA_KAFBAT_KEY=${KEY}" \
   --env "MEMKAFKA_KAFBAT_VALUE=${VALUE}" \
+  --env "MEMKAFKA_KAFBAT_GROUP=${GROUP_ID}" \
   "${SEED_IMAGE}" >/dev/null
+
+group_active=false
+for _ in {1..30}; do
+  if docker logs "${SEED_CONTAINER}" 2>&1 | grep -F "group active ${GROUP_ID}" >/dev/null; then
+    group_active=true
+    break
+  fi
+  sleep 1
+done
+if [[ "${group_active}" != true ]]; then
+  echo "Kafbat seed consumer group did not become active" >&2
+  exit 1
+fi
 
 online=false
 for _ in {1..30}; do
