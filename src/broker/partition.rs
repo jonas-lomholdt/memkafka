@@ -279,15 +279,20 @@ fn validate_sequences(
     let mut expected = expected_sequence;
     for batch in validated {
         if batch.base_sequence != expected {
-            return Err(if batch.base_sequence < expected {
-                AppendError::DuplicateSequence
-            } else {
-                AppendError::OutOfOrderSequence
-            });
+            return Err(classify_sequence_mismatch(batch.base_sequence, expected));
         }
         expected = next_sequence(expected, batch.record_count);
     }
     Ok(())
+}
+
+fn classify_sequence_mismatch(received: i32, expected: i32) -> AppendError {
+    let forward_distance = (i64::from(received) - i64::from(expected)).rem_euclid(SEQUENCE_MODULUS);
+    if forward_distance < SEQUENCE_MODULUS / 2 {
+        AppendError::OutOfOrderSequence
+    } else {
+        AppendError::DuplicateSequence
+    }
 }
 
 fn next_sequence(base_sequence: i32, record_count: i32) -> i32 {
@@ -701,6 +706,50 @@ mod tests {
         assert_eq!(at_max.base_offset, 0);
         assert_eq!(at_zero.base_offset, 1);
         assert_eq!(log.next_offset().await, 2);
+    }
+
+    #[tokio::test]
+    async fn idempotent_zero_is_a_gap_when_maximum_sequence_is_expected() {
+        let log = PartitionLog::default();
+        log.inner.lock().await.producer_states.insert(
+            7,
+            ProducerPartitionState {
+                producer_epoch: 0,
+                next_sequence: i32::MAX,
+                recent: Default::default(),
+            },
+        );
+
+        assert_eq!(
+            log.append(idempotent_batch(7, 0, 0, &["skipped-maximum"]))
+                .await,
+            Err(AppendError::OutOfOrderSequence)
+        );
+        assert_eq!(log.next_offset().await, 0);
+    }
+
+    #[tokio::test]
+    async fn idempotent_changed_maximum_is_stale_after_wrap_to_zero() {
+        let log = PartitionLog::default();
+        log.inner.lock().await.producer_states.insert(
+            7,
+            ProducerPartitionState {
+                producer_epoch: 0,
+                next_sequence: i32::MAX,
+                recent: Default::default(),
+            },
+        );
+        log.append(idempotent_batch(7, 0, i32::MAX, &["original"]))
+            .await
+            .expect("append maximum sequence");
+        let next_offset = log.next_offset().await;
+
+        assert_eq!(
+            log.append(idempotent_batch(7, 0, i32::MAX, &["changed"]))
+                .await,
+            Err(AppendError::DuplicateSequence)
+        );
+        assert_eq!(log.next_offset().await, next_offset);
     }
 
     #[test]
