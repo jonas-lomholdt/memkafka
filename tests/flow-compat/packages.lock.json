@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "Confluent.Kafka": {
+        "type": "Direct",
+        "requested": "[2.13.2, )",
+        "resolved": "2.13.2",
+        "contentHash": "ONxkH685xsWQpiaWCXpZFkRz/6T+doXhlFw3cAOqa8ECIy8u+meesvu/QHwWjka4L0p+nSr1+BZnsWqh65ugKQ==",
+        "dependencies": {
+          "librdkafka.redist": "2.13.2"
+        }
+      },
+      "librdkafka.redist": {
+        "type": "Transitive",
+        "resolved": "2.13.2",
+        "contentHash": "dFhvfR/I/KkXHfvl7lYJeIFR33wazl/8Mg+KSzZc4RK98LabTsZbRCf4njNrydYll52TdtYkXCPCHbDxSxFAZQ=="
+      }
+    }
+  }
+}
