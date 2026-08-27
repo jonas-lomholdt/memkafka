@@ -122,18 +122,39 @@ try
 }
 finally
 {
+    Exception? cleanupFailure = null;
     CloseConsumer(orderedConsumer);
     CloseConsumer(subscriptionConsumer);
     if (process is not null && !process.HasExited)
     {
         process.Kill(entireProcessTree: true);
-        await process.WaitForExitAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (TimeoutException exception)
+        {
+            cleanupFailure = new TimeoutException(
+                $"MemKafka did not exit within 10 seconds after termination. {processOutput?.Diagnostics()}",
+                exception);
+        }
     }
     if (processOutput is not null)
     {
-        await processOutput.CompleteAsync();
+        try
+        {
+            await processOutput.CompleteAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (TimeoutException exception)
+        {
+            cleanupFailure ??= exception;
+        }
     }
     process?.Dispose();
+    if (cleanupFailure is not null)
+    {
+        throw cleanupFailure;
+    }
 }
 
 static Process StartMemKafka(string binary, string workingDirectory)
@@ -314,9 +335,18 @@ sealed class ProcessOutput
             $"MemKafka did not report readiness within 10 seconds. {Diagnostics()}");
     }
 
-    public Task CompleteAsync()
+    public async Task CompleteAsync(TimeSpan timeout)
     {
-        return Task.WhenAll(outputPump, errorPump);
+        try
+        {
+            await Task.WhenAll(outputPump, errorPump).WaitAsync(timeout);
+        }
+        catch (TimeoutException exception)
+        {
+            throw new TimeoutException(
+                $"MemKafka output pumps did not complete within {timeout.TotalSeconds:F0} seconds. {Diagnostics()}",
+                exception);
+        }
     }
 
     private async Task PumpAsync(StreamReader reader, ConcurrentQueue<string> destination)
@@ -347,7 +377,7 @@ sealed class ProcessOutput
         }
     }
 
-    private string Diagnostics()
+    public string Diagnostics()
     {
         return $"stdout={string.Join(" | ", standardOutput)}; "
             + $"stderr={string.Join(" | ", standardError)}";
