@@ -17,5 +17,4 @@ USER memkafka
 EXPOSE 9092 8081
 
 ENTRYPOINT ["/usr/local/bin/memkafka"]
-CMD ["--kafka-listen", "0.0.0.0:9092", "--schema-registry-listen", "0.0.0.0:8081", "--kafka-advertised-address", "localhost:9092"]
-
+CMD ["--kafka-listen", "0.0.0.0:9092", "--schema-registry-listen", "0.0.0.0:8081", "--kafka-advertised-address", "127.0.0.1:9092"]

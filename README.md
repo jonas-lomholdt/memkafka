@@ -25,7 +25,7 @@ docker build -t memkafka .
 docker run --rm -p 9092:9092 -p 8081:8081 memkafka
 ```
 
-The container runs as a non-root user and advertises Kafka at `localhost:9092` by default. Override the advertised address for Docker Compose or another container network:
+The container runs as a non-root user and advertises Kafka at `127.0.0.1:9092` by default. Override the advertised address for Docker Compose or another container network:
 
 ```bash
 docker run --rm \
@@ -36,6 +36,28 @@ docker run --rm \
   --schema-registry-listen 0.0.0.0:8081 \
   --kafka-advertised-address memkafka:9092
 ```
+
+## Aspire and mixed host/container clients
+
+MemKafka deliberately uses one advertised Kafka address. When host processes and containers such as Kafbat must share it, use an IPv4-only DNS name on the host and register the same name as the Aspire container-network alias:
+
+```csharp
+const string kafkaHost = "kafka.127.0.0.1.nip.io";
+
+var kafka = builder.AddContainer("kafka", "memkafka")
+    .WithArgs(
+        "--kafka-listen", "0.0.0.0:9092",
+        "--schema-registry-listen", "0.0.0.0:8081",
+        "--force-auto-create-topics", "true",
+        "--kafka-advertised-address", $"{kafkaHost}:9092")
+    .WithEndpoint(port: 9092, targetPort: 9092, name: "primary", isProxied: false)
+    .WithEndpoint(port: 8081, targetPort: 8081, name: "schema-registry", scheme: "http", isProxied: false)
+    .WithEndpoint("primary", endpoint => endpoint.TargetHost = "0.0.0.0")
+    .WithEndpoint("schema-registry", endpoint => endpoint.TargetHost = "0.0.0.0")
+    .WithContainerNetworkAlias(kafkaHost);
+```
+
+Point both host clients and container clients at `kafka.127.0.0.1.nip.io:9092`, and use `http://kafka.127.0.0.1.nip.io:8081` for Schema Registry. The explicit IPv4 name avoids `localhost` selecting `::1` on macOS. Force topic creation is useful when application consumers opt out of Kafka auto-creation.
 
 ## Defaults
 

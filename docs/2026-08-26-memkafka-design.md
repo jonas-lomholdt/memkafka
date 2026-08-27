@@ -93,7 +93,7 @@ v0.1 must include a root-level `Dockerfile`, even though running the native bina
 - run as a non-root user;
 - expose Kafka on port `9092` and Schema Registry on port `8081`;
 - bind both servers to `0.0.0.0` inside the container;
-- default the Kafka advertised address to `localhost:9092` for host-to-container use;
+- default the Kafka advertised address to `127.0.0.1:9092` for deterministic IPv4 host-to-container use;
 - allow the advertised address to be overridden for Docker Compose or other container networks;
 - use an exec-form entrypoint so shutdown signals reach MemKafka directly;
 - contain no Java runtime, Kafka distribution, build toolchain, or source code in the final runtime layer.
@@ -108,6 +108,8 @@ docker run --rm -p 9092:9092 -p 8081:8081 memkafka
 ```
 
 Container support is a packaging requirement, not a separate runtime implementation. The image runs the exact same binary and acceptance suite as native execution.
+
+For mixed host/container development, the documented Aspire pattern uses one explicit IPv4-only DNS name as the advertised Kafka address and registers that same name as the MemKafka container-network alias. This lets host processes and containers such as Kafbat share one address without adding separate internal/external listener profiles. Applications whose consumers opt out of Kafka topic auto-creation may also enable `--force-auto-create-topics true` explicitly.
 
 ## 5. Architecture
 

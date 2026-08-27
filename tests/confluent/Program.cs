@@ -54,8 +54,23 @@ try
 
     var autoTopic = $"auto-{Guid.NewGuid():N}";
     var autoMetadata = admin.GetMetadata(autoTopic, TimeSpan.FromSeconds(5));
+    var expectedAdvertisedAddress =
+        Environment.GetEnvironmentVariable("MEMKAFKA_EXPECTED_ADVERTISED_ADDRESS");
+    if (!string.IsNullOrWhiteSpace(expectedAdvertisedAddress))
+    {
+        AssertAdvertisedAddress(autoMetadata, expectedAdvertisedAddress);
+        Console.WriteLine($"pass   broker advertises {expectedAdvertisedAddress}");
+    }
     AssertTopicPartitions(autoMetadata, autoTopic, 2);
     Console.WriteLine("pass   metadata auto-creates two partitions");
+    if (string.Equals(
+        Environment.GetEnvironmentVariable("MEMKAFKA_METADATA_ONLY"),
+        "true",
+        StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine("PASS   advertised-address black-box acceptance");
+        return;
+    }
 
     var explicitTopic = $"explicit-{Guid.NewGuid():N}";
     await admin.CreateTopicsAsync(
@@ -172,6 +187,24 @@ static void AssertTopicPartitions(
     {
         throw new InvalidOperationException(
             $"topic '{topicName}' has {topic.Partitions.Count} partitions, expected {expectedPartitions}");
+    }
+}
+
+static void AssertAdvertisedAddress(
+    Confluent.Kafka.Metadata metadata,
+    string expectedAddress)
+{
+    if (metadata.Brokers.Count != 1)
+    {
+        throw new InvalidOperationException(
+            $"metadata returned {metadata.Brokers.Count} brokers, expected one");
+    }
+    var broker = metadata.Brokers[0];
+    var actualAddress = $"{broker.Host}:{broker.Port}";
+    if (!string.Equals(actualAddress, expectedAddress, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException(
+            $"broker advertises '{actualAddress}', expected '{expectedAddress}'");
     }
 }
 
