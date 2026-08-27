@@ -79,7 +79,9 @@ async fn produce_partition(
 
     match log.append(records).await {
         Ok(result) => {
-            broker.notify_append();
+            if result.appended {
+                broker.notify_append();
+            }
             PartitionProduceResponse::default()
                 .with_index(request.index)
                 .with_base_offset(result.base_offset)
@@ -91,6 +93,12 @@ async fn produce_partition(
         }
         Err(AppendError::Malformed | AppendError::OffsetOverflow) => {
             error_partition(request.index, ResponseError::CorruptMessage)
+        }
+        Err(AppendError::OutOfOrderSequence) => {
+            error_partition(request.index, ResponseError::OutOfOrderSequenceNumber)
+        }
+        Err(AppendError::DuplicateSequence) => {
+            error_partition(request.index, ResponseError::DuplicateSequenceNumber)
         }
     }
 }
