@@ -6,9 +6,11 @@ use crate::config::AdvertisedAddress;
 
 pub(crate) mod groups;
 pub(crate) mod partition;
+pub(crate) mod producers;
 pub mod topics;
 
 use groups::GroupCoordinator;
+use producers::ProducerCoordinator;
 use topics::TopicCatalog;
 
 #[derive(Clone, Debug)]
@@ -19,6 +21,8 @@ pub struct BrokerState {
     force_auto_create_topics: bool,
     topics: TopicCatalog,
     groups: GroupCoordinator,
+    #[allow(dead_code)]
+    producers: ProducerCoordinator,
     append_notification: Arc<Notify>,
 }
 
@@ -37,6 +41,7 @@ impl BrokerState {
             force_auto_create_topics,
             topics: TopicCatalog::new(default_partitions),
             groups: GroupCoordinator::new(),
+            producers: ProducerCoordinator::new(),
             append_notification: Arc::new(Notify::new()),
         }
     }
@@ -63,6 +68,11 @@ impl BrokerState {
 
     pub(crate) fn groups(&self) -> &GroupCoordinator {
         &self.groups
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn producers(&self) -> &ProducerCoordinator {
+        &self.producers
     }
 
     pub(crate) fn append_notification(&self) -> Arc<Notify> {
