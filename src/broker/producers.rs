@@ -11,9 +11,7 @@ pub(crate) struct ProducerIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProducerError {
     IdExhausted,
-    #[allow(dead_code)]
     UnknownProducerId,
-    #[allow(dead_code)]
     InvalidProducerEpoch,
 }
 
@@ -64,7 +62,6 @@ impl ProducerCoordinator {
         })
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn validate(
         &self,
         producer_id: i64,

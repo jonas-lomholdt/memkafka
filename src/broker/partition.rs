@@ -255,10 +255,6 @@ impl PartitionLog {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "consumed by Produce identity validation in Task 4"
-)]
 pub(crate) fn record_set_producer(
     records: &Bytes,
 ) -> Result<Option<RecordSetProducer>, AppendError> {

@@ -1173,6 +1173,104 @@ async fn produce_v7_appends_batches_and_returns_contiguous_base_offsets() {
 }
 
 #[tokio::test]
+async fn idempotent_produce_validates_identity_and_preserves_log_on_rejections() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("events", 1, 1)
+        .await
+        .expect("create topic");
+    let dispatcher = Dispatcher::new(broker.clone());
+    let ResponseKind::InitProducerId(identity) = dispatch_kind(
+        &dispatcher,
+        ApiKey::InitProducerId,
+        0,
+        RequestKind::InitProducerId(InitProducerIdRequest::default().with_transactional_id(None)),
+    )
+    .await
+    else {
+        panic!("expected InitProducerId response")
+    };
+    assert_eq!(identity.error_code, 0);
+    assert_eq!(i64::from(identity.producer_id), 1);
+    assert_eq!(identity.producer_epoch, 0);
+
+    let initial = idempotent_record_batch(1, 0, 0, &["first"]);
+    let first = dispatch_produce_request(
+        &dispatcher,
+        132,
+        -1,
+        None,
+        vec![produce_topic(
+            "events",
+            vec![produce_partition(0, initial.clone())],
+        )],
+    )
+    .await;
+    assert_eq!(first.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(first.responses[0].partition_responses[0].base_offset, 0);
+
+    let retry = dispatch_produce_request(
+        &dispatcher,
+        133,
+        -1,
+        None,
+        vec![produce_topic("events", vec![produce_partition(0, initial)])],
+    )
+    .await;
+    assert_eq!(retry.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(retry.responses[0].partition_responses[0].base_offset, 0);
+    assert_eq!(partition_state(&dispatcher, 1330).await.0, 1);
+
+    assert_partition_state_unchanged_after_rejection(
+        &dispatcher,
+        134,
+        idempotent_record_batch(99, 0, 0, &["unknown-id"]),
+        ResponseError::UnknownProducerId,
+    )
+    .await;
+    assert_partition_state_unchanged_after_rejection(
+        &dispatcher,
+        135,
+        idempotent_record_batch(1, 1, 1, &["wrong-epoch"]),
+        ResponseError::InvalidProducerEpoch,
+    )
+    .await;
+    assert_partition_state_unchanged_after_rejection(
+        &dispatcher,
+        136,
+        idempotent_record_batch(1, 0, 2, &["gap"]),
+        ResponseError::OutOfOrderSequenceNumber,
+    )
+    .await;
+
+    for sequence in 1..=5 {
+        let response = dispatch_produce_request(
+            &dispatcher,
+            140 + sequence,
+            -1,
+            None,
+            vec![produce_topic(
+                "events",
+                vec![produce_partition(
+                    0,
+                    idempotent_record_batch(1, 0, sequence, &["later"]),
+                )],
+            )],
+        )
+        .await;
+        assert_eq!(response.responses[0].partition_responses[0].error_code, 0);
+    }
+    assert_partition_state_unchanged_after_rejection(
+        &dispatcher,
+        146,
+        idempotent_record_batch(1, 0, 0, &["first"]),
+        ResponseError::DuplicateSequenceNumber,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn produce_v7_maps_request_and_partition_errors_without_partial_corruption() {
     let broker = test_broker_state(false);
     broker
@@ -1889,6 +1987,57 @@ async fn dispatch_produce_request(
     response
 }
 
+async fn assert_partition_state_unchanged_after_rejection(
+    dispatcher: &Dispatcher,
+    correlation_id: i32,
+    records: Bytes,
+    expected_error: ResponseError,
+) {
+    let before = partition_state(dispatcher, correlation_id * 10).await;
+    let response = dispatch_produce_request(
+        dispatcher,
+        correlation_id,
+        -1,
+        None,
+        vec![produce_topic("events", vec![produce_partition(0, records)])],
+    )
+    .await;
+
+    assert_partition_error(response, expected_error);
+    assert_eq!(
+        partition_state(dispatcher, correlation_id * 10 + 2).await,
+        before,
+        "rejected Produce must not change the latest offset or fetched bytes"
+    );
+}
+
+async fn partition_state(dispatcher: &Dispatcher, correlation_id: i32) -> (i64, Option<Bytes>) {
+    let latest = dispatch_list_offsets_request(
+        dispatcher,
+        correlation_id,
+        vec![list_offsets_topic("events", vec![(0, -1)])],
+    )
+    .await;
+    let latest = latest.topics[0].partitions[0].offset;
+    let fetched = dispatch_fetch_request(
+        dispatcher,
+        correlation_id + 1,
+        0,
+        1,
+        i32::MAX,
+        vec![fetch_topic("events", vec![(0, 0, i32::MAX)])],
+    )
+    .await;
+
+    (latest, fetched.responses[0].partitions[0].records.clone())
+}
+
+fn assert_partition_error(response: ProduceResponse, expected_error: ResponseError) {
+    let partition = &response.responses[0].partition_responses[0];
+    assert_eq!(partition.error_code, expected_error.code());
+    assert_eq!(partition.base_offset, -1);
+}
+
 fn encode_list_offsets_request(correlation_id: i32, topics: Vec<ListOffsetsTopic>) -> Bytes {
     const VERSION: i16 = 3;
     let header = RequestHeader::default()
@@ -2037,6 +2186,24 @@ fn fetch_topic(name: &'static str, partitions: Vec<(i32, i64, i32)>) -> FetchTop
 }
 
 fn record_batch(values: &[&str]) -> Bytes {
+    record_batch_with_producer(values, NO_PRODUCER_ID, NO_PRODUCER_EPOCH, 0)
+}
+
+fn idempotent_record_batch(
+    producer_id: i64,
+    producer_epoch: i16,
+    base_sequence: i32,
+    values: &[&str],
+) -> Bytes {
+    record_batch_with_producer(values, producer_id, producer_epoch, base_sequence)
+}
+
+fn record_batch_with_producer(
+    values: &[&str],
+    producer_id: i64,
+    producer_epoch: i16,
+    base_sequence: i32,
+) -> Bytes {
     let records = values
         .iter()
         .enumerate()
@@ -2045,11 +2212,11 @@ fn record_batch(values: &[&str]) -> Bytes {
             control: false,
             delete_horizon: false,
             partition_leader_epoch: NO_PARTITION_LEADER_EPOCH,
-            producer_id: NO_PRODUCER_ID,
-            producer_epoch: NO_PRODUCER_EPOCH,
+            producer_id,
+            producer_epoch,
             timestamp_type: TimestampType::Creation,
             offset: offset as i64,
-            sequence: offset as i32,
+            sequence: base_sequence + offset as i32,
             timestamp: 1_700_000_000_000 + offset as i64,
             key: Some(Bytes::from(format!("key-{offset}"))),
             value: Some(Bytes::copy_from_slice(value.as_bytes())),

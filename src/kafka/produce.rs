@@ -7,7 +7,12 @@ use kafka_protocol::{
     },
 };
 
-use crate::broker::{BrokerState, partition::AppendError, topics::TopicError};
+use crate::broker::{
+    BrokerState,
+    partition::{AppendError, record_set_producer},
+    producers::ProducerError,
+    topics::TopicError,
+};
 
 pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 3..=7;
 
@@ -76,6 +81,37 @@ async fn produce_partition(
     let Some(records) = request.records.clone() else {
         return error_partition(request.index, ResponseError::CorruptMessage);
     };
+
+    let producer = match record_set_producer(&records) {
+        Ok(producer) => producer,
+        Err(AppendError::UnsupportedBatch) => {
+            return error_partition(request.index, ResponseError::UnsupportedForMessageFormat);
+        }
+        Err(AppendError::Malformed | AppendError::OffsetOverflow) => {
+            return error_partition(request.index, ResponseError::CorruptMessage);
+        }
+        Err(AppendError::OutOfOrderSequence) | Err(AppendError::DuplicateSequence) => {
+            unreachable!("record set inspection does not validate producer sequences");
+        }
+    };
+    if let Some(producer) = producer {
+        match broker
+            .producers()
+            .validate(producer.producer_id, producer.producer_epoch)
+            .await
+        {
+            Ok(()) => {}
+            Err(ProducerError::UnknownProducerId) => {
+                return error_partition(request.index, ResponseError::UnknownProducerId);
+            }
+            Err(ProducerError::InvalidProducerEpoch) => {
+                return error_partition(request.index, ResponseError::InvalidProducerEpoch);
+            }
+            Err(ProducerError::IdExhausted) => {
+                return error_partition(request.index, ResponseError::UnknownServerError);
+            }
+        }
+    }
 
     match log.append(records).await {
         Ok(result) => {
