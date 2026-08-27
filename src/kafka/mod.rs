@@ -3,6 +3,7 @@ pub mod codec;
 pub mod connection;
 mod create_topics;
 mod describe_configs;
+mod describe_groups;
 pub mod dispatcher;
 mod fetch;
 mod find_coordinator;

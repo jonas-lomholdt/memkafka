@@ -110,13 +110,6 @@ pub(crate) struct GroupSummary {
     pub(crate) protocol_type: String,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "DescribeGroups wire-protocol integration is implemented in a later task."
-    )
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GroupDescription {
     pub(crate) group_id: String,
@@ -126,13 +119,6 @@ pub(crate) struct GroupDescription {
     pub(crate) members: Vec<GroupMemberDescription>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "DescribeGroups wire-protocol integration is implemented in a later task."
-    )
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GroupMemberDescription {
     pub(crate) member_id: String,
@@ -226,13 +212,6 @@ impl GroupCoordinator {
         summaries
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "DescribeGroups wire-protocol integration is implemented in a later task."
-        )
-    )]
     pub(crate) async fn describe(&self, group_id: &str) -> Option<GroupDescription> {
         let group = self.group(group_id).await?;
         let mut group = group.lock().await;

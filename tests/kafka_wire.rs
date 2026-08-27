@@ -6,10 +6,10 @@ use kafka_protocol::{
     ResponseError,
     messages::{
         ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeConfigsRequest,
-        FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest, JoinGroupRequest,
-        LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest, MetadataRequest,
-        OffsetCommitRequest, OffsetFetchRequest, ProduceRequest, RequestHeader, RequestKind,
-        ResponseHeader, ResponseKind, SyncGroupRequest, TopicName, TransactionalId,
+        DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest,
+        JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest,
+        MetadataRequest, OffsetCommitRequest, OffsetFetchRequest, ProduceRequest, RequestHeader,
+        RequestKind, ResponseHeader, ResponseKind, SyncGroupRequest, TopicName, TransactionalId,
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
         describe_configs_request::DescribeConfigsResource,
@@ -72,7 +72,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_eq!(header.correlation_id, 42);
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
-    assert_eq!(response.api_keys.len(), 15);
+    assert_eq!(response.api_keys.len(), 16);
     assert_api_range(&response, ApiKey::Metadata, 0, 9);
     assert_api_range(&response, ApiKey::ApiVersions, 0, 4);
     assert_api_range(&response, ApiKey::CreateTopics, 2, 6);
@@ -87,6 +87,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_api_range(&response, ApiKey::OffsetCommit, 2, 7);
     assert_api_range(&response, ApiKey::OffsetFetch, 1, 5);
     assert_api_range(&response, ApiKey::ListGroups, 0, 0);
+    assert_api_range(&response, ApiKey::DescribeGroups, 0, 0);
     assert_api_range(&response, ApiKey::DescribeConfigs, 1, 1);
 }
 
@@ -123,7 +124,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         let (header, body) = decode_api_versions_response(response);
 
         assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(body.api_keys.len(), 15);
+        assert_eq!(body.api_keys.len(), 16);
         assert_api_range(&body, ApiKey::Metadata, 0, 9);
         assert_api_range(&body, ApiKey::ApiVersions, 0, 4);
         assert_api_range(&body, ApiKey::CreateTopics, 2, 6);
@@ -138,6 +139,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         assert_api_range(&body, ApiKey::OffsetCommit, 2, 7);
         assert_api_range(&body, ApiKey::OffsetFetch, 1, 5);
         assert_api_range(&body, ApiKey::ListGroups, 0, 0);
+        assert_api_range(&body, ApiKey::DescribeGroups, 0, 0);
         assert_api_range(&body, ApiKey::DescribeConfigs, 1, 1);
     }
 
@@ -220,6 +222,107 @@ async fn list_groups_v0_returns_existing_group_ids_and_protocol_types() {
     assert_eq!(response.groups.len(), 1);
     assert_eq!(response.groups[0].group_id.as_str(), "listed-group");
     assert_eq!(response.groups[0].protocol_type.as_str(), "consumer");
+}
+
+#[tokio::test]
+async fn describe_groups_v0_returns_requested_stable_and_missing_groups_in_order() {
+    let dispatcher = test_dispatcher();
+    let group_id = GroupId::from(StrBytes::from_static_str("described-group"));
+    let join = |member_id: StrBytes| {
+        JoinGroupRequest::default()
+            .with_group_id(group_id.clone())
+            .with_session_timeout_ms(10_000)
+            .with_rebalance_timeout_ms(30_000)
+            .with_member_id(member_id)
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("cooperative-sticky"))
+                    .with_metadata(Bytes::from_static(b"subscription")),
+            ])
+    };
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::JoinGroup,
+        5,
+        RequestKind::JoinGroup(join(StrBytes::default())),
+    )
+    .await;
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+    let member_id = response.member_id;
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::JoinGroup,
+        5,
+        RequestKind::JoinGroup(join(member_id.clone())),
+    )
+    .await;
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+    assert_eq!(response.error_code, 0);
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::SyncGroup,
+        3,
+        RequestKind::SyncGroup(
+            SyncGroupRequest::default()
+                .with_group_id(group_id.clone())
+                .with_generation_id(response.generation_id)
+                .with_member_id(member_id.clone())
+                .with_assignments(vec![
+                    SyncGroupRequestAssignment::default()
+                        .with_member_id(member_id)
+                        .with_assignment(Bytes::from_static(b"assignment")),
+                ]),
+        ),
+    )
+    .await;
+    let ResponseKind::SyncGroup(response) = response else {
+        panic!("expected SyncGroup response")
+    };
+    assert_eq!(response.error_code, 0);
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::DescribeGroups,
+        0,
+        RequestKind::DescribeGroups(DescribeGroupsRequest::default().with_groups(vec![
+            group_id,
+            GroupId::from(StrBytes::from_static_str("missing-group")),
+        ])),
+    )
+    .await;
+    let ResponseKind::DescribeGroups(response) = response else {
+        panic!("expected DescribeGroups response")
+    };
+
+    assert_eq!(response.groups.len(), 2);
+    assert_eq!(response.groups[0].error_code, 0);
+    assert_eq!(response.groups[0].group_id.as_str(), "described-group");
+    assert_eq!(response.groups[0].group_state.as_str(), "Stable");
+    assert_eq!(response.groups[0].protocol_type.as_str(), "consumer");
+    assert_eq!(
+        response.groups[0].protocol_data.as_str(),
+        "cooperative-sticky"
+    );
+    assert_eq!(
+        response.groups[0].members[0].member_metadata,
+        Bytes::from_static(b"subscription")
+    );
+    assert_eq!(
+        response.groups[0].members[0].member_assignment,
+        Bytes::from_static(b"assignment")
+    );
+    assert!(response.groups[0].members[0].client_host.is_empty());
+    assert_eq!(
+        response.groups[1].error_code,
+        ResponseError::GroupIdNotFound.code()
+    );
+    assert_eq!(response.groups[1].group_id.as_str(), "missing-group");
 }
 
 #[tokio::test]
