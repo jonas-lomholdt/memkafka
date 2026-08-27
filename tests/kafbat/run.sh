@@ -11,12 +11,16 @@ readonly UI_CONTAINER="memkafka-kafbat-ui-${SUFFIX}"
 readonly SEED_CONTAINER="memkafka-kafbat-seed-${SUFFIX}"
 readonly GROUP_ID="kafbat-group-${SUFFIX}"
 readonly TOPIC="kafbat-probe-${SUFFIX}"
+readonly AVRO_TOPIC="kafbat-avro-${SUFFIX}"
+readonly AVRO_SUBJECT="${AVRO_TOPIC}-value"
 readonly KEY="kafbat-key-${SUFFIX}"
 readonly VALUE="kafbat-value-${SUFFIX}"
+readonly AVRO_VALUE="kafbat-avro-value-${SUFFIX}"
 readonly CLUSTER_RESPONSE="$(mktemp)"
 readonly GROUP_RESPONSE="$(mktemp)"
 readonly TOPICS_RESPONSE="$(mktemp)"
 readonly MESSAGES_RESPONSE="$(mktemp)"
+readonly AVRO_MESSAGES_RESPONSE="$(mktemp)"
 readonly LOG_DIR="${MEMKAFKA_KAFBAT_LOG_DIR:-${TMPDIR:-/tmp}/memkafka-kafbat-${SUFFIX}}"
 
 mkdir -p "${LOG_DIR}"
@@ -31,6 +35,7 @@ cleanup() {
   cp "${GROUP_RESPONSE}" "${LOG_DIR}/group-response.json" || true
   cp "${TOPICS_RESPONSE}" "${LOG_DIR}/topics-response.json" || true
   cp "${MESSAGES_RESPONSE}" "${LOG_DIR}/messages-response.txt" || true
+  cp "${AVRO_MESSAGES_RESPONSE}" "${LOG_DIR}/avro-messages-response.txt" || true
 
   if (( exit_code != 0 )); then
     cat "${LOG_DIR}/memkafka.log" >&2 || true
@@ -39,7 +44,8 @@ cleanup() {
   fi
   docker rm --force "${BROKER_CONTAINER}" "${UI_CONTAINER}" "${SEED_CONTAINER}" >/dev/null 2>&1 || true
   docker network rm "${NETWORK}" >/dev/null 2>&1 || true
-  rm -f "${CLUSTER_RESPONSE}" "${GROUP_RESPONSE}" "${TOPICS_RESPONSE}" "${MESSAGES_RESPONSE}"
+  rm -f "${CLUSTER_RESPONSE}" "${GROUP_RESPONSE}" "${TOPICS_RESPONSE}" \
+    "${MESSAGES_RESPONSE}" "${AVRO_MESSAGES_RESPONSE}"
   echo "Kafbat diagnostics: ${LOG_DIR}"
   return "${exit_code}"
 }
@@ -73,6 +79,8 @@ docker run --detach \
   --env KAFKA_CLUSTERS_0_NAME=memkafka \
   --env "KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=${BROKER_CONTAINER}:9092" \
   --env "KAFKA_CLUSTERS_0_SCHEMAREGISTRY=http://${BROKER_CONTAINER}:8081" \
+  --env KAFKA_CLUSTERS_0_DEFAULTKEYSERDE=String \
+  --env KAFKA_CLUSTERS_0_DEFAULTVALUESERDE=SchemaRegistry \
   "${KAFBAT_IMAGE}" >/dev/null
 
 readonly MAPPED_ADDRESS="$(docker port "${UI_CONTAINER}" 8080/tcp)"
@@ -100,6 +108,9 @@ docker run --detach \
   --env "MEMKAFKA_KAFBAT_KEY=${KEY}" \
   --env "MEMKAFKA_KAFBAT_VALUE=${VALUE}" \
   --env "MEMKAFKA_KAFBAT_GROUP=${GROUP_ID}" \
+  --env "MEMKAFKA_SCHEMA_REGISTRY_URL=http://${BROKER_CONTAINER}:8081" \
+  --env "MEMKAFKA_KAFBAT_AVRO_TOPIC=${AVRO_TOPIC}" \
+  --env "MEMKAFKA_KAFBAT_AVRO_VALUE=${AVRO_VALUE}" \
   "${SEED_IMAGE}" >/dev/null
 
 group_active=false
@@ -153,8 +164,9 @@ assert_seed_running "after exact consumer-group visibility"
 
 curl --fail --silent --show-error \
   "${KAFBAT_URL}/api/clusters/memkafka/topics?perPage=100" >"${TOPICS_RESPONSE}"
-jq --exit-status --arg topic "${TOPIC}" \
-  'any(.topics[]; .name == $topic and .partitionCount == 1)' \
+jq --exit-status --arg topic "${TOPIC}" --arg avro_topic "${AVRO_TOPIC}" \
+  'any(.topics[]; .name == $topic and .partitionCount == 1)
+    and any(.topics[]; .name == $avro_topic and .partitionCount == 1)' \
   "${TOPICS_RESPONSE}" >/dev/null
 
 curl --fail --silent --show-error --max-time 15 \
@@ -166,4 +178,19 @@ sed -n 's/^data://p' "${MESSAGES_RESPONSE}" \
     >/dev/null
 assert_seed_running "after exact message browsing"
 
-echo "PASS   Kafbat UI discovered ${TOPIC} and returned its exact key/value"
+curl --fail --silent --show-error --max-time 15 \
+  "${KAFBAT_URL}/api/clusters/memkafka/topics/${AVRO_TOPIC}/messages/v2?mode=EARLIEST&limit=10" \
+  >"${AVRO_MESSAGES_RESPONSE}"
+sed -n 's/^data://p' "${AVRO_MESSAGES_RESPONSE}" \
+  | jq --slurp --exit-status --arg value "${AVRO_VALUE}" --arg subject "${AVRO_SUBJECT}" \
+    'any(.[]; .type == "MESSAGE"
+      and .message.valueSerde == "SchemaRegistry"
+      and (.message.valueDeserializeProperties.subjects | index($subject)) != null
+      and (
+        .message.value == {"message": $value}
+        or ((.message.value | fromjson?) == {"message": $value})
+      ))' \
+    >/dev/null
+assert_seed_running "after decoded Avro message browsing"
+
+echo "PASS   Kafbat UI returned exact string and decoded Avro values"

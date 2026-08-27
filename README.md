@@ -4,7 +4,7 @@
 
 MemKafka is a fast, single-binary, in-memory Kafka-compatible broker for local development and integration tests. The same process exposes a Confluent-compatible Avro Schema Registry API.
 
-> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes cooperative-sticky A/B/C rebalancing, automatic and explicit commits, and real Avro Schema Registry publish/consume through the pinned 2.15.0 serializer. A separate Confluent.Kafka 2.13.2 flow-profile suite proves consumer subscription auto-creation in force mode and idempotent publish/consume. Kafbat UI v1.5.0 discovers MemKafka and browses an exact produced record with an active consumer group.
+> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes cooperative-sticky A/B/C rebalancing, automatic and explicit commits, and real Avro Schema Registry publish/consume through the pinned 2.15.0 serializer. A separate Confluent.Kafka 2.13.2 flow-profile suite proves consumer subscription auto-creation in force mode and idempotent publish/consume. Kafbat UI v1.5.0 discovers MemKafka and browses exact string and decoded Avro records with an active consumer group.
 
 MemKafka is test infrastructure. It is not intended for production, and all state disappears when the process exits.
 
@@ -99,9 +99,9 @@ The v0.1 target is an unmodified real `Confluent.Kafka` client plus Confluent's 
 | Apache Kafka Java client | 4.3.1 | ✅ | ✅ | — | — | — |
 | rskafka (Rust) | 0.6.0 | ✅ | ✅ | — | — | — |
 | franz-go (Go) | 1.21.6 | ✅ | ✅ | — | — | — |
-| Kafbat UI | 1.5.0 | ✅ | Fetch only | ✅ read-only | — | ✅ |
+| Kafbat UI | 1.5.0 | ✅ | Fetch only | ✅ read-only | ✅ Avro decode | ✅ |
 
-`✅` means the capability is verified by a black-box CI test. `✅ forced subscriptions` requires starting MemKafka with `--force-auto-create-topics true`. `—` means it is not covered by that integration's suite, not that it is known to be incompatible. The Kafbat test browses a record produced by an independent franz-go client.
+`✅` means the capability is verified by a black-box CI test. `✅ forced subscriptions` requires starting MemKafka with `--force-auto-create-topics true`. `—` means it is not covered by that integration's suite, not that it is known to be incompatible. The Kafbat test browses string and Confluent-framed Avro records produced by an independent franz-go client.
 
 The current black-box suite passes independently with Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, pure-Rust rskafka 0.6.0, and pure-Go franz-go 1.21.6 for:
 
@@ -120,7 +120,9 @@ The same pinned .NET suite uses `CachedSchemaRegistryClient`, `AvroSerializer<Ge
 
 The separate pinned Confluent.Kafka 2.13.2 flow-profile suite proves that consumer subscriptions auto-create absent named topics in force mode, receive a real group assignment, and publish and consume ordered records through an idempotent producer.
 
-The pinned Kafbat UI v1.5.0 suite keeps its cluster online with an active consumer group, verifies that the group is visible read-only, independently produces a unique string record, observes its topic through Kafbat's API, and verifies that Kafbat's message browser returns the exact key and value.
+The pinned Kafbat UI v1.5.0 suite keeps its cluster online with an active consumer group, verifies that the group is visible read-only, independently produces unique string and Avro records, and observes both topics through Kafbat's API. It requires Kafbat's message browser to return the exact string value and decoded Avro JSON through the `SchemaRegistry` serde, including the registered subject instead of falling back to raw bytes.
+
+For Schema Registry interoperability, MemKafka exposes `GET /schemas/ids/{id}/versions` and returns every subject/version pair associated with that global schema ID. Unknown IDs return Confluent error `40403`.
 
 MemKafka supports non-transactional idempotent production: it allocates process-local producer IDs at epoch `0`, validates producer identity and per-partition sequence numbers, and deduplicates exact recent retries without appending them again.
 

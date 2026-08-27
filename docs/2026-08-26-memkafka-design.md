@@ -394,6 +394,7 @@ GET  /subjects/{subject}/versions
 GET  /subjects/{subject}/versions/{version}
 GET  /subjects/{subject}/versions/latest
 GET  /schemas/ids/{id}
+GET  /schemas/ids/{id}/versions
 GET  /config
 GET  /config/{subject}
 ```
@@ -406,6 +407,7 @@ Registration behavior:
 - versions are positive and monotonically allocated per subject;
 - registering the exact same schema string again for a subject returns the existing ID and version instead of creating a duplicate;
 - the exact same schema string across subjects reuses the global schema ID while receiving a subject-local version;
+- fetching versions by global schema ID returns every associated `{ "subject", "version" }` pair, ordered by subject and then version;
 - semantically equivalent schemas with different text are not normalized in v0.1;
 - compatibility mode is always `NONE`; compatibility enforcement and mutation are outside scope;
 - missing subjects, versions, and IDs use Confluent-compatible HTTP status codes and `{ "error_code", "message" }` response bodies.
@@ -512,6 +514,7 @@ Using the real `CachedSchemaRegistryClient`, `AvroSerializer`, and `AvroDeserial
 - increment versions for distinct schemas under one subject;
 - list subjects and versions;
 - fetch schemas by ID and subject version;
+- list every subject/version pair associated with a schema ID and return `40403` for an unknown ID;
 - produce a Kafka record containing the Confluent wire-format schema ID;
 - fetch the record and deserialize it successfully through the real Avro deserializer;
 - return Confluent-compatible errors for missing resources and unsupported schema types.
@@ -526,8 +529,10 @@ The test must:
 - create and keep visible at least one real classic consumer group before Kafbat refreshes cluster state;
 - observe the configured MemKafka cluster and a uniquely named topic through Kafbat's HTTP API;
 - publish a uniquely identifiable string key and value through a real Kafka client;
+- register an Avro value schema, publish a Confluent-framed record carrying its global schema ID, and configure Kafbat's default value serde to `SchemaRegistry`;
 - query Kafbat's `/api/clusters/{cluster}/topics/{topic}/messages/v2` endpoint;
 - assert that Kafbat fetched and returned the exact key and value;
+- assert that Kafbat returns the exact decoded Avro JSON with `valueSerde` set to `SchemaRegistry` and the registered subject, never `Fallback`;
 - assert that Kafbat reports the cluster `ONLINE` while `ListGroups` returns the consumer group and Kafbat follows with `DescribeGroups`;
 - retain Kafbat and MemKafka logs as CI diagnostics, but never treat a connection log alone as proof that message browsing works.
 

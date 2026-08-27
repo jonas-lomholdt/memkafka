@@ -164,6 +164,22 @@ impl Registry {
             .cloned()
             .ok_or(RegistryError::SchemaNotFound)
     }
+
+    pub async fn schema_versions_by_id(
+        &self,
+        id: i32,
+    ) -> Result<Vec<RegisteredSchema>, RegistryError> {
+        let store = self.inner.read().await;
+        if !store.schemas_by_id.contains_key(&id) {
+            return Err(RegistryError::SchemaNotFound);
+        }
+        Ok(store
+            .subjects
+            .values()
+            .flat_map(|versions| versions.iter().filter(|schema| schema.id == id))
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -185,6 +201,7 @@ pub fn router(registry: Registry) -> Router {
             "/subjects/{subject}/versions/{version}",
             get(get_subject_version),
         )
+        .route("/schemas/ids/{id}/versions", get(get_schema_versions_by_id))
         .route("/schemas/ids/{id}", get(get_schema_by_id))
         .route("/config", get(get_global_config))
         .route("/config/{subject}", get(get_subject_config))
@@ -269,6 +286,12 @@ struct SchemaResponse {
     schema: String,
     #[serde(rename = "schemaType")]
     schema_type: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct SubjectVersionResponse {
+    subject: String,
+    version: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -443,6 +466,32 @@ async fn get_schema_by_id(
                 schema,
                 schema_type: "AVRO",
             })
+        })
+        .map_err(|_| HttpError::schema_not_found(format!("Schema {id} not found")))
+}
+
+async fn get_schema_versions_by_id(
+    State(registry): State<Registry>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<SubjectVersionResponse>>, HttpError> {
+    let id = id
+        .parse::<i32>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| HttpError::schema_not_found(format!("Schema {id} not found")))?;
+    registry
+        .schema_versions_by_id(id)
+        .await
+        .map(|versions| {
+            Json(
+                versions
+                    .into_iter()
+                    .map(|schema| SubjectVersionResponse {
+                        subject: schema.subject,
+                        version: schema.version,
+                    })
+                    .collect(),
+            )
         })
         .map_err(|_| HttpError::schema_not_found(format!("Schema {id} not found")))
 }
@@ -656,6 +705,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schema_id_versions_route_returns_every_subject_version_in_order() {
+        let registry = Registry::new();
+        registry.register("zeta-value", FIRST_SCHEMA).await;
+        registry.register("alpha-value", SECOND_SCHEMA).await;
+        registry.register("alpha-value", FIRST_SCHEMA).await;
+        let app = router(registry);
+
+        assert_eq!(
+            request_optional_json(app, "/schemas/ids/1/versions").await,
+            (
+                StatusCode::OK,
+                Some(json!([
+                    {"subject": "alpha-value", "version": 2},
+                    {"subject": "zeta-value", "version": 1}
+                ]))
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_id_versions_route_returns_40403_for_unknown_ids() {
+        let app = router(Registry::new());
+
+        let (status, body) = request_optional_json(app, "/schemas/ids/99/versions").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.unwrap()["error_code"], 40403);
+    }
+
+    #[tokio::test]
     async fn returns_confluent_errors_for_missing_invalid_and_unsupported_requests() {
         let app = router(Registry::new());
         assert_error(
@@ -750,6 +828,16 @@ mod tests {
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    async fn request_optional_json(app: axum::Router, uri: &str) -> (StatusCode, Option<Value>) {
+        let response = app
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).ok())
     }
 
     fn assert_error(actual: (StatusCode, Value), status: StatusCode, code: i32) {
