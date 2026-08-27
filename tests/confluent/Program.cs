@@ -1013,6 +1013,9 @@ sealed class CooperativeConsumerRunner
 sealed class ProcessOutput
 {
     private const string ReadyMarker = "MemKafka ready kafka=";
+    private static readonly Regex AnsiEscapeSequence = new(
+        @"\x1B\[[0-?]*[ -/]*[@-~]",
+        RegexOptions.Compiled);
     private readonly ConcurrentQueue<string> standardOutput = new();
     private readonly ConcurrentQueue<string> standardError = new();
     private readonly TaskCompletionSource<MemKafkaEndpoints> readiness = new(
@@ -1074,6 +1077,7 @@ sealed class ProcessOutput
     {
         while (await reader.ReadLineAsync() is { } line)
         {
+            line = AnsiEscapeSequence.Replace(line, string.Empty);
             destination.Enqueue(line);
             if (!line.Contains(ReadyMarker, StringComparison.Ordinal))
             {
