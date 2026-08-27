@@ -1,9 +1,10 @@
 # MemKafka v0.1 Design Specification
 
 **Date:** 2026-08-26  
-**Status:** Implemented
+**Updated:** 2026-08-27
+**Status:** Approved; baseline implemented, flow-compatibility extension pending
 
-**Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, Kafbat UI message browsing, and the Avro Schema Registry subset are complete and covered by pinned black-box clients
+**Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, clean-cluster Kafbat UI message browsing, and the Avro Schema Registry subset are complete and covered by pinned black-box clients. Forced consumer-topic creation, group-aware Kafbat browsing, and idempotent production are approved next steps.
 
 ## 1. Summary
 
@@ -15,7 +16,7 @@ The central product rule is:
 
 > A feature is supported only when an unmodified real client passes a black-box test against the `memkafka` binary.
 
-v0.1 provides real topics, partitions, offsets, ordered at-least-once Produce/Fetch behavior within one process lifetime, classic consumer groups, cooperative-sticky rebalancing, offset commits, and an Avro-first Schema Registry subset. All state lives in memory and disappears when the process exits.
+v0.1 provides real topics, partitions, offsets, ordered at-least-once Produce/Fetch behavior within one process lifetime, non-transactional idempotent production, classic consumer groups, cooperative-sticky rebalancing, offset commits, and an Avro-first Schema Registry subset. All state lives in memory and disappears when the process exits.
 
 ## 2. Goals
 
@@ -27,11 +28,14 @@ MemKafka v0.1 must:
 - expose a Kafka TCP endpoint and Schema Registry HTTP endpoint from the same process;
 - allow normal application code to use its real `Confluent.Kafka` configuration unchanged except for endpoint addresses and unsupported production features;
 - auto-create unknown topics by default with exactly two partitions;
+- optionally force named topic auto-creation for consumers that explicitly opt out, without changing the Kafka-compatible default;
 - support explicit topic creation with a requested partition count and replication factor `1`;
 - preserve Kafka keys, values, headers, timestamps, compression, partition ordering, and offsets;
 - provide at-least-once delivery for acknowledged records within one MemKafka process lifetime when producers retry unknown outcomes and consumers commit only after processing;
+- provide retry-safe non-transactional idempotent production through real producer IDs, epochs, and per-partition sequences;
 - implement real classic consumer-group coordination, including multiple members, generations, heartbeats, session expiry, rebalances, and committed offsets;
 - interoperate with the real `cooperative-sticky` assignor in librdkafka and make the selected protocol visible in logs;
+- expose existing classic groups through the read-only `DescribeGroups` API required by Kafbat UI;
 - provide the Schema Registry operations required by Confluent's Avro serializer and deserializer;
 - fail clearly when a client requests a feature outside the supported subset.
 
@@ -58,6 +62,7 @@ Kafka endpoint          127.0.0.1:9092
 Schema Registry         http://127.0.0.1:8081
 Broker ID               1
 Auto-create topics      true
+Force auto-create       false
 Default partitions      2
 Storage                 memory only
 ```
@@ -69,6 +74,7 @@ The following settings must be configurable through stable command-line options:
 --kafka-advertised-address <host:port>
 --schema-registry-listen <host:port>
 --auto-create-topics <true|false>
+--force-auto-create-topics <true|false>
 --default-partitions <positive integer>
 --log-level <error|warn|info|debug|trace>
 --quiet
@@ -76,7 +82,7 @@ The following settings must be configurable through stable command-line options:
 
 Configuration errors and address-binding failures are fatal and must be reported before readiness. Once both listeners are accepting connections, MemKafka emits one unambiguous readiness log line containing both resolved endpoints. `--quiet` suppresses the banner and ordinary informational logs, but not fatal startup errors.
 
-Auto-creation may be triggered by a topic-specific metadata lookup or a Produce request. With auto-creation disabled, the broker returns Kafka's unknown-topic-or-partition error instead. Explicit topic creation always overrides the default partition count.
+Auto-creation may be triggered by a topic-specific metadata lookup or a Produce request. By default, a named metadata request that sets Kafka's `allow_auto_topic_creation=false` is respected. When both `--auto-create-topics true` and `--force-auto-create-topics true` are set, MemKafka deliberately overrides that client opt-out for named metadata requests; this convenience mode exists for integration-test applications whose consumers do not expose or enable auto-creation. Force mode never creates topics when server auto-creation is disabled, and a metadata request for all topics still lists without mutation. Explicit topic creation always overrides the default partition count.
 
 ### 4.1 Docker image requirement
 
@@ -117,6 +123,7 @@ memkafka process
 ├── Broker state
 │   ├── topic catalog
 │   ├── partition logs
+│   ├── producer ID allocator
 │   ├── fetch notifications
 │   └── classic group coordinator
 └── Schema Registry HTTP server
@@ -179,6 +186,8 @@ The initial Kafka API surface includes the narrow version set needed for these b
 - `OffsetCommit`
 - `OffsetFetch`
 - `ListGroups`
+- `DescribeGroups`
+- `InitProducerId`
 - `DescribeConfigs`
 
 The precise numeric versions are an interoperability decision: tests pin a `Confluent.Kafka` minor line, record what librdkafka negotiates, and lock the smallest working version set. Adding an API version requires corresponding black-box coverage and must never change existing semantics silently.
@@ -193,6 +202,8 @@ Each partition is an independent append-only in-memory log:
 Partition
 ├── next_offset: i64
 ├── batches: ordered collection of StoredBatch
+├── producer sequences by producer ID
+├── bounded recent-batch retry results
 └── append notification
 
 StoredBatch
@@ -228,7 +239,22 @@ Acknowledgement modes:
 - `acks=1`: append, then report success;
 - `acks=all` (`-1`): equivalent to `acks=1` because the in-sync replica set contains only the single virtual broker.
 
-These acknowledgements do not imply persistence. Idempotent production and producer epochs are not supported in v0.1.
+These acknowledgements do not imply persistence.
+
+### 7.1.1 Non-transactional idempotent production
+
+MemKafka implements the non-transactional subset used by clients configured with `EnableIdempotence=true`:
+
+1. `InitProducerId v0` with no transactional ID allocates a positive process-local producer ID and epoch `0`.
+2. A magic-2 RecordBatch carrying that producer ID, epoch, and a valid base sequence is accepted.
+3. Each partition tracks the next expected sequence independently for every producer ID.
+4. A new contiguous sequence appends once and records its assigned offset range.
+5. An exact retry within the bounded in-flight retry window returns the original base offset without appending duplicate records.
+6. A sequence gap, expired retry, unknown producer ID, or mismatched epoch returns the corresponding Kafka producer error without mutating the log.
+
+Producer allocation and partition append validation are serialized only around their own state. Concurrent producers remain independent. The retry window must cover the maximum in-flight request count accepted by the pinned librdkafka client.
+
+Transactional IDs, transactional batches, control batches, producer epoch recovery, and exactly-once transactions remain unsupported. `InitProducerId` with a transactional ID fails clearly, and MemKafka does not advertise transaction-coordinator APIs.
 
 ### 7.2 Fetch
 
@@ -250,7 +276,7 @@ last_stable_offset = next_offset
 
 ### 7.3 Delivery and ordering contract
 
-Within one running MemKafka process, a successful `acks=1` or `acks=all` Produce response means the complete batch was atomically appended before acknowledgement. Every acknowledged record remains fetchable until process shutdown. If the connection or response is lost after append, a retry may append a duplicate; MemKafka guarantees at-least-once delivery, not exactly-once delivery or deduplication.
+Within one running MemKafka process, a successful `acks=1` or `acks=all` Produce response means the complete batch was atomically appended before acknowledgement. Every acknowledged record remains fetchable until process shutdown. If the connection or response is lost after append, a non-idempotent retry may append a duplicate. A valid idempotent retry within the supported window returns its original offset instead. MemKafka's general delivery guarantee remains at-least-once; idempotent production does not imply transactions or durability.
 
 At-least-once delivery is an end-to-end contract with the real client: the producer must retry requests whose outcome is unknown, and the consumer must commit an offset only after processing the corresponding record. The guarantee does not apply to `acks=0`, a producer that abandons an unknown result, a consumer that commits before processing, or any state after MemKafka exits.
 
@@ -309,8 +335,12 @@ Required semantics:
 - clients may use automatic commits or disable them and commit offsets explicitly;
 - committed offsets survive consumer restarts within the same MemKafka process;
 - different groups consume and commit independently.
+- `DescribeGroups` returns each requested group's real state, selected protocol, active members, current subscription metadata, and assignment bytes;
+- describing an unknown group returns the Kafka unknown-group error without creating coordinator state.
 
 Coordination transitions for one group are serialized. Network connections do not own group membership: disconnecting a socket alone does not immediately remove a member, because a crashed client must follow the session-timeout path unless it sent `LeaveGroup`.
+
+Group descriptions are read-only point-in-time snapshots. Building a description may expire members whose session deadline has passed, but it must not otherwise trigger a rebalance or mutate membership. Member metadata and assignments remain opaque Kafka bytes; MemKafka reports them exactly as received from `JoinGroup` and `SyncGroup`.
 
 ## 9. Cooperative-sticky behavior and logging
 
@@ -491,15 +521,30 @@ The CI black-box suite pins `ghcr.io/kafbat/kafka-ui:v1.5.0@sha256:7cda86a333441
 The test must:
 
 - wait for Kafbat's `/actuator/health` readiness endpoint;
+- create and keep visible at least one real classic consumer group before Kafbat refreshes cluster state;
 - observe the configured MemKafka cluster and a uniquely named topic through Kafbat's HTTP API;
 - publish a uniquely identifiable string key and value through a real Kafka client;
 - query Kafbat's `/api/clusters/{cluster}/topics/{topic}/messages/v2` endpoint;
 - assert that Kafbat fetched and returned the exact key and value;
+- assert that Kafbat reports the cluster `ONLINE` while `ListGroups` returns the consumer group and Kafbat follows with `DescribeGroups`;
 - retain Kafbat and MemKafka logs as CI diagnostics, but never treat a connection log alone as proof that message browsing works.
 
 MemKafka implements the smallest additional read-only administrative API subset needed for this scenario. Every such API must be advertised honestly and covered by protocol tests. Kafbat operations outside cluster/topic discovery and message browsing may remain unavailable unless added explicitly to this specification.
 
-The implemented compatibility subset is `ListGroups v0` plus read-only `DescribeConfigs v1` for known topic and broker resources. The producer is an independent pinned franz-go client, and the test asserts the returned SSE `MESSAGE` event rather than a Kafbat or MemKafka log line.
+The required compatibility subset is `ListGroups v0`, `DescribeGroups v0`, plus read-only `DescribeConfigs v1` for known topic and broker resources. The producer is an independent pinned franz-go client, and the test asserts the returned SSE `MESSAGE` event rather than a Kafbat or MemKafka log line.
+
+### 12.6 Self-contained flow-compatibility acceptance
+
+CI includes a separate black-box suite pinned to Confluent.Kafka 2.13.2. It reproduces the three application patterns that exposed this extension without depending on flow-v2, Aspire, another repository, or application-specific schemas:
+
+1. Start MemKafka with normal auto-creation and forced consumer-topic creation enabled.
+2. Subscribe a real consumer whose `AllowAutoCreateTopics` remains at its default `false` to several absent named topics.
+3. Verify that each topic appears with the configured default partition count and that the consumer can join a group and receive an assignment.
+4. Keep a real group visible while the pinned Kafbat UI refreshes cluster state; assert `ONLINE`, topic discovery, and exact message browsing.
+5. Build a producer with `EnableIdempotence=true`, leaving librdkafka's compatible acknowledgement and in-flight settings intact; produce records to an explicit partition and require successful delivery reports with contiguous offsets.
+6. Consume the idempotently produced records and verify their exact ordered values.
+
+Focused Rust tests additionally prove `InitProducerId` allocation, epoch fencing, per-partition sequence isolation, exact-retry deduplication, original-offset replay, retry-window bounds, and rejection without partial append. The real-client test proves negotiation and normal publish/consume interoperability; the Rust tests prove failure and retry semantics that are not deterministic to induce through a black-box network client.
 
 ## 13. Explicit v0.1 exclusions
 
@@ -508,10 +553,10 @@ The following are not implemented or simulated in v0.1:
 - persistence, recovery, snapshots, or durability;
 - multiple brokers, replication, real ISR behavior, leader election, rack awareness, or failover;
 - KRaft, ZooKeeper, controller protocols, or internal Kafka topics;
-- transactions, exactly-once semantics, idempotent producers, producer IDs, or epochs;
+- transactions, exactly-once semantics, transactional IDs or batches, control batches, or producer epoch recovery;
 - KIP-848's newer consumer group protocol, `ConsumerGroupHeartbeat`, or broker-side assignors;
 - retention policies, log compaction, segment files, tiered storage, or DeleteRecords;
-- partition-count increases, topic deletion, ACLs, quotas, or administrative/configuration APIs beyond the explicitly tested Kafbat compatibility subset;
+- partition-count increases, topic deletion, ACLs, quotas, or administrative/configuration APIs beyond the explicitly tested Kafbat compatibility subset (`ListGroups v0`, `DescribeGroups v0`, and read-only `DescribeConfigs v1`);
 - TLS, SASL, authentication, authorization, or multi-tenant isolation;
 - realistic latency, network faults, disk faults, broker restarts, or performance benchmarking against Kafka;
 - legacy message-set formats predating RecordBatch magic `2`;
@@ -533,8 +578,10 @@ v0.1 is complete when:
 6. unsupported features fail clearly without crashing or corrupting state;
 7. formatting and strict Clippy checks pass across all targets and features;
 8. the README states the compatibility target, native and container startup paths, ephemeral data model, Rust baseline, and exclusions without implying production suitability;
-9. acknowledged records remain fetchable in assigned-offset order for the lifetime of the process, and the real-client tests demonstrate at-least-once redelivery.
-10. the pinned Kafbat UI image discovers MemKafka and returns a produced record through its message-browsing API.
+9. acknowledged records remain fetchable in assigned-offset order for the lifetime of the process, and the real-client tests demonstrate at-least-once redelivery;
+10. the pinned Kafbat UI image reports MemKafka `ONLINE` with an existing classic group and returns a produced record through its message-browsing API;
+11. the pinned Confluent.Kafka 2.13.2 suite proves forced consumer-topic creation and acknowledged idempotent Produce through an unmodified real client;
+12. focused protocol tests prove idempotent retries do not append duplicates and invalid producer epochs or sequences do not mutate partition state.
 
 Implementation must not expand v0.1 merely to imitate Kafka internals. New behavior enters scope only when required by the pinned real-client acceptance suite or added explicitly to this specification.
 
