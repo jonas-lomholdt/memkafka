@@ -136,7 +136,7 @@ fn error_response(error: ResponseError, member_id: StrBytes) -> JoinGroupRespons
         .with_throttle_time_ms(0)
         .with_error_code(error.code())
         .with_generation_id(-1)
-        .with_protocol_name(None)
+        .with_protocol_name(Some(StrBytes::default()))
         .with_leader(StrBytes::default())
         .with_member_id(member_id)
         .with_members(Vec::new())

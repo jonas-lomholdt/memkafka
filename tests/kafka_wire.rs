@@ -92,6 +92,36 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
 }
 
 #[tokio::test]
+async fn join_group_v5_member_id_required_uses_non_nullable_protocol_name() {
+    let response = dispatch_kind(
+        &test_dispatcher(),
+        ApiKey::JoinGroup,
+        5,
+        RequestKind::JoinGroup(
+            JoinGroupRequest::default()
+                .with_group_id(GroupId::from(StrBytes::from_static_str("join-group-error")))
+                .with_session_timeout_ms(10_000)
+                .with_rebalance_timeout_ms(30_000)
+                .with_member_id(StrBytes::default())
+                .with_protocol_type(StrBytes::from_static_str("consumer"))
+                .with_protocols(vec![
+                    JoinGroupRequestProtocol::default()
+                        .with_name(StrBytes::from_static_str("cooperative-sticky"))
+                        .with_metadata(Bytes::from_static(b"subscription")),
+                ]),
+        ),
+    )
+    .await;
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+
+    assert_eq!(response.error_code, ResponseError::MemberIdRequired.code());
+    assert!(!response.member_id.is_empty());
+    assert_eq!(response.protocol_name, Some(StrBytes::default()));
+}
+
+#[tokio::test]
 async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
