@@ -43,6 +43,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+assert_seed_running() {
+  local checkpoint=$1
+
+  if [[ "$(docker inspect --format '{{.State.Running}}' "${SEED_CONTAINER}" 2>/dev/null)" != true ]]; then
+    echo "Kafbat seed container stopped ${checkpoint}; cleanup will capture ${LOG_DIR}/seed.log" >&2
+    exit 1
+  fi
+}
+
 docker image inspect "${MEMKAFKA_IMAGE}" >/dev/null
 docker image inspect "${SEED_IMAGE}" >/dev/null
 docker network create "${NETWORK}" >/dev/null
@@ -118,6 +127,7 @@ if [[ "${online}" != true ]]; then
   echo "Kafbat did not report the MemKafka cluster online" >&2
   exit 1
 fi
+assert_seed_running "after Kafbat reported the cluster online"
 
 curl --fail --silent --show-error \
   "${KAFBAT_URL}/api/clusters/memkafka/topics?perPage=100" >"${TOPICS_RESPONSE}"
@@ -132,5 +142,6 @@ sed -n 's/^data://p' "${MESSAGES_RESPONSE}" \
   | jq --slurp --exit-status --arg key "${KEY}" --arg value "${VALUE}" \
     'any(.[]; .type == "MESSAGE" and .message.key == $key and .message.value == $value)' \
     >/dev/null
+assert_seed_running "after exact message browsing"
 
 echo "PASS   Kafbat UI discovered ${TOPIC} and returned its exact key/value"

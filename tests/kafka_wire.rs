@@ -255,10 +255,10 @@ async fn list_groups_v0_returns_existing_group_ids_and_protocol_types() {
 }
 
 #[tokio::test]
-async fn describe_groups_v0_returns_requested_stable_and_missing_groups_in_order() {
+async fn describe_groups_v0_sorts_members_and_preserves_missing_then_known_request_order() {
     let dispatcher = test_dispatcher();
     let group_id = GroupId::from(StrBytes::from_static_str("described-group"));
-    let join = |member_id: StrBytes| {
+    let join = |member_id: StrBytes, metadata: &'static [u8]| {
         JoinGroupRequest::default()
             .with_group_id(group_id.clone())
             .with_session_timeout_ms(10_000)
@@ -268,25 +268,27 @@ async fn describe_groups_v0_returns_requested_stable_and_missing_groups_in_order
             .with_protocols(vec![
                 JoinGroupRequestProtocol::default()
                     .with_name(StrBytes::from_static_str("cooperative-sticky"))
-                    .with_metadata(Bytes::from_static(b"subscription")),
+                    .with_metadata(Bytes::from_static(metadata)),
             ])
     };
     let response = dispatch_kind(
         &dispatcher,
         ApiKey::JoinGroup,
         5,
-        RequestKind::JoinGroup(join(StrBytes::default())),
+        RequestKind::JoinGroup(join(StrBytes::default(), b"subscription-a")),
     )
     .await;
     let ResponseKind::JoinGroup(response) = response else {
         panic!("expected JoinGroup response")
     };
-    let member_id = response.member_id;
+    let first_member_id = response.member_id;
+    assert_eq!(first_member_id.as_str(), "memkafka-wire-test-1");
+
     let response = dispatch_kind(
         &dispatcher,
         ApiKey::JoinGroup,
         5,
-        RequestKind::JoinGroup(join(member_id.clone())),
+        RequestKind::JoinGroup(join(first_member_id.clone(), b"subscription-a")),
     )
     .await;
     let ResponseKind::JoinGroup(response) = response else {
@@ -296,17 +298,59 @@ async fn describe_groups_v0_returns_requested_stable_and_missing_groups_in_order
 
     let response = dispatch_kind(
         &dispatcher,
+        ApiKey::JoinGroup,
+        5,
+        RequestKind::JoinGroup(join(StrBytes::default(), b"subscription-b")),
+    )
+    .await;
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+    let second_member_id = response.member_id;
+    assert_eq!(second_member_id.as_str(), "memkafka-wire-test-2");
+
+    let second_request = join(second_member_id.clone(), b"subscription-b");
+    let first_request = join(first_member_id.clone(), b"subscription-a");
+    let (second_join, response) = tokio::join!(
+        biased;
+        dispatch_kind(
+            &dispatcher,
+            ApiKey::JoinGroup,
+            5,
+            RequestKind::JoinGroup(second_request),
+        ),
+        dispatch_kind(
+            &dispatcher,
+            ApiKey::JoinGroup,
+            5,
+            RequestKind::JoinGroup(first_request),
+        ),
+    );
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected JoinGroup response")
+    };
+    assert_eq!(response.error_code, 0);
+    let ResponseKind::JoinGroup(second_join) = second_join else {
+        panic!("expected JoinGroup response")
+    };
+    assert_eq!(second_join.error_code, 0);
+
+    let response = dispatch_kind(
+        &dispatcher,
         ApiKey::SyncGroup,
         3,
         RequestKind::SyncGroup(
             SyncGroupRequest::default()
                 .with_group_id(group_id.clone())
                 .with_generation_id(response.generation_id)
-                .with_member_id(member_id.clone())
+                .with_member_id(first_member_id.clone())
                 .with_assignments(vec![
                     SyncGroupRequestAssignment::default()
-                        .with_member_id(member_id)
-                        .with_assignment(Bytes::from_static(b"assignment")),
+                        .with_member_id(first_member_id)
+                        .with_assignment(Bytes::from_static(b"assignment-a")),
+                    SyncGroupRequestAssignment::default()
+                        .with_member_id(second_member_id)
+                        .with_assignment(Bytes::from_static(b"assignment-b")),
                 ]),
         ),
     )
@@ -321,8 +365,8 @@ async fn describe_groups_v0_returns_requested_stable_and_missing_groups_in_order
         ApiKey::DescribeGroups,
         0,
         RequestKind::DescribeGroups(DescribeGroupsRequest::default().with_groups(vec![
-            group_id,
             GroupId::from(StrBytes::from_static_str("missing-group")),
+            group_id,
         ])),
     )
     .await;
@@ -331,28 +375,57 @@ async fn describe_groups_v0_returns_requested_stable_and_missing_groups_in_order
     };
 
     assert_eq!(response.groups.len(), 2);
-    assert_eq!(response.groups[0].error_code, 0);
-    assert_eq!(response.groups[0].group_id.as_str(), "described-group");
-    assert_eq!(response.groups[0].group_state.as_str(), "Stable");
-    assert_eq!(response.groups[0].protocol_type.as_str(), "consumer");
+    assert_eq!(response.groups[0].protocol_data.as_str(), "");
     assert_eq!(
-        response.groups[0].protocol_data.as_str(),
-        "cooperative-sticky"
-    );
-    assert_eq!(
-        response.groups[0].members[0].member_metadata,
-        Bytes::from_static(b"subscription")
-    );
-    assert_eq!(
-        response.groups[0].members[0].member_assignment,
-        Bytes::from_static(b"assignment")
-    );
-    assert!(response.groups[0].members[0].client_host.is_empty());
-    assert_eq!(
-        response.groups[1].error_code,
+        response.groups[0].error_code,
         ResponseError::GroupIdNotFound.code()
     );
-    assert_eq!(response.groups[1].group_id.as_str(), "missing-group");
+    assert_eq!(response.groups[0].group_id.as_str(), "missing-group");
+    assert!(response.groups[0].members.is_empty());
+
+    assert_eq!(response.groups[1].error_code, 0);
+    assert_eq!(response.groups[1].group_id.as_str(), "described-group");
+    assert_eq!(response.groups[1].group_state.as_str(), "Stable");
+    assert_eq!(response.groups[1].protocol_type.as_str(), "consumer");
+    assert_eq!(
+        response.groups[1].protocol_data.as_str(),
+        "cooperative-sticky"
+    );
+    assert_eq!(response.groups[1].members.len(), 2);
+    assert_eq!(
+        response.groups[1].members[0].member_id.as_str(),
+        "memkafka-wire-test-1"
+    );
+    assert_eq!(
+        response.groups[1].members[0].client_id.as_str(),
+        "memkafka-wire-test"
+    );
+    assert_eq!(
+        response.groups[1].members[0].member_metadata,
+        Bytes::from_static(b"subscription-a")
+    );
+    assert_eq!(
+        response.groups[1].members[0].member_assignment,
+        Bytes::from_static(b"assignment-a")
+    );
+    assert!(response.groups[1].members[0].client_host.is_empty());
+    assert_eq!(
+        response.groups[1].members[1].member_id.as_str(),
+        "memkafka-wire-test-2"
+    );
+    assert_eq!(
+        response.groups[1].members[1].client_id.as_str(),
+        "memkafka-wire-test"
+    );
+    assert_eq!(
+        response.groups[1].members[1].member_metadata,
+        Bytes::from_static(b"subscription-b")
+    );
+    assert_eq!(
+        response.groups[1].members[1].member_assignment,
+        Bytes::from_static(b"assignment-b")
+    );
+    assert!(response.groups[1].members[1].client_host.is_empty());
 }
 
 #[tokio::test]
