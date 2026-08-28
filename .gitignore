@@ -1,4 +1,5 @@
 /target/
+/artifacts/api-versions/
 /artifacts/
 **/target/
 **/bin/

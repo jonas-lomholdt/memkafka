@@ -1,0 +1,463 @@
+{
+  "schemaVersion": 1,
+  "kafkaBaseline": {
+    "version": "4.3.1",
+    "image": "apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
+  },
+  "scenarios": [
+    {
+      "id": "apache-kafka-java-4.3.1",
+      "client": "Apache Kafka Java",
+      "version": "4.3.1",
+      "requests": [
+        {
+          "apiKey": 0,
+          "versions": [
+            13
+          ]
+        },
+        {
+          "apiKey": 1,
+          "versions": [
+            18
+          ]
+        },
+        {
+          "apiKey": 2,
+          "versions": [
+            11
+          ]
+        },
+        {
+          "apiKey": 3,
+          "versions": [
+            13
+          ]
+        },
+        {
+          "apiKey": 18,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 19,
+          "versions": [
+            7
+          ]
+        },
+        {
+          "apiKey": 22,
+          "versions": [
+            5
+          ]
+        },
+        {
+          "apiKey": 60,
+          "versions": [
+            2
+          ]
+        },
+        {
+          "apiKey": 75,
+          "versions": [
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "confluent-kafka-2.15.0",
+      "client": "Confluent.Kafka",
+      "version": "2.15.0",
+      "requests": [
+        {
+          "apiKey": 0,
+          "versions": [
+            10
+          ]
+        },
+        {
+          "apiKey": 1,
+          "versions": [
+            16
+          ]
+        },
+        {
+          "apiKey": 2,
+          "versions": [
+            7
+          ]
+        },
+        {
+          "apiKey": 3,
+          "versions": [
+            13
+          ]
+        },
+        {
+          "apiKey": 8,
+          "versions": [
+            9
+          ]
+        },
+        {
+          "apiKey": 9,
+          "versions": [
+            9
+          ]
+        },
+        {
+          "apiKey": 10,
+          "versions": [
+            2
+          ]
+        },
+        {
+          "apiKey": 11,
+          "versions": [
+            5
+          ]
+        },
+        {
+          "apiKey": 12,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 13,
+          "versions": [
+            1
+          ]
+        },
+        {
+          "apiKey": 14,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 18,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 19,
+          "versions": [
+            4
+          ]
+        }
+      ]
+    },
+    {
+      "id": "confluent-kafka-flow-2.13.2",
+      "client": "Confluent.Kafka",
+      "version": "2.13.2",
+      "requests": [
+        {
+          "apiKey": 0,
+          "versions": [
+            10
+          ]
+        },
+        {
+          "apiKey": 1,
+          "versions": [
+            16
+          ]
+        },
+        {
+          "apiKey": 2,
+          "versions": [
+            7
+          ]
+        },
+        {
+          "apiKey": 3,
+          "versions": [
+            13
+          ]
+        },
+        {
+          "apiKey": 9,
+          "versions": [
+            9
+          ]
+        },
+        {
+          "apiKey": 10,
+          "versions": [
+            2
+          ]
+        },
+        {
+          "apiKey": 11,
+          "versions": [
+            5
+          ]
+        },
+        {
+          "apiKey": 12,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 13,
+          "versions": [
+            1
+          ]
+        },
+        {
+          "apiKey": 14,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 18,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 19,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 22,
+          "versions": [
+            4
+          ]
+        }
+      ]
+    },
+    {
+      "id": "franz-go-1.21.6",
+      "client": "franz-go",
+      "version": "1.21.6",
+      "requests": [
+        {
+          "apiKey": 0,
+          "versions": [
+            13
+          ]
+        },
+        {
+          "apiKey": 1,
+          "versions": [
+            18
+          ]
+        },
+        {
+          "apiKey": 2,
+          "versions": [
+            11
+          ]
+        },
+        {
+          "apiKey": 3,
+          "versions": [
+            13
+          ]
+        },
+        {
+          "apiKey": 18,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 19,
+          "versions": [
+            7
+          ]
+        }
+      ]
+    },
+    {
+      "id": "kafbat-1.5.0",
+      "client": "Kafbat UI",
+      "version": "1.5.0",
+      "requests": [
+        {
+          "apiKey": 0,
+          "versions": [
+            13
+          ]
+        },
+        {
+          "apiKey": 1,
+          "versions": [
+            17,
+            18
+          ]
+        },
+        {
+          "apiKey": 2,
+          "versions": [
+            9,
+            11
+          ]
+        },
+        {
+          "apiKey": 3,
+          "versions": [
+            12,
+            13
+          ]
+        },
+        {
+          "apiKey": 8,
+          "versions": [
+            10
+          ]
+        },
+        {
+          "apiKey": 9,
+          "versions": [
+            9,
+            10
+          ]
+        },
+        {
+          "apiKey": 10,
+          "versions": [
+            6
+          ]
+        },
+        {
+          "apiKey": 11,
+          "versions": [
+            9
+          ]
+        },
+        {
+          "apiKey": 12,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 14,
+          "versions": [
+            5
+          ]
+        },
+        {
+          "apiKey": 15,
+          "versions": [
+            5
+          ]
+        },
+        {
+          "apiKey": 16,
+          "versions": [
+            5
+          ]
+        },
+        {
+          "apiKey": 18,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 19,
+          "versions": [
+            7
+          ]
+        },
+        {
+          "apiKey": 29,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 32,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 35,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 55,
+          "versions": [
+            2
+          ]
+        },
+        {
+          "apiKey": 60,
+          "versions": [
+            1
+          ]
+        },
+        {
+          "apiKey": 69,
+          "versions": [
+            0
+          ]
+        },
+        {
+          "apiKey": 75,
+          "versions": [
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rskafka-0.6.0",
+      "client": "rskafka",
+      "version": "0.6.0",
+      "requests": [
+        {
+          "apiKey": 0,
+          "versions": [
+            7
+          ]
+        },
+        {
+          "apiKey": 1,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 2,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 3,
+          "versions": [
+            4
+          ]
+        },
+        {
+          "apiKey": 18,
+          "versions": [
+            3
+          ]
+        },
+        {
+          "apiKey": 19,
+          "versions": [
+            5
+          ]
+        }
+      ]
+    }
+  ]
+}
