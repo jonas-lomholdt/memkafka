@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{future::Future, io, net::SocketAddr, sync::Arc};
 
 use clap::Parser;
 use serde::Serialize;
@@ -7,6 +7,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter},
     net::{TcpListener, TcpSocket, TcpStream},
     sync::Mutex,
+    task::JoinHandle,
 };
 
 const MAX_FRAME_SIZE: usize = 100 * 1024 * 1024;
@@ -82,11 +83,75 @@ async fn forward_connection(
     let (client_read, mut client_write) = client.into_split();
     let (mut upstream_read, upstream_write) = upstream.into_split();
 
-    tokio::try_join!(
+    forward_directions(
         forward_requests(client_read, upstream_write, scenario, output),
-        tokio::io::copy(&mut upstream_read, &mut client_write),
-    )?;
-    Ok(())
+        async move {
+            tokio::io::copy(&mut upstream_read, &mut client_write).await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+pub(crate) async fn forward_directions<Request, Response>(
+    request: Request,
+    response: Response,
+) -> io::Result<()>
+where
+    Request: Future<Output = io::Result<()>> + Send + 'static,
+    Response: Future<Output = io::Result<()>> + Send + 'static,
+{
+    DirectionTasks::new(request, response).wait().await
+}
+
+struct DirectionTasks {
+    request: JoinHandle<io::Result<()>>,
+    response: JoinHandle<io::Result<()>>,
+}
+
+impl DirectionTasks {
+    fn new<Request, Response>(request: Request, response: Response) -> Self
+    where
+        Request: Future<Output = io::Result<()>> + Send + 'static,
+        Response: Future<Output = io::Result<()>> + Send + 'static,
+    {
+        Self {
+            request: tokio::spawn(request),
+            response: tokio::spawn(response),
+        }
+    }
+
+    async fn wait(mut self) -> io::Result<()> {
+        tokio::select! {
+            request = &mut self.request => match task_result(request) {
+                Ok(()) => task_result((&mut self.response).await),
+                Err(error) => {
+                    self.response.abort();
+                    let _ = (&mut self.response).await;
+                    Err(error)
+                }
+            },
+            response = &mut self.response => match task_result(response) {
+                Ok(()) => task_result((&mut self.request).await),
+                Err(error) => {
+                    self.request.abort();
+                    let _ = (&mut self.request).await;
+                    Err(error)
+                }
+            },
+        }
+    }
+}
+
+impl Drop for DirectionTasks {
+    fn drop(&mut self) {
+        self.request.abort();
+        self.response.abort();
+    }
+}
+
+fn task_result(result: Result<io::Result<()>, tokio::task::JoinError>) -> io::Result<()> {
+    result.map_err(io::Error::other)?
 }
 
 async fn forward_requests<R, W>(

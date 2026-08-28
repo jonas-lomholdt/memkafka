@@ -11,9 +11,14 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     process::{Child, Command},
+    sync::oneshot,
     task::JoinHandle,
     time::{sleep, timeout},
 };
+
+#[allow(dead_code)]
+#[path = "../src/main.rs"]
+mod recorder;
 
 static NEXT_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 
@@ -129,6 +134,31 @@ async fn upstream_once(listener: TcpListener, response: Vec<u8>) -> JoinHandle<V
         upstream.shutdown().await.unwrap();
         received
     })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_task_progresses_while_request_task_is_cpu_bound() {
+    // Break caught: running both directions in one task lets CPU-bound request work starve responses.
+    let (response_started, response_received) = oneshot::channel();
+    let forwarding = tokio::spawn(recorder::forward_directions(
+        async {
+            let deadline = std::time::Instant::now() + Duration::from_millis(250);
+            while std::time::Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+            Ok(())
+        },
+        async move {
+            response_started.send(()).unwrap();
+            Ok(())
+        },
+    ));
+
+    timeout(Duration::from_millis(100), response_received)
+        .await
+        .expect("response task must progress before CPU-bound request work completes")
+        .unwrap();
+    forwarding.await.unwrap().unwrap();
 }
 
 #[tokio::test]
