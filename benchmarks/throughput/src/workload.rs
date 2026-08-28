@@ -103,6 +103,13 @@ struct TaskProgress {
     producers: usize,
     consumers: usize,
     producer_seconds: Option<f64>,
+    end_to_end_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TaskTimings {
+    producer_seconds: f64,
+    end_to_end_seconds: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -251,7 +258,7 @@ pub async fn run(
         .context("publish common workload start instant")?;
     let deadline = start + WORKLOAD_DEADLINE;
 
-    let producer_seconds = coordinate_tasks(
+    let timings = coordinate_tasks(
         tasks,
         config.partitions as usize,
         config.partitions as usize,
@@ -261,13 +268,12 @@ pub async fn run(
     )
     .await?;
     validate_final_partition_lengths(&clients, config, deadline, topic).await?;
-    let end_to_end_seconds = start.elapsed().as_secs_f64();
 
     Ok(RunMetrics::new(
         config.messages,
         value_bytes,
-        producer_seconds,
-        end_to_end_seconds,
+        timings.producer_seconds,
+        timings.end_to_end_seconds,
     ))
 }
 
@@ -399,7 +405,7 @@ async fn coordinate_tasks(
     start: Instant,
     deadline: Instant,
     topic: &str,
-) -> Result<f64> {
+) -> Result<TaskTimings> {
     let mut progress = TaskProgress::default();
     let outcome = timeout_at(deadline, async {
         while let Some(result) = tasks.tasks.join_next_with_id().await {
@@ -425,7 +431,12 @@ async fn coordinate_tasks(
                         progress.producer_seconds = Some(start.elapsed().as_secs_f64());
                     }
                 }
-                TaskRole::Consumer => progress.consumers += 1,
+                TaskRole::Consumer => {
+                    progress.consumers += 1;
+                    if progress.consumers == expected_consumers {
+                        progress.end_to_end_seconds = Some(start.elapsed().as_secs_f64());
+                    }
+                }
             }
         }
 
@@ -438,14 +449,21 @@ async fn coordinate_tasks(
                 expected_consumers
             );
         }
-        progress
+        let producer_seconds = progress
             .producer_seconds
-            .context("all producer tasks completed without a producer completion time")
+            .context("all producer tasks completed without a producer completion time")?;
+        let end_to_end_seconds = progress
+            .end_to_end_seconds
+            .context("all consumer tasks completed without an end-to-end completion time")?;
+        Ok(TaskTimings {
+            producer_seconds,
+            end_to_end_seconds,
+        })
     })
     .await;
 
     match outcome {
-        Ok(Ok(producer_seconds)) => Ok(producer_seconds),
+        Ok(Ok(timings)) => Ok(timings),
         Ok(Err(error)) => {
             tasks.abort_and_drain().await;
             Err(error)
@@ -592,6 +610,35 @@ mod tests {
         assert!(error.contains("consumer partition 0"));
         assert!(error.contains("record validation failed"));
         assert!(!error.contains("producer request timed out"));
+    }
+
+    #[tokio::test]
+    async fn captures_end_to_end_time_before_post_consumer_validation_delay() {
+        let mut tasks = TaskGroup::default();
+        tasks.spawn(TaskContext::new(TaskRole::Producer, 0, 10), async {
+            Ok(())
+        });
+        tasks.spawn(TaskContext::new(TaskRole::Consumer, 0, 10), async {
+            Ok(())
+        });
+        let started = Instant::now();
+
+        let timings = coordinate_tasks(
+            tasks,
+            1,
+            1,
+            started,
+            started + Duration::from_secs(1),
+            "test-topic",
+        )
+        .await
+        .unwrap();
+        sleep(Duration::from_millis(20)).await;
+
+        assert!(
+            timings.end_to_end_seconds < started.elapsed().as_secs_f64(),
+            "post-consumer validation delay must not change captured end-to-end time"
+        );
     }
 
     #[test]
