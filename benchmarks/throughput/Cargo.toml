@@ -1,0 +1,22 @@
+[package]
+name = "memkafka-throughput-benchmark"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4.5", features = ["derive"] }
+futures = "0.3"
+rskafka = { version = "=0.6.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[workspace]
