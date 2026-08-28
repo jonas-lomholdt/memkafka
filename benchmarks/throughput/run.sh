@@ -12,4 +12,5 @@ exec "$script_dir/target/release/memkafka-throughput-benchmark" \
   --broker-binary "$repository_root/target/release/memkafka" \
   --runs 3 \
   --output-json "$repository_root/docs/benchmarks/latest.json" \
+  --output-svg "$repository_root/docs/benchmarks/throughput.svg" \
   "$@"

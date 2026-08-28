@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-28T12:44:16.474985Z",
+  "commit": "c504630cbac68f845c1d8e724a4b4e6ef563a1ee",
+  "workload": {
+    "messages": 1000000,
+    "payloadBytes": 4096,
+    "partitions": 8,
+    "batchRecords": 256
+  },
+  "machine": {
+    "operatingSystem": "Darwin",
+    "operatingSystemVersion": "26.6",
+    "architecture": "aarch64",
+    "cpu": "Apple M1 Pro",
+    "logicalCores": 10,
+    "totalMemoryBytes": 34359738368,
+    "availableMemoryBytes": 20953792512,
+    "rustcVersion": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "clientVersion": "rskafka 0.6.0"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "topic": "memkafka-throughput-run-1-98457-1787921003433071000",
+      "brokerPid": 98506,
+      "messages": 1000000,
+      "valueBytes": 4096000000,
+      "producerSeconds": 25.889574375,
+      "producerRecordsPerSecond": 38625.58671360931,
+      "producerGibPerSecond": 0.14734492001956676,
+      "endToEndSeconds": 25.889824958,
+      "endToEndRecordsPerSecond": 38625.21286344188,
+      "endToEndGibPerSecond": 0.1473434938943553,
+      "peakRssBytes": 4161486848
+    },
+    {
+      "run": 2,
+      "topic": "memkafka-throughput-run-2-98457-1787921029583636000",
+      "brokerPid": 98545,
+      "messages": 1000000,
+      "valueBytes": 4096000000,
+      "producerSeconds": 16.869195041,
+      "producerRecordsPerSecond": 59279.651315284114,
+      "producerGibPerSecond": 0.22613392377961775,
+      "endToEndSeconds": 16.869465583,
+      "endToEndRecordsPerSecond": 59278.700625094956,
+      "endToEndGibPerSecond": 0.2261302971843527,
+      "peakRssBytes": 4257628160
+    },
+    {
+      "run": 3,
+      "topic": "memkafka-throughput-run-3-98457-1787921046634599000",
+      "brokerPid": 98580,
+      "messages": 1000000,
+      "valueBytes": 4096000000,
+      "producerSeconds": 9.76392625,
+      "producerRecordsPerSecond": 102417.81578389123,
+      "producerGibPerSecond": 0.39069296182209484,
+      "endToEndSeconds": 9.764194791,
+      "endToEndRecordsPerSecond": 102414.99902498207,
+      "endToEndGibPerSecond": 0.39068221673958614,
+      "peakRssBytes": 4257611776
+    }
+  ],
+  "median": {
+    "producerSeconds": 16.869195041,
+    "producerRecordsPerSecond": 59279.651315284114,
+    "producerGibPerSecond": 0.22613392377961775,
+    "endToEndSeconds": 16.869465583,
+    "endToEndRecordsPerSecond": 59278.700625094956,
+    "endToEndGibPerSecond": 0.2261302971843527,
+    "peakRssBytes": 4257611776
+  }
+}

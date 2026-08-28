@@ -282,6 +282,138 @@ pub fn write_json_atomic(path: &Path, report: &BenchmarkReport) -> Result<()> {
     write_result
 }
 
+pub fn write_artifacts_atomic(
+    json_path: &Path,
+    svg_path: &Path,
+    report: &BenchmarkReport,
+) -> Result<()> {
+    ensure_distinct_output_paths(json_path, svg_path)?;
+
+    let mut json = serde_json::to_string_pretty(report).context("serialize benchmark report")?;
+    json.push('\n');
+    let svg = crate::svg::render(report).context("render benchmark SVG")?;
+
+    let json_temporary = stage_artifact(json_path, json.as_bytes(), "JSON")?;
+    let svg_temporary = match stage_artifact(svg_path, svg.as_bytes(), "SVG") {
+        Ok(temporary) => temporary,
+        Err(error) => {
+            let _ = fs::remove_file(&json_temporary);
+            return Err(error);
+        }
+    };
+    let json_backup = match backup_existing_artifact(json_path) {
+        Ok(backup) => backup,
+        Err(error) => {
+            let _ = fs::remove_file(&json_temporary);
+            let _ = fs::remove_file(&svg_temporary);
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = fs::rename(&json_temporary, json_path).with_context(|| {
+        format!(
+            "atomically replace JSON artifact {} from {}",
+            json_path.display(),
+            json_temporary.display()
+        )
+    }) {
+        let _ = fs::remove_file(&json_temporary);
+        let _ = fs::remove_file(&svg_temporary);
+        if let Some(backup) = json_backup {
+            let _ = fs::remove_file(backup);
+        }
+        return Err(error);
+    }
+
+    if let Err(error) = fs::rename(&svg_temporary, svg_path).with_context(|| {
+        format!(
+            "atomically replace SVG artifact {} from {}",
+            svg_path.display(),
+            svg_temporary.display()
+        )
+    }) {
+        let _ = fs::remove_file(&svg_temporary);
+        return rollback_json_after_svg_failure(json_path, json_backup, error);
+    }
+
+    if let Some(backup) = json_backup {
+        fs::remove_file(&backup)
+            .with_context(|| format!("remove replaced JSON backup {}", backup.display()))?;
+    }
+    Ok(())
+}
+
+fn ensure_distinct_output_paths(json_path: &Path, svg_path: &Path) -> Result<()> {
+    if json_path == svg_path {
+        bail!("JSON and SVG output paths must be different");
+    }
+    Ok(())
+}
+
+fn stage_artifact(path: &Path, contents: &[u8], artifact: &str) -> Result<std::path::PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create {artifact} artifact directory {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("output {artifact} path must name a file"))?
+        .to_string_lossy();
+    let (temporary, mut file) = create_unique_temporary(parent, &file_name)?;
+    let result = (|| -> Result<()> {
+        file.write_all(contents)
+            .with_context(|| format!("write temporary {artifact} {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync temporary {artifact} {}", temporary.display()))?;
+        Ok(())
+    })();
+    drop(file);
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(temporary)
+}
+
+fn backup_existing_artifact(path: &Path) -> Result<Option<std::path::PathBuf>> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read existing JSON artifact {}", path.display()));
+        }
+    };
+    stage_artifact(path, &contents, "JSON backup").map(Some)
+}
+
+fn rollback_json_after_svg_failure(
+    json_path: &Path,
+    json_backup: Option<std::path::PathBuf>,
+    svg_error: anyhow::Error,
+) -> Result<()> {
+    let rollback_result = if let Some(backup) = json_backup {
+        fs::rename(&backup, json_path).with_context(|| {
+            format!(
+                "restore previous JSON artifact {} from {}",
+                json_path.display(),
+                backup.display()
+            )
+        })
+    } else {
+        fs::remove_file(json_path)
+            .with_context(|| format!("remove unpublished JSON artifact {}", json_path.display()))
+    };
+    match rollback_result {
+        Ok(()) => Err(svg_error),
+        Err(rollback_error) => Err(svg_error.context(format!(
+            "JSON rollback also failed after SVG publication failure: {rollback_error:#}"
+        ))),
+    }
+}
+
 fn create_unique_temporary(parent: &Path, file_name: &str) -> Result<(std::path::PathBuf, File)> {
     loop {
         let temporary_id = NEXT_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
@@ -478,6 +610,118 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&fs::read(&output).unwrap()).unwrap()["schemaVersion"],
             1
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn publishes_json_and_svg_from_the_same_report() {
+        let directory = std::env::temp_dir().join(format!(
+            "memkafka-paired-report-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        let json_output = directory.join("latest.json");
+        let svg_output = directory.join("throughput.svg");
+        let report = BenchmarkReport::new(
+            Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0)
+                .single()
+                .unwrap(),
+            "0123456789abcdef".to_owned(),
+            WorkloadConfig::default(),
+            MachineMetadata::fixture(),
+            vec![run(1, 100.0), run(2, 120.0), run(3, 110.0)],
+        )
+        .unwrap();
+
+        super::write_artifacts_atomic(&json_output, &svg_output, &report).unwrap();
+
+        let json = fs::read_to_string(&json_output).unwrap();
+        let svg = fs::read_to_string(&svg_output).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["commit"],
+            "0123456789abcdef"
+        );
+        assert!(svg.contains("commit 0123456789abcdef"), "{svg}");
+        assert!(json.ends_with('\n'));
+        assert!(svg.ends_with('\n'));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rendering_failure_leaves_existing_artifacts_untouched() {
+        let directory = std::env::temp_dir().join(format!(
+            "memkafka-paired-render-failure-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        let json_output = directory.join("latest.json");
+        let svg_output = directory.join("throughput.svg");
+        fs::write(&json_output, "old json").unwrap();
+        fs::write(&svg_output, "old svg").unwrap();
+        let mut report = BenchmarkReport::new(
+            Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0)
+                .single()
+                .unwrap(),
+            "0123456789abcdef".to_owned(),
+            WorkloadConfig::default(),
+            MachineMetadata::fixture(),
+            vec![run(1, 100.0)],
+        )
+        .unwrap();
+        report.runs.clear();
+
+        let error = super::write_artifacts_atomic(&json_output, &svg_output, &report).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("empty benchmark report"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read_to_string(&json_output).unwrap(), "old json");
+        assert_eq!(fs::read_to_string(&svg_output).unwrap(), "old svg");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn svg_staging_failure_cleans_json_temporary_and_preserves_destination() {
+        let directory = std::env::temp_dir().join(format!(
+            "memkafka-paired-stage-failure-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        let json_output = directory.join("latest.json");
+        fs::write(&json_output, "old json").unwrap();
+        let not_a_directory = directory.join("not-a-directory");
+        fs::write(&not_a_directory, "sentinel").unwrap();
+        let svg_output = not_a_directory.join("throughput.svg");
+        let report = BenchmarkReport::new(
+            Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0)
+                .single()
+                .unwrap(),
+            "0123456789abcdef".to_owned(),
+            WorkloadConfig::default(),
+            MachineMetadata::fixture(),
+            vec![run(1, 100.0)],
+        )
+        .unwrap();
+
+        super::write_artifacts_atomic(&json_output, &svg_output, &report).unwrap_err();
+
+        assert_eq!(fs::read_to_string(&json_output).unwrap(), "old json");
+        assert_eq!(fs::read_to_string(&not_a_directory).unwrap(), "sentinel");
+        let temporary_json_files = fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".latest.json.")
+            })
+            .count();
+        assert_eq!(temporary_json_files, 0);
         fs::remove_dir_all(directory).unwrap();
     }
 }

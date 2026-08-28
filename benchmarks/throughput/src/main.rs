@@ -212,6 +212,9 @@ struct Args {
 
     #[arg(long)]
     output_json: PathBuf,
+
+    #[arg(long)]
+    output_svg: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -226,12 +229,26 @@ async fn main() -> Result<()> {
     config
         .validate()
         .context("validate command-line workload")?;
-    anyhow::ensure!(args.runs > 0, "--runs must be greater than zero");
+    validate_mode_arguments(&args)?;
 
     if let Some(bootstrap_server) = args.bootstrap_server.as_deref() {
         return run_external(&args, bootstrap_server, &config).await;
     }
     run_local(&args, config).await
+}
+
+fn validate_mode_arguments(args: &Args) -> Result<()> {
+    anyhow::ensure!(args.runs > 0, "--runs must be greater than zero");
+    match (&args.bootstrap_server, &args.output_svg) {
+        (None, None) => {
+            anyhow::bail!("--output-svg is required in local-broker mode");
+        }
+        (Some(_), Some(_)) => {
+            anyhow::bail!("external-broker mode is JSON-only; omit --output-svg");
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 async fn run_external(args: &Args, bootstrap_server: &str, config: &WorkloadConfig) -> Result<()> {
@@ -263,6 +280,10 @@ async fn run_local_inner(
     config: WorkloadConfig,
     monitor: &mut SignalMonitor,
 ) -> Result<()> {
+    let output_svg = args
+        .output_svg
+        .as_deref()
+        .context("--output-svg is required in local-broker mode")?;
     if !args.skip_memory_check {
         report::ensure_available_memory(&config, report::available_memory())
             .context("benchmark memory preflight")?;
@@ -380,14 +401,20 @@ async fn run_local_inner(
     monitor.checkpoint("before report aggregation").await?;
     let report = BenchmarkReport::capture(config, runs).context("aggregate benchmark report")?;
     monitor.checkpoint("before report writing").await?;
-    report::write_json_atomic(&args.output_json, &report)
-        .with_context(|| format!("write benchmark report to {}", args.output_json.display()))?;
+    report::write_artifacts_atomic(&args.output_json, output_svg, &report).with_context(|| {
+        format!(
+            "publish benchmark report to {} and {}",
+            args.output_json.display(),
+            output_svg.display()
+        )
+    })?;
     monitor.checkpoint("before local benchmark success").await?;
     eprintln!(
-        "median: producer {:.0} records/s, end-to-end {:.0} records/s; report {}",
+        "median: producer {:.0} records/s, end-to-end {:.0} records/s; report {}; graph {}",
         report.median.producer_records_per_second,
         report.median.end_to_end_records_per_second,
         args.output_json.display(),
+        output_svg.display(),
     );
     Ok(())
 }
@@ -451,7 +478,10 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, InterruptionLatch, combine_peak_and_shutdown, ensure_not_interrupted};
+    use super::{
+        Args, InterruptionLatch, combine_peak_and_shutdown, ensure_not_interrupted,
+        validate_mode_arguments,
+    };
 
     #[test]
     fn parses_the_external_broker_workload_flags() {
@@ -481,8 +511,10 @@ mod tests {
         assert_eq!(args.batch_records, 256);
         assert_eq!(args.topic_prefix, "smoke");
         assert_eq!(args.output_json, PathBuf::from("/tmp/smoke.json"));
+        assert_eq!(args.output_svg, None);
         assert_eq!(args.runs, 1);
         assert!(!args.skip_memory_check);
+        validate_mode_arguments(&args).unwrap();
     }
 
     #[test]
@@ -496,6 +528,8 @@ mod tests {
             "--skip-memory-check",
             "--output-json",
             "/tmp/local.json",
+            "--output-svg",
+            "/tmp/local.svg",
         ])
         .unwrap();
 
@@ -504,6 +538,43 @@ mod tests {
         assert_eq!(args.runs, 3);
         assert!(args.skip_memory_check);
         assert_eq!(args.output_json, PathBuf::from("/tmp/local.json"));
+        assert_eq!(args.output_svg, Some(PathBuf::from("/tmp/local.svg")));
+        validate_mode_arguments(&args).unwrap();
+    }
+
+    #[test]
+    fn rejects_local_mode_without_an_svg_destination() {
+        let args = Args::try_parse_from([
+            "benchmark",
+            "--broker-binary",
+            "/tmp/memkafka",
+            "--output-json",
+            "/tmp/local.json",
+        ])
+        .unwrap();
+
+        let error = validate_mode_arguments(&args).unwrap_err();
+
+        assert!(error.to_string().contains("--output-svg"), "{error:#}");
+    }
+
+    #[test]
+    fn rejects_svg_output_in_external_json_only_mode() {
+        let args = Args::try_parse_from([
+            "benchmark",
+            "--bootstrap-server",
+            "127.0.0.1:19092",
+            "--output-json",
+            "/tmp/smoke.json",
+            "--output-svg",
+            "/tmp/smoke.svg",
+        ])
+        .unwrap();
+
+        let error = validate_mode_arguments(&args).unwrap_err();
+
+        assert!(error.to_string().contains("external-broker"), "{error:#}");
+        assert!(error.to_string().contains("JSON-only"), "{error:#}");
     }
 
     #[test]

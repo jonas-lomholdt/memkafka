@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title description">
+  <title id="title">MemKafka throughput benchmark</title>
+  <desc id="description">Producer and end-to-end throughput for 3 benchmark runs.</desc>
+  <style>
+text{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;fill:#172033}
+.title{font-size:28px;font-weight:700}.subtitle{font-size:14px;fill:#536078}
+.panel-title{font-size:18px;font-weight:700}.axis{stroke:#c8d1df;stroke-width:1}
+.producer-bar{fill:#1473e6}.end-to-end-bar{fill:#17a673}
+.run-label{font-size:14px;font-weight:600}.value-label{font-size:13px}
+.median-guide{stroke:#d04444;stroke-width:2;stroke-dasharray:6 5}
+.median-label{font-size:12px;fill:#a12d2d}.footer{font-size:13px;fill:#536078}
+</style>
+  <rect width="100%" height="100%" rx="16" fill="#f8fafc"/>
+  <text class="title" x="48" y="44">MemKafka throughput</text>
+  <text class="subtitle" x="48" y="66">1,000,000 records · 4,096-byte values · 8 partitions · batches of 256</text>
+  <text class="panel-title" x="48" y="105.0">Producer throughput</text>
+  <line class="axis" x1="190.0" x2="190.0" y1="140.0" y2="266.0"/>
+  <text class="run-label" x="48" y="163.0">Run 1</text>
+  <rect class="producer-bar" x="190.0" y="146.0" width="256.5" height="24" rx="4"/>
+  <text class="value-label" x="882.0" y="163.0">38,626 records/s · 0.147 GiB/s</text>
+  <text class="run-label" x="48" y="205.0">Run 2</text>
+  <rect class="producer-bar" x="190.0" y="188.0" width="393.6" height="24" rx="4"/>
+  <text class="value-label" x="882.0" y="205.0">59,280 records/s · 0.226 GiB/s</text>
+  <text class="run-label" x="48" y="247.0">Run 3</text>
+  <rect class="producer-bar" x="190.0" y="230.0" width="680.0" height="24" rx="4"/>
+  <text class="value-label" x="882.0" y="247.0">102,418 records/s · 0.391 GiB/s</text>
+  <line class="median-guide" x1="583.6" x2="583.6" y1="133.0" y2="266.0"/>
+  <text class="median-label" x="589.6" y="128.0">Median 59,280 records/s · 0.226 GiB/s</text>
+  <text class="panel-title" x="48" y="317.0">End-to-end throughput</text>
+  <line class="axis" x1="190.0" x2="190.0" y1="352.0" y2="478.0"/>
+  <text class="run-label" x="48" y="375.0">Run 1</text>
+  <rect class="end-to-end-bar" x="190.0" y="358.0" width="256.5" height="24" rx="4"/>
+  <text class="value-label" x="882.0" y="375.0">38,625 records/s · 0.147 GiB/s</text>
+  <text class="run-label" x="48" y="417.0">Run 2</text>
+  <rect class="end-to-end-bar" x="190.0" y="400.0" width="393.6" height="24" rx="4"/>
+  <text class="value-label" x="882.0" y="417.0">59,279 records/s · 0.226 GiB/s</text>
+  <text class="run-label" x="48" y="459.0">Run 3</text>
+  <rect class="end-to-end-bar" x="190.0" y="442.0" width="680.0" height="24" rx="4"/>
+  <text class="value-label" x="882.0" y="459.0">102,415 records/s · 0.391 GiB/s</text>
+  <line class="median-guide" x1="583.6" x2="583.6" y1="345.0" y2="478.0"/>
+  <text class="median-label" x="589.6" y="340.0">Median 59,279 records/s · 0.226 GiB/s</text>
+  <line class="axis" x1="48" x2="1152" y1="490.0" y2="490.0"/>
+  <text class="footer" x="48" y="512.0">Apple M1 Pro · Darwin 26.6 · aarch64 · 10 logical cores</text>
+  <text class="footer" x="48" y="537.0">Peak broker RSS 3.965 GiB · commit c504630cbac68f845c1d8e724a4b4e6ef563a1ee · generated 2026-08-28T12:44:16.474985+00:00</text>
+</svg>
