@@ -83,10 +83,10 @@ The source of truth is the advertised list in `src/kafka/api_versions.rs`, the d
 | Key | API | MemKafka | Kafka 4.3 | Current proven behavior | Important gaps |
 | ---: | --- | --- | --- | --- | --- |
 | 0 | Produce | 3-7 | 3-13 | Real Java, .NET, Go, and Rust clients append acknowledged ordered records; the flow-profile .NET client proves non-transactional idempotent production. | No transactions/control batches, broker epoch validation, newer flexible versions, or complete modern error surface. |
-| 1 | Fetch | 4 | 1-18 | Real clients fetch ordered batches, seek, repeat uncommitted reads, and use earliest/latest behavior; wire tests cover long-polling and byte limits. | No fetch sessions, topic IDs, current/last-fetched leader epochs, diverging epochs, preferred replicas, or isolation semantics. |
+| 1 | Fetch | 4 | 4-18 | Real clients fetch ordered batches, seek, repeat uncommitted reads, and use earliest/latest behavior; wire tests cover long-polling and byte limits. | No fetch sessions, topic IDs, current/last-fetched leader epochs, diverging epochs, preferred replicas, or isolation semantics. |
 | 2 | ListOffsets | 1-3 | 1-11 | Real clients prove earliest/latest and seeking; wire tests prove unknown-partition errors. | Only timestamps `-2` and `-1`; timestamp lookup is rejected, leader epoch is always `-1`, and newer flexible/topic-ID schemas are absent. |
 | 3 | Metadata | 0-9 | 0-13 | Real clients prove discovery, advertised address, auto-creation, explicit partition counts, and all-topic listing paths. | No topic IDs, newer flexible versions, rack data, listener/security semantics, or realistic cluster changes. |
-| 8 | OffsetCommit | 2-7 | 0-10 | Real .NET consumers prove automatic/manual commit resume, redelivery without commit, and independent group offsets. | Static membership is rejected; retention timestamp, leader epoch, topic IDs, and newer versions are not implemented. |
+| 8 | OffsetCommit | 2-7 | 2-10 | Real .NET consumers prove automatic/manual commit resume, redelivery without commit, and independent group offsets. | Static membership is rejected; retention timestamp, leader epoch, topic IDs, and newer versions are not implemented. |
 | 9 | OffsetFetch | 1-5 | 1-10 | Real .NET consumers prove committed-offset recovery and group isolation. | No multi-group request, topic IDs, member epoch, unstable transactional offsets, or full unknown-group behavior. |
 | 10 | FindCoordinator | 0-2 | 0-6 | Real group consumers discover the single coordinator. | Group coordinators only; transaction/share coordinator types and batched coordinator responses are absent. |
 | 11 | JoinGroup | 0-5 | 0-9 | Real .NET clients prove member-ID handshake, cooperative-sticky negotiation, A/B/C joins, and rebalance rounds. | Static membership is rejected; no reason field, skip-assignment behavior, newer schemas, or modern group protocol. |
@@ -128,14 +128,14 @@ Status means:
 
 No API currently meets the strict `implemented` definition; the 17 advertised keys are `partial` and the other 60 are `missing`.
 
-`kafka-protocol = 0.18.0` is confirmed in `Cargo.toml`. Its installed generated sources omit Streams keys 88 and 89 entirely (`†`). They also do not cover Kafka 4.3's full range for Fetch, ListOffsets, OffsetCommit, WriteTxnMarkers, DescribeLogDirs, ShareFetch, ShareAcknowledge, AddRaftVoter, WriteShareGroupState, ReadShareGroupStateSummary, and DescribeShareGroupOffsets (`‡`). Those rows require a generated-protocol dependency update, a maintained fork, or an upstream contribution before the full range can be decoded safely.
+`kafka-protocol = 0.18.0` is confirmed in `Cargo.toml`. Its installed generated sources omit Streams keys 88 and 89 entirely (`†`). Concrete top-level request/response `Message::VERSIONS` do not cover Kafka 4.3's full stable range for ListOffsets, OffsetCommit, OffsetFetch, InitProducerId, WriteTxnMarkers, DescribeLogDirs, ShareFetch, ShareAcknowledge, AddRaftVoter, WriteShareGroupState, ReadShareGroupStateSummary, and DescribeShareGroupOffsets (`‡`). For OffsetCommit, OffsetFetch, and InitProducerId, only the request codec lags: it stops at v9, v9, and v5 respectively while each response codec reaches the official v10, v10, and v6 maximum. Those rows require a generated-protocol dependency update, a maintained fork, or an upstream contribution before the full range can be decoded safely.
 
 ### Core data plane and discovery
 
 | Key | Name | Kafka 4.3 request range | Status | Priority | MemKafka target semantics / rationale |
 | ---: | --- | --- | --- | --- | --- |
 | 0 | Produce | 3-13 | partial | P0 | Preserve raw batches; add versioned errors, epochs, flexible forms, transactions, and exact side effects. |
-| 1 | Fetch | 1-18 | partial | P0 | Add sessions, topic IDs, leader epochs, tier/isolation fields, and correct incremental behavior. Codec range gap. ‡ |
+| 1 | Fetch | 4-18 | partial | P0 | Add sessions, topic IDs, leader epochs, tier/isolation fields, and correct incremental behavior. |
 | 2 | ListOffsets | 1-11 | partial | P0 | Resolve earliest/latest and record timestamps with correct leader epochs and errors. Codec max gap. ‡ |
 | 3 | Metadata | 0-13 | partial | P0 | Add stable topic UUIDs, flexible versions, authorized operations, and consistent single-broker metadata. |
 | 18 | ApiVersions | 0-4 | partial | P0 | Generate from one capability registry and implement Kafka's unsupported-version negotiation path. |
@@ -146,8 +146,8 @@ No API currently meets the strict `implemented` definition; the 17 advertised ke
 
 | Key | Name | Kafka 4.3 request range | Status | Priority | MemKafka target semantics / rationale |
 | ---: | --- | --- | --- | --- | --- |
-| 8 | OffsetCommit | 0-10 | partial | P0 | Complete legacy/current versions, static membership, leader epochs, topic IDs, and transactional fencing. Codec legacy gap. ‡ |
-| 9 | OffsetFetch | 1-10 | partial | P0 | Add multi-group/topic-ID forms and return correct group/transaction state. |
+| 8 | OffsetCommit | 2-10 | partial | P0 | Complete current versions, static membership, leader epochs, topic IDs, and transactional fencing. Request codec stops at v9; v10 requires a generated-codec update. ‡ |
+| 9 | OffsetFetch | 1-10 | partial | P0 | Add multi-group/topic-ID forms and return correct group/transaction state. Request codec stops at v9; v10 requires a generated-codec update. ‡ |
 | 10 | FindCoordinator | 0-6 | partial | P0 | Resolve group, transaction, share, and Streams coordinator types to broker 1, including batched forms. |
 | 11 | JoinGroup | 0-9 | partial | P0 | Finish classic versions, static membership, reasons, skip-assignment semantics, and fencing. |
 | 12 | Heartbeat | 0-4 | partial | P0 | Finish static-member fencing and v4 behavior. |
@@ -176,7 +176,7 @@ No API currently meets the strict `implemented` definition; the 17 advertised ke
 
 | Key | Name | Kafka 4.3 request range | Status | Priority | MemKafka target semantics / rationale |
 | ---: | --- | --- | --- | --- | --- |
-| 22 | InitProducerId | 0-6 | partial | P2 | Add transactional-ID ownership, producer epochs, fencing, timeout, and recovery. |
+| 22 | InitProducerId | 0-6 | partial | P2 | Add transactional-ID ownership, producer epochs, fencing, timeout, and recovery. Request codec stops at v5; v6 requires a generated-codec update. ‡ |
 | 24 | AddPartitionsToTxn | 0-5 | missing | P2 | Enlist partitions atomically in the active transaction and validate producer identity/epoch. |
 | 25 | AddOffsetsToTxn | 0-4 | missing | P2 | Enlist the target consumer group in a transaction. |
 | 26 | EndTxn | 0-5 | missing | P2 | Commit or abort one active transaction, fence stale producers, and emit observable control batches. |
@@ -366,7 +366,7 @@ Configuration-file parity remains out of scope. The setup surface should be inte
 - Streams group inspection;
 - upgrade generated protocol support for keys 88/89 and newer share versions.
 
-**Acceptance:** a real KafkaShareConsumer distributes records across members, redelivers released/expired records, never redelivers accepted records, and exposes/reset offsets; a real Kafka Streams topology using the Streams protocol scales members while preserving disjoint active tasks and coherent standby/warm-up roles.
+**Acceptance:** a real KafkaShareConsumer distributes records across members, redelivers released/expired records, never redelivers accepted records, and exposes and resets offsets; a real Kafka Streams topology using the Streams protocol scales members while preserving disjoint active tasks and coherent standby/warm-up roles.
 
 **Dependencies:** P2 isolation/transactions for realistic Streams; P3 broker-side assignment patterns; generated types for 88/89; deterministic timers.
 
