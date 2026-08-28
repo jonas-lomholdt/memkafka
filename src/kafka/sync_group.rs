@@ -7,8 +7,6 @@ use crate::broker::{BrokerState, groups::SyncAssignment};
 
 use super::group_error::response_error;
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=3;
-
 pub(crate) async fn response(
     request: &SyncGroupRequest,
     broker: &BrokerState,

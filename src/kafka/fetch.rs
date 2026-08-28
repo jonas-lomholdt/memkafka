@@ -13,8 +13,6 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::broker::{BrokerState, partition::FetchError};
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 4..=4;
-
 pub(crate) async fn response(request: &FetchRequest, broker: &BrokerState) -> FetchResponse {
     let max_wait = u64::try_from(request.max_wait_ms).unwrap_or(0);
     let min_bytes = usize::try_from(request.min_bytes).unwrap_or(0);

@@ -15,8 +15,6 @@ use crate::broker::{
 
 use super::group_error::response_error;
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=5;
-
 pub(crate) async fn response(
     request: &JoinGroupRequest,
     version: i16,

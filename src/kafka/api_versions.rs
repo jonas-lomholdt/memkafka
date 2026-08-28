@@ -1,38 +1,17 @@
-use kafka_protocol::messages::{ApiKey, ApiVersionsResponse, api_versions_response::ApiVersion};
+use kafka_protocol::messages::{ApiVersionsResponse, api_versions_response::ApiVersion};
 
-use super::{
-    create_topics, describe_configs, describe_groups, fetch, find_coordinator, heartbeat,
-    init_producer_id, join_group, leave_group, list_groups, list_offsets, metadata, offset_commit,
-    offset_fetch, produce, sync_group,
-};
-
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=4;
+use super::capabilities::CAPABILITIES;
 
 pub(crate) fn response() -> ApiVersionsResponse {
-    ApiVersionsResponse::default().with_api_keys(vec![
-        api_range(ApiKey::Metadata, &metadata::VERSION_RANGE),
-        api_range(ApiKey::ApiVersions, &VERSION_RANGE),
-        api_range(ApiKey::CreateTopics, &create_topics::VERSION_RANGE),
-        api_range(ApiKey::Produce, &produce::VERSION_RANGE),
-        api_range(ApiKey::ListOffsets, &list_offsets::VERSION_RANGE),
-        api_range(ApiKey::Fetch, &fetch::VERSION_RANGE),
-        api_range(ApiKey::FindCoordinator, &find_coordinator::VERSION_RANGE),
-        api_range(ApiKey::JoinGroup, &join_group::VERSION_RANGE),
-        api_range(ApiKey::SyncGroup, &sync_group::VERSION_RANGE),
-        api_range(ApiKey::Heartbeat, &heartbeat::VERSION_RANGE),
-        api_range(ApiKey::LeaveGroup, &leave_group::VERSION_RANGE),
-        api_range(ApiKey::OffsetCommit, &offset_commit::VERSION_RANGE),
-        api_range(ApiKey::OffsetFetch, &offset_fetch::VERSION_RANGE),
-        api_range(ApiKey::ListGroups, &list_groups::VERSION_RANGE),
-        api_range(ApiKey::DescribeGroups, &describe_groups::VERSION_RANGE),
-        api_range(ApiKey::InitProducerId, &init_producer_id::VERSION_RANGE),
-        api_range(ApiKey::DescribeConfigs, &describe_configs::VERSION_RANGE),
-    ])
-}
-
-fn api_range(api_key: ApiKey, versions: &std::ops::RangeInclusive<i16>) -> ApiVersion {
-    ApiVersion::default()
-        .with_api_key(api_key as i16)
-        .with_min_version(*versions.start())
-        .with_max_version(*versions.end())
+    ApiVersionsResponse::default().with_api_keys(
+        CAPABILITIES
+            .iter()
+            .map(|capability| {
+                ApiVersion::default()
+                    .with_api_key(capability.api_key as i16)
+                    .with_min_version(capability.supported.min)
+                    .with_max_version(capability.supported.max)
+            })
+            .collect(),
+    )
 }

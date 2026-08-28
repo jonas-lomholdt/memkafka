@@ -14,8 +14,6 @@ use crate::broker::{
     topics::TopicError,
 };
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 3..=7;
-
 pub(crate) async fn response(request: &ProduceRequest, broker: &BrokerState) -> ProduceResponse {
     let request_error = if !matches!(request.acks, -1..=1) {
         Some(ResponseError::InvalidRequiredAcks)

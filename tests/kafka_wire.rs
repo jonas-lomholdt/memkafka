@@ -35,8 +35,8 @@ use kafka_protocol::{
     },
 };
 use memkafka::kafka::{
-    codec::{decode_request, encode_response},
-    dispatcher::Dispatcher,
+    codec::{DecodedRequest, decode_request, encode_response},
+    dispatcher::{DispatchError, Dispatcher},
     frame::{read_frame, write_frame},
 };
 use memkafka::{
@@ -51,6 +51,35 @@ use tokio::{
 };
 
 const API_VERSIONS_VERSION: i16 = 3;
+
+#[tokio::test]
+async fn dispatch_version_gate_runs_before_body_matching() {
+    let dispatcher = test_dispatcher();
+    let mismatched_body = RequestKind::ApiVersions(ApiVersionsRequest::default());
+    let request = |api_key, version| DecodedRequest {
+        header: RequestHeader::default()
+            .with_request_api_key(api_key as i16)
+            .with_request_api_version(version),
+        api_key,
+        body: mismatched_body.clone(),
+    };
+
+    assert_eq!(
+        dispatcher.dispatch(&request(ApiKey::Metadata, -1)).await,
+        Err(DispatchError::UnsupportedVersion {
+            api_key: ApiKey::Metadata,
+            version: -1,
+        })
+    );
+    assert_eq!(
+        dispatcher.dispatch(&request(ApiKey::Metadata, 0)).await,
+        Err(DispatchError::BodyMismatch(ApiKey::Metadata))
+    );
+    assert_eq!(
+        dispatcher.dispatch(&request(ApiKey::DeleteTopics, 0)).await,
+        Err(DispatchError::UnsupportedApi(ApiKey::DeleteTopics))
+    );
+}
 
 #[tokio::test]
 async fn api_versions_v3_round_trips_with_correlation_id() {

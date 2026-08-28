@@ -12,8 +12,6 @@ use crate::broker::{
     topics::{TopicError, TopicMetadata},
 };
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 2..=6;
-
 pub(crate) async fn response(
     request: &CreateTopicsRequest,
     broker: &BrokerState,

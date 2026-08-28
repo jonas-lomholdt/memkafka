@@ -9,8 +9,6 @@ use kafka_protocol::{
 
 use crate::broker::{BrokerState, groups::GroupDescription};
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=0;
-
 pub(crate) async fn response(
     request: &DescribeGroupsRequest,
     broker: &BrokerState,

@@ -6,8 +6,6 @@ use kafka_protocol::{
 
 use crate::broker::BrokerState;
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=2;
-
 pub(crate) fn response(
     request: &FindCoordinatorRequest,
     broker: &BrokerState,

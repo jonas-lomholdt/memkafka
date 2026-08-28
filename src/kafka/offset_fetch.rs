@@ -13,8 +13,6 @@ use crate::broker::{
     groups::{FetchedOffset, TopicPartition},
 };
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 1..=5;
-
 pub(crate) async fn response(
     request: &OffsetFetchRequest,
     broker: &BrokerState,

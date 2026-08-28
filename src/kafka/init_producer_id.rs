@@ -5,8 +5,6 @@ use kafka_protocol::{
 
 use crate::broker::BrokerState;
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=0;
-
 pub(crate) async fn response(
     request: &InitProducerIdRequest,
     broker: &BrokerState,

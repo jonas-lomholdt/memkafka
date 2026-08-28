@@ -10,8 +10,6 @@ use crate::broker::{BrokerState, groups::OffsetCommit};
 
 use super::group_error::response_error;
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 2..=7;
-
 pub(crate) async fn response(
     request: &OffsetCommitRequest,
     broker: &BrokerState,

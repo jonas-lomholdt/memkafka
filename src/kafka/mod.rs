@@ -1,4 +1,6 @@
 mod api_versions;
+#[doc(hidden)]
+pub mod capabilities;
 pub mod codec;
 pub mod connection;
 mod create_topics;

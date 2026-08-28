@@ -14,8 +14,6 @@ use crate::broker::{
     topics::{TopicError, TopicMetadata},
 };
 
-pub(crate) const VERSION_RANGE: std::ops::RangeInclusive<i16> = 0..=9;
-
 pub(crate) async fn response(request: &MetadataRequest, broker: &BrokerState) -> MetadataResponse {
     let topics = match &request.topics {
         None => broker

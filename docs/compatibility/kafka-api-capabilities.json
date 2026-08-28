@@ -1,0 +1,298 @@
+{
+  "schemaVersion": 1,
+  "kafkaBaseline": "4.3",
+  "apis": [
+    {
+      "apiKey": 0,
+      "name": "Produce",
+      "supported": {
+        "min": 3,
+        "max": 7
+      },
+      "kafka43": {
+        "min": 3,
+        "max": 13
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1",
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2",
+        "franz-go-1.21.6",
+        "rskafka-0.6.0"
+      ]
+    },
+    {
+      "apiKey": 1,
+      "name": "Fetch",
+      "supported": {
+        "min": 4,
+        "max": 4
+      },
+      "kafka43": {
+        "min": 4,
+        "max": 18
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1",
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2",
+        "franz-go-1.21.6",
+        "kafbat-1.5.0",
+        "rskafka-0.6.0"
+      ]
+    },
+    {
+      "apiKey": 2,
+      "name": "ListOffsets",
+      "supported": {
+        "min": 1,
+        "max": 3
+      },
+      "kafka43": {
+        "min": 1,
+        "max": 11
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1",
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2",
+        "franz-go-1.21.6",
+        "kafbat-1.5.0",
+        "rskafka-0.6.0"
+      ]
+    },
+    {
+      "apiKey": 3,
+      "name": "Metadata",
+      "supported": {
+        "min": 0,
+        "max": 9
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 13
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1",
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2",
+        "franz-go-1.21.6",
+        "kafbat-1.5.0",
+        "rskafka-0.6.0"
+      ]
+    },
+    {
+      "apiKey": 8,
+      "name": "OffsetCommit",
+      "supported": {
+        "min": 2,
+        "max": 7
+      },
+      "kafka43": {
+        "min": 2,
+        "max": 10
+      },
+      "proofScenarios": [
+        "confluent-kafka-2.15.0"
+      ]
+    },
+    {
+      "apiKey": 9,
+      "name": "OffsetFetch",
+      "supported": {
+        "min": 1,
+        "max": 5
+      },
+      "kafka43": {
+        "min": 1,
+        "max": 10
+      },
+      "proofScenarios": [
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2",
+        "kafbat-1.5.0"
+      ]
+    },
+    {
+      "apiKey": 10,
+      "name": "FindCoordinator",
+      "supported": {
+        "min": 0,
+        "max": 2
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 6
+      },
+      "proofScenarios": [
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2",
+        "kafbat-1.5.0"
+      ]
+    },
+    {
+      "apiKey": 11,
+      "name": "JoinGroup",
+      "supported": {
+        "min": 0,
+        "max": 5
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 9
+      },
+      "proofScenarios": [
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2"
+      ]
+    },
+    {
+      "apiKey": 12,
+      "name": "Heartbeat",
+      "supported": {
+        "min": 0,
+        "max": 3
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 4
+      },
+      "proofScenarios": [
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2"
+      ]
+    },
+    {
+      "apiKey": 13,
+      "name": "LeaveGroup",
+      "supported": {
+        "min": 0,
+        "max": 3
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 5
+      },
+      "proofScenarios": [
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2"
+      ]
+    },
+    {
+      "apiKey": 14,
+      "name": "SyncGroup",
+      "supported": {
+        "min": 0,
+        "max": 3
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 5
+      },
+      "proofScenarios": [
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2"
+      ]
+    },
+    {
+      "apiKey": 15,
+      "name": "DescribeGroups",
+      "supported": {
+        "min": 0,
+        "max": 0
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 6
+      },
+      "proofScenarios": [
+        "kafbat-1.5.0"
+      ]
+    },
+    {
+      "apiKey": 16,
+      "name": "ListGroups",
+      "supported": {
+        "min": 0,
+        "max": 0
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 5
+      },
+      "proofScenarios": [
+        "kafbat-1.5.0"
+      ]
+    },
+    {
+      "apiKey": 18,
+      "name": "ApiVersions",
+      "supported": {
+        "min": 0,
+        "max": 4
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 4
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1",
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2",
+        "franz-go-1.21.6",
+        "kafbat-1.5.0",
+        "rskafka-0.6.0"
+      ]
+    },
+    {
+      "apiKey": 19,
+      "name": "CreateTopics",
+      "supported": {
+        "min": 2,
+        "max": 6
+      },
+      "kafka43": {
+        "min": 2,
+        "max": 7
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1",
+        "confluent-kafka-2.15.0",
+        "confluent-kafka-flow-2.13.2",
+        "franz-go-1.21.6",
+        "rskafka-0.6.0"
+      ]
+    },
+    {
+      "apiKey": 22,
+      "name": "InitProducerId",
+      "supported": {
+        "min": 0,
+        "max": 0
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 6
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1",
+        "confluent-kafka-flow-2.13.2"
+      ]
+    },
+    {
+      "apiKey": 32,
+      "name": "DescribeConfigs",
+      "supported": {
+        "min": 1,
+        "max": 1
+      },
+      "kafka43": {
+        "min": 1,
+        "max": 4
+      },
+      "proofScenarios": [
+        "kafbat-1.5.0"
+      ]
+    }
+  ]
+}
