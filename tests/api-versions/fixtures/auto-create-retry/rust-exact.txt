@@ -1,0 +1,1 @@
+partition client: ServerError { protocol_error: UnknownTopicOrPartition, error_message: None, request: Topic("rust-delivery-11500-1787957595064314000"), response: None, is_virtual: false }
