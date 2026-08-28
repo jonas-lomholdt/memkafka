@@ -7,6 +7,10 @@ RUN cargo build --locked --release
 
 FROM debian:bookworm-slim AS runtime
 
+LABEL org.opencontainers.image.source="https://github.com/jonas-lomholdt/memkafka" \
+      org.opencontainers.image.description="Fast, single-binary, in-memory Kafka-compatible broker for development and integration tests" \
+      org.opencontainers.image.licenses="MIT"
+
 RUN groupadd --system memkafka \
     && useradd --system --gid memkafka --no-create-home memkafka
 
