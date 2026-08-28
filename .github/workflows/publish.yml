@@ -2,6 +2,8 @@ name: Publish container
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
 
@@ -42,16 +44,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Validate stable release tag
-        id: version
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Expected stable semantic version tag vMAJOR.MINOR.PATCH, got ${GITHUB_REF_NAME}" >&2
-            exit 1
-          fi
-          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Resolve publish context
+        id: publish_context
+        run: scripts/ci/resolve-publish-context.sh
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -73,10 +68,15 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=raw,value=edge,enable=${{ steps.publish_context.outputs.channel == 'edge' }}
+            type=sha,prefix=sha-,format=short,enable=${{ steps.publish_context.outputs.channel == 'edge' }}
+            type=raw,value=${{ steps.publish_context.outputs.version }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
+            type=raw,value=${{ steps.publish_context.outputs.major_minor }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
+            type=raw,value=${{ steps.publish_context.outputs.major }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
+            type=raw,value=latest,enable=${{ steps.publish_context.outputs.channel == 'release' }}
           labels: |
             org.opencontainers.image.source=https://github.com/jonas-lomholdt/memkafka
             org.opencontainers.image.description=Fast, single-binary, in-memory Kafka-compatible broker for development and integration tests

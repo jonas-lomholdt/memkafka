@@ -124,16 +124,21 @@ The million-record, three-run benchmark remains manual because shared GitHub run
 
 ## GHCR publishing
 
-`.github/workflows/publish.yml` publishes only semantic-version tag pushes. It does not publish every push to `main`.
+`.github/workflows/publish.yml` publishes every push to `main` and canonical stable tags matching `vMAJOR.MINOR.PATCH`. It rejects every other ref before registry login.
 
-For a version tag such as `v0.1.0`, the workflow publishes a multi-platform OCI image for Linux AMD64 and ARM64 with:
+For `refs/heads/main`, the workflow publishes a multi-platform OCI image for Linux AMD64 and ARM64 with:
+
+- `ghcr.io/jonas-lomholdt/memkafka:edge`; and
+- `ghcr.io/jonas-lomholdt/memkafka:sha-<short-commit>`.
+
+For a canonical stable tag such as `v0.1.0`, the workflow publishes a multi-platform OCI image for Linux AMD64 and ARM64 with:
 
 - `ghcr.io/jonas-lomholdt/memkafka:0.1.0`;
 - `ghcr.io/jonas-lomholdt/memkafka:0.1`;
 - `ghcr.io/jonas-lomholdt/memkafka:0`; and
 - `ghcr.io/jonas-lomholdt/memkafka:latest`.
 
-The publishing job runs only after its verification job succeeds. It uses the repository `GITHUB_TOKEN` with `contents: read` and `packages: write`, and does not require a personal access token. The image carries OCI source, description, revision, version, and MIT license metadata.
+The publishing job runs only after its verification job succeeds. It uses the repository `GITHUB_TOKEN` with workflow-level `contents: read` and job-level `packages: write`, and does not require a personal access token. The image carries OCI source, description, revision, version, and MIT license metadata. `latest` remains release-only: `main` pushes move `edge` and the immutable `sha-<short-commit>` tag, but never `latest`.
 
 The README documents anonymous usage:
 
@@ -152,7 +157,7 @@ The work is complete when:
 3. output reports producer and end-to-end throughput plus peak broker RSS and full machine/workload metadata;
 4. `latest.json` and `throughput.svg` are generated deterministically from successful runs and the README embeds the graph with honest caveats;
 5. the 10,000-record smoke benchmark passes in CI without a performance threshold;
-6. a separate release workflow verifies and publishes Linux AMD64 and ARM64 images with semantic-version and `latest` tags;
+6. a separate release workflow verifies and publishes Linux AMD64 and ARM64 images from `main` as `edge` plus `sha-<short-commit>`, and from canonical stable tags as exact `major.minor.patch`, `major.minor`, `major`, and `latest` tags;
 7. the image is linked to the repository and carries source, description, revision, version, and license metadata;
 8. the README documents the GHCR pull command and one-time public-visibility step; and
 9. formatting, strict Clippy, broker tests, benchmark tests, existing black-box suites, and hosted CI all pass.
