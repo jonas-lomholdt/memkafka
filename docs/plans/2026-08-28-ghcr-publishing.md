@@ -4,7 +4,7 @@
 
 **Goal:** Publish verified Linux AMD64 and ARM64 MemKafka images to `ghcr.io/jonas-lomholdt/memkafka` from green `main` and canonical stable tags, with anonymous pull documentation.
 
-**Architecture:** OCI metadata remains in the existing `Dockerfile`; image verification includes a small black-box ref-contract script; one GitHub Actions workflow verifies the source commit and then uses Docker Buildx to publish one multi-platform manifest per accepted `main` or release ref. Package visibility remains an explicit one-time maintainer action after the first push.
+**Architecture:** OCI metadata remains in the existing `Dockerfile`; image verification includes focused black-box publication-policy scripts; ordinary CI and release publication share one full reusable verification workflow. Successful same-repository `CI` runs publish the exact verified `main` SHA, while canonical stable tag pushes run the same full gate. Docker Buildx publishes one primary multi-platform tag, captures its digest, and promotes only fresh, monotonic mutable aliases. Package visibility remains an explicit one-time maintainer action after the first push.
 
 **Tech Stack:** Docker/OCI, Docker Buildx, GitHub Actions, GitHub Container Registry, Bash.
 
@@ -12,11 +12,14 @@
 
 ## Global Constraints
 
-- Keep publishing isolated in `.github/workflows/publish.yml`; do not add release code to the Rust binary.
-- Trigger on pushes to `main` and pushed tags matching `v*.*.*`, but accept only `refs/heads/main` or canonical stable tags `vMAJOR.MINOR.PATCH`.
-- Verify before publishing and grant only `contents: read` plus `packages: write`.
+- Keep publishing isolated in `.github/workflows/publish.yml` and shell helpers under `scripts/ci/`; do not add release code to the Rust binary.
+- Trigger main publication only from a successful same-repository `CI` push run whose verified head branch is still `main`. Trigger tag publication from pushed tags matching `v*.*.*`, but accept only canonical stable tags `vMAJOR.MINOR.PATCH`.
+- Run the complete reusable hosted suite before publishing and grant only `contents: read` plus `packages: write`.
 - Publish Linux AMD64 and ARM64 manifests.
-- Generate exactly `edge` plus `sha-<short-commit>` for `main`, and exactly `major.minor.patch`, `major.minor`, `major`, and `latest` for stable releases.
+- Publish one primary tag first: `sha-<full-40-character-commit>` for `main`, or exact `major.minor.patch` for a stable release. Promote `edge`, `major.minor`, `major`, and `latest` from the captured manifest digest only after their freshness rules pass.
+- Treat `sha-*` as a commit-addressed mutable registry tag and the published OCI digest as the immutable image identity.
+- Advance stable aliases monotonically against every canonical stable tag on the remote; never let an older or out-of-order release move an alias backward.
+- Pin every action in a `packages: write` job to a reviewed full commit SHA.
 - Link the package to `https://github.com/jonas-lomholdt/memkafka` and include source, description, revision, version, and MIT license metadata.
 - Use the repository `GITHUB_TOKEN`; do not create or require a personal access token.
 - Keep `latest` release-only and keep the first public-visibility change explicit because GitHub does not allow a public package to be made private again.
@@ -44,7 +47,7 @@ org.opencontainers.image.description=Fast, single-binary, in-memory Kafka-compat
 org.opencontainers.image.licenses=MIT
 ```
 
-Also assert `.Config.User == "memkafka"` and run `docker run --rm "$IMAGE" --help` successfully. Print one concise `PASS` line.
+Also assert `.Config.User == "memkafka"`. Verify `--help` by creating and starting a temporary container, polling its state for at most 10 seconds, asserting exit status `0`, and removing it on success, failure, or interruption. Print one concise `PASS` line.
 
 - [ ] **Step 2: Run the test against the current image and verify RED**
 
@@ -108,76 +111,48 @@ git commit -m "test: verify distributable container metadata"
 ### Task 2: Mainline and release multi-platform publication workflow and README usage
 
 **Files:**
+- Modify: `.github/workflows/ci.yml`
+- Create: `.github/workflows/verify.yml`
 - Modify: `.github/workflows/publish.yml`
 - Modify: `README.md`
 - Create: `scripts/ci/resolve-publish-context.sh`
+- Create: `scripts/ci/select-release-aliases.sh`
+- Modify: `tests/container-image.sh`
 - Create: `tests/publish-ref-behavior.sh`
 
 **Interfaces:**
 - Consumes: `refs/heads/main` or a canonical stable tag such as `v0.1.0` pointing at a reviewed commit
-- Produces: `ghcr.io/jonas-lomholdt/memkafka:{edge,sha-<short-commit>}` for `main`, or `ghcr.io/jonas-lomholdt/memkafka:{0.1.0,0.1,0,latest}` for a release, each as one AMD64/ARM64 manifest
+- Produces: a primary AMD64/ARM64 manifest at `sha-<full-40-character-commit>` for `main` or `0.1.0` for release `v0.1.0`, then promotes only eligible mutable aliases to that captured digest
 
-- [ ] **Step 1: Create a verification-first workflow skeleton**
+- [ ] **Step 1: Extract the complete hosted suite and create verification-first workflow entry points**
 
-Use this event/permission/job shape:
+Move the complete current `CI` job to `.github/workflows/verify.yml` with `on: workflow_call` and `contents: read`. Keep `.github/workflows/ci.yml` as the public `CI` wrapper for all branch pushes and pull requests, explicitly excluding tag pushes, and call the reusable workflow exactly once.
 
-```yaml
-name: Publish container
-
-on:
-  push:
-    branches:
-      - main
-    tags:
-      - "v*.*.*"
-
-permissions:
-  contents: read
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: jonas-lomholdt/memkafka
-
-jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup show
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-targets --all-features
-
-  publish:
-    needs: verify
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-```
-
-The publish job must not run when verification fails.
+For `main`, trigger `publish.yml` from completed `CI` runs and require a push event, success, `head_branch == main`, and same-repository provenance. For stable tags, call the same reusable verification workflow. A failed or skipped gate must not reach registry login.
 
 - [ ] **Step 2: Write the failing publish-ref behavior test**
 
-Create `tests/publish-ref-behavior.sh` to exercise the shared publish-context resolver through its GitHub multiline `tags` output with literal cases. Parse that output exactly as a workflow step would receive it, resolve the small Docker metadata-action rule set used here, and require:
+Create `tests/publish-ref-behavior.sh` to exercise the shared publish-context resolver and release-alias helper with literal cases. Require:
 
-- `refs/heads/main` => exactly `edge` and `sha-0123456`;
-- `refs/tags/v1.2.3` => exactly `1.2.3`, `1.2`, `1`, and `latest`;
-- rejection for `refs/tags/v01.2.3`, `refs/tags/v1.2.3-rc1`, and `refs/heads/release`.
+- explicit `refs/heads/main` plus a full verified SHA => primary `sha-<full-commit>` and candidate alias `edge`;
+- canonical `refs/tags/v1.2.3` => primary `1.2.3` and candidate aliases `1.2`, `1`, and `latest`;
+- fallback to GitHub's direct-event variables for stable tag pushes;
+- rejection of leading zero, prerelease, non-main, mismatched ref/ref-name, invalid SHA, and any input producing a Docker tag outside the 128-character grammar;
+- monotonic alias selection for a lone release, newer patches, newer majors, unordered inputs, and numeric components too large for shell arithmetic; and
+- workflow integration: reusable full gates, successful same-repository main CI, action SHA pins, digest promotion, concurrency, and policy-test execution from the reusable gate.
 
 This must prove no cross-channel tags leak between the `main` and release publications.
 
-Run it before the helper exists and expect a failure about the missing resolver script.
+Run the expanded test against the current implementation and confirm it fails for the missing full-SHA context outputs, alias selector, and reusable-gate wiring.
 
 - [ ] **Step 3: Add a shared publish-context resolver and wire it into the workflow**
 
-Create `scripts/ci/resolve-publish-context.sh` and run it before registry login. It must accept exactly:
+Create `scripts/ci/resolve-publish-context.sh` and run it before registry login. It accepts MemKafka-specific target ref, ref name, and SHA variables for `workflow_run`, with GitHub's direct-event variables as fallback. It must accept exactly:
 
 - `refs/heads/main`; or
 - `refs/tags/vMAJOR.MINOR.PATCH`, where each numeric component is `0` or a non-zero digit followed by digits.
 
-Reject every other ref. Emit one GitHub multiline output named `tags` whose value is the complete newline-delimited `docker/metadata-action` rule list for the accepted ref. For `main`, emit raw `edge` plus short-SHA rules. For stable tags, emit raw rules for patch, minor, major, and `latest`. This keeps the publication contract in one place and prevents `latest` from being moved by `alpha`, `beta`, `rc`, or leading-zero tags even though the workflow glob is broad.
+Reject every other ref and any mismatch or invalid full SHA. Emit the channel, primary tag, alias candidates, version, and verified target SHA. Validate every emitted Docker tag before output. For `main`, the primary is `sha-<full-commit>` and the only candidate alias is `edge`; for stable tags, the primary is exact `major.minor.patch` and the candidates are `major.minor`, `major`, and `latest`.
 
 In `.github/workflows/publish.yml`, replace the existing release-tag validation step with:
 
@@ -185,28 +160,30 @@ In `.github/workflows/publish.yml`, replace the existing release-tag validation 
 scripts/ci/resolve-publish-context.sh
 ```
 
-- [ ] **Step 4: Add authenticated multi-platform Buildx publication**
+- [ ] **Step 4: Add digest-first authenticated multi-platform publication**
 
-Use current major releases from the verified Docker publisher:
+Pin every action in the `packages: write` job to its reviewed full SHA. Generate metadata for exactly the primary tag, explicitly set OCI revision to the verified target SHA, and retain source, description, license, version, and created labels. Build and push AMD64/ARM64 with maximum provenance and an SBOM, then capture `docker/build-push-action`'s manifest digest.
 
 ```yaml
-- uses: docker/setup-qemu-action@v4
+- uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
   with:
     platforms: arm64
-- uses: docker/setup-buildx-action@v4
-- uses: docker/login-action@v4
+- uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+- uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
   with:
     registry: ${{ env.REGISTRY }}
     username: ${{ github.actor }}
     password: ${{ secrets.GITHUB_TOKEN }}
 - id: meta
-  uses: docker/metadata-action@v6
+  uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
   with:
     images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
     flavor: |
       latest=false
-    tags: ${{ steps.publish_context.outputs.tags }}
-- uses: docker/build-push-action@v7
+    tags: |
+      type=raw,value=${{ steps.publish_context.outputs.primary_tag }}
+- id: build
+  uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
   with:
     context: .
     platforms: linux/amd64,linux/arm64
@@ -217,7 +194,7 @@ Use current major releases from the verified Docker publisher:
     sbom: true
 ```
 
-The metadata action supplies the dynamic revision/version/created labels. The static Dockerfile labels preserve source/description/license. The resolver output must remain the single source of truth: `main` produces exactly `edge` and `sha-<short-commit>`, without `latest`, and a release produces exactly patch, minor, major, and `latest`, without `edge` or SHA tags.
+After the primary push, promote aliases only with `docker buildx imagetools create` against `${{ steps.build.outputs.digest }}`. Re-read `refs/heads/main` immediately before moving `edge`. For releases, use a focused pure shell helper to compare all canonical remote stable tags as decimal strings: move the minor alias only for the highest patch in that minor, the major alias only for the highest version in that major, and `latest` only for the highest stable version overall. Use one cancelling mainline concurrency group and one non-cancelling group per exact release tag.
 
 - [ ] **Step 5: Add anonymous-pull documentation**
 
@@ -228,28 +205,26 @@ docker run --rm -p 9092:9092 -p 8081:8081 \
   ghcr.io/jonas-lomholdt/memkafka:latest
 ```
 
-Keep the local `docker build` path for contributors. Add a compact release note explaining that `latest` and version tags are stable releases, `edge` follows the latest green `main` publication, and `sha-<short-commit>` pins an immutable development snapshot. Keep the one-time package-settings path: package page → Package settings → Change visibility → Public. State that public visibility cannot be reverted.
+Keep the local `docker build` path for contributors. Explain that `edge` follows only the latest fully green, still-current `main` commit; stable aliases advance monotonically; `sha-<full-commit>` is commit-addressed but still a mutable registry tag; and an OCI digest is the immutable pin. Keep the one-time package-settings path: package page → Package settings → Change visibility → Public. State that public visibility cannot be reverted.
 
 - [ ] **Step 6: Validate workflow syntax and publish-ref behavior**
 
 Run:
 
 ```bash
-ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/publish.yml")'
+ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each { |path| YAML.parse_file(path) }'
 tests/publish-ref-behavior.sh
-bash -n scripts/ci/resolve-publish-context.sh
-bash -n tests/container-image.sh
-bash -n tests/publish-ref-behavior.sh
+bash -n scripts/ci/*.sh tests/container-image.sh tests/publish-ref-behavior.sh
 git diff --check
 ```
 
-Expected: YAML parses; the publish-ref test proves `main`, stable release, and rejection behavior; and all shell scripts parse cleanly. Do not push any image from this step.
+Expected: every workflow parses; the policy test proves exact primary tags, rejection behavior, monotonic release aliases, and workflow gating; and all shell scripts parse cleanly. Do not push any image from this step.
 
 - [ ] **Step 7: Commit publication automation**
 
 ```bash
-git add .github/workflows/publish.yml README.md scripts/ci/resolve-publish-context.sh tests/publish-ref-behavior.sh
-git commit -m "ci: publish edge images from main"
+git add .github/workflows README.md scripts/ci tests/container-image.sh tests/publish-ref-behavior.sh docs
+git commit -m "ci: harden verified image publication"
 ```
 
 ---
@@ -263,11 +238,11 @@ git commit -m "ci: publish edge images from main"
 
 **Interfaces:**
 - Consumes: green `main` and a canonical stable tag at version `0.1.0`
-- Produces: verified `edge`/`sha-<short-commit>` plus stable release GHCR packages and an explicit visibility handoff
+- Produces: a commit-addressed `sha-<full-commit>` primary plus fresh `edge`, an exact stable release plus monotonic aliases, immutable OCI digests, and an explicit visibility handoff
 
 - [ ] **Step 1: Run complete local verification**
 
-Run the root formatting, strict Clippy, full Rust suite, container metadata test, and all changed standalone benchmark checks. Remove only temporary image tags created by this plan.
+Run workflow YAML parsing, all shell policy tests and syntax checks, root formatting, strict Clippy, the full Rust suite, and every standalone benchmark check. The hosted reusable gate runs the container metadata/CLI assertion and all native/container client suites. Do not rerun the known-broken local AMD64 QEMU build.
 
 - [ ] **Step 2: Push `main` and require green ordinary CI**
 
@@ -277,20 +252,21 @@ gh run list --branch main --workflow CI --limit 3
 gh run watch <CI_RUN_ID> --exit-status
 ```
 
-Expected: ordinary CI, including every existing native/container client and the new metadata assertion, completes successfully.
+Expected: ordinary `CI` calls the reusable full gate exactly once, including every native/container client, the publication-policy test, and the metadata assertion. Its successful push completion is the only event that starts main publication.
 
 - [ ] **Step 3: Monitor the mainline publish workflow and inspect `edge` plus SHA output**
 
-Run:
+The publication run is a `workflow_run` consumer of the successful `CI` run and must build `workflow_run.head_sha`, not the publication wrapper's own `github.sha`. Run:
 
 ```bash
-gh run list --branch main --workflow "Publish container" --limit 3
+MAIN_SHA="$(git rev-parse origin/main)"
+gh run list --event workflow_run --branch main --workflow "Publish container" --limit 3
 gh run watch <MAIN_PUBLISH_RUN_ID> --exit-status
 docker buildx imagetools inspect ghcr.io/jonas-lomholdt/memkafka:edge
-docker buildx imagetools inspect ghcr.io/jonas-lomholdt/memkafka:sha-<short-commit>
+docker buildx imagetools inspect "ghcr.io/jonas-lomholdt/memkafka:sha-$MAIN_SHA"
 ```
 
-Expected: both manifests contain `linux/amd64` and `linux/arm64`; `edge` resolves to the latest green `main` commit; and the immutable `sha-<short-commit>` tag resolves to the same publication.
+Expected: both tags resolve to the same AMD64/ARM64 manifest digest; `edge` moved only after the remote-main freshness check; and the `sha-<full-commit>` tag is commit-addressed. Record the `sha256` manifest digest as the immutable image identity.
 
 - [ ] **Step 4: Confirm the release tag is new and points at green `main`**
 
@@ -317,12 +293,15 @@ This external publication step is authorized by the approved design; never force
 - [ ] **Step 6: Monitor the release publish workflow and inspect the manifest**
 
 ```bash
-gh run list --workflow "Publish container" --limit 3
+gh run list --event push --workflow "Publish container" --limit 3
 gh run watch <PUBLISH_RUN_ID> --exit-status
 docker buildx imagetools inspect ghcr.io/jonas-lomholdt/memkafka:0.1.0
+docker buildx imagetools inspect ghcr.io/jonas-lomholdt/memkafka:0.1
+docker buildx imagetools inspect ghcr.io/jonas-lomholdt/memkafka:0
+docker buildx imagetools inspect ghcr.io/jonas-lomholdt/memkafka:latest
 ```
 
-Expected: the manifest contains `linux/amd64` and `linux/arm64`; tags `0.1.0`, `0.1`, `0`, and `latest` resolve to the release; and the release publication does not emit `edge` or `sha-*`.
+Expected: the tag push first passes the same full reusable gate. The exact `0.1.0` manifest contains `linux/amd64` and `linux/arm64`; because this is the first canonical release, `0.1`, `0`, and `latest` resolve to its same digest. Later lower or out-of-order releases still publish their exact version but move only aliases for which they are highest in the complete remote canonical-tag set. Release publication never emits `edge` or `sha-*`.
 
 - [ ] **Step 7: Complete the explicit public-visibility handoff**
 

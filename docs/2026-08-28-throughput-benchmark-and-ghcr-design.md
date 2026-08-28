@@ -17,7 +17,7 @@ Both additions must remain clean vertical cuts. The benchmark observes MemKafka 
 - Compare MemKafka with Apache Kafka or another broker in this first benchmark.
 - Benchmark compression, multiple payload profiles, startup time, or Schema Registry throughput.
 - Use Criterion for this end-to-end workload.
-- Publish an `edge` image for every commit to `main`.
+- Publish or move `edge` for an unverified or stale `main` commit.
 
 ## Repository boundaries
 
@@ -124,21 +124,21 @@ The million-record, three-run benchmark remains manual because shared GitHub run
 
 ## GHCR publishing
 
-`.github/workflows/publish.yml` publishes every push to `main` and canonical stable tags matching `vMAJOR.MINOR.PATCH`. It rejects every other ref before registry login.
+Ordinary branch pushes and pull requests run the full hosted suite through a reusable verification workflow. A successful same-repository `CI` push run on `main` triggers `.github/workflows/publish.yml` through `workflow_run`; publication checks out and builds that run's exact head SHA. Canonical stable tag pushes matching `vMAJOR.MINOR.PATCH` call the same full verification workflow directly. Rejected refs and failed or skipped verification cannot reach registry login.
 
-For `refs/heads/main`, the workflow publishes a multi-platform OCI image for Linux AMD64 and ARM64 with:
+For a verified `refs/heads/main` commit, the workflow first publishes a multi-platform OCI image for Linux AMD64 and ARM64 with the primary tag:
 
-- `ghcr.io/jonas-lomholdt/memkafka:edge`; and
-- `ghcr.io/jonas-lomholdt/memkafka:sha-<short-commit>`.
+- `ghcr.io/jonas-lomholdt/memkafka:sha-<full-40-character-commit>`.
 
-For a canonical stable tag such as `v0.1.0`, the workflow publishes a multi-platform OCI image for Linux AMD64 and ARM64 with:
+The workflow captures that manifest's OCI digest, re-reads remote `main`, and moves `edge` to the digest only when `main` still equals the verified SHA. One shared mainline concurrency group cancels obsolete publication runs. The SHA tag is commit-addressed but remains a mutable registry tag; the published `sha256` digest is the immutable image identity.
 
-- `ghcr.io/jonas-lomholdt/memkafka:0.1.0`;
-- `ghcr.io/jonas-lomholdt/memkafka:0.1`;
-- `ghcr.io/jonas-lomholdt/memkafka:0`; and
-- `ghcr.io/jonas-lomholdt/memkafka:latest`.
+For a canonical stable tag such as `v0.1.0`, the workflow first publishes the exact version as the primary multi-platform tag:
 
-The publishing job runs only after its verification job succeeds. It uses the repository `GITHUB_TOKEN` with workflow-level `contents: read` and job-level `packages: write`, and does not require a personal access token. The image carries OCI source, description, revision, version, and MIT license metadata. `latest` remains release-only: `main` pushes move `edge` and the immutable `sha-<short-commit>` tag, but never `latest`.
+- `ghcr.io/jonas-lomholdt/memkafka:0.1.0`.
+
+After capturing the primary manifest digest, the workflow derives mutable aliases from every canonical stable tag currently on the remote. `0.1` moves only when `0.1.0` is the highest patch in minor `0.1`; `0` moves only when it is the highest stable version in major `0`; and `latest` moves only when it is the highest stable version overall. Each exact release tag has its own non-cancelling concurrency group, while decimal-string comparison keeps selection correct for unordered and arbitrarily large canonical components. An older or out-of-order release can therefore publish its exact version without moving any alias backward.
+
+Every write-capable action is pinned to a reviewed full commit SHA. The publishing job uses the repository `GITHUB_TOKEN` with workflow-level `contents: read` and job-level `packages: write`, and does not require a personal access token. The image carries OCI source, description, verified revision, version, created, and MIT license metadata, maximum provenance, and an SBOM. `latest` remains release-only and `edge` follows only the latest fully green, still-current `main` commit.
 
 The README documents anonymous usage:
 
@@ -157,7 +157,7 @@ The work is complete when:
 3. output reports producer and end-to-end throughput plus peak broker RSS and full machine/workload metadata;
 4. `latest.json` and `throughput.svg` are generated deterministically from successful runs and the README embeds the graph with honest caveats;
 5. the 10,000-record smoke benchmark passes in CI without a performance threshold;
-6. a separate release workflow verifies and publishes Linux AMD64 and ARM64 images from `main` as `edge` plus `sha-<short-commit>`, and from canonical stable tags as exact `major.minor.patch`, `major.minor`, `major`, and `latest` tags;
+6. a separate publication workflow consumes successful same-repository `CI` runs for `main`, runs the same full gate for canonical stable tags, publishes Linux AMD64 and ARM64 primary images, and promotes only fresh, monotonic mutable aliases from the captured OCI digest;
 7. the image is linked to the repository and carries source, description, revision, version, and license metadata;
 8. the README documents the GHCR pull command and one-time public-visibility step; and
 9. formatting, strict Clippy, broker tests, benchmark tests, existing black-box suites, and hosted CI all pass.

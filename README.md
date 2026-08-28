@@ -34,7 +34,9 @@ docker build -t memkafka .
 docker run --rm -p 9092:9092 -p 8081:8081 memkafka
 ```
 
-Stable releases publish four tags. For release `v0.1.0`, these are `0.1.0`, `0.1`, `0`, and `latest`. The `edge` tag follows the latest green `main` publication, and each `sha-<short-commit>` tag pins one immutable development snapshot.
+Main publications first push a commit-addressed development tag named `sha-<full-40-character-commit>`. After the full hosted suite succeeds and `main` is rechecked for freshness, `edge` moves to that image. A registry tag is still a mutable pointer, including a `sha-*` tag; use the published OCI digest, such as `ghcr.io/jonas-lomholdt/memkafka@sha256:<digest>`, when an immutable image identity is required.
+
+Stable releases first push the exact `MAJOR.MINOR.PATCH` tag. Mutable aliases advance monotonically from the complete set of canonical remote release tags: `MAJOR.MINOR` moves only for the highest patch in that minor, `MAJOR` only for the highest version in that major, and `latest` only for the highest stable version overall. For the first release `v0.1.0`, the resulting tags are `0.1.0`, `0.1`, `0`, and `latest`; publishing an older release later cannot move an alias backward.
 
 GitHub creates the first container package as private. After that first publication, the maintainer must open the package page and choose **Package settings → Change visibility → Public** before anonymous pulls will work. Only after this step will `docker pull ghcr.io/jonas-lomholdt/memkafka:latest` work without credentials. This change cannot be reverted: a public package cannot be made private again.
 
