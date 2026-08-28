@@ -20,10 +20,23 @@ When both listeners are ready, MemKafka prints one line containing their resolve
 
 ## Run in Docker
 
+After the first release image has been published and made public by the maintainer, run the latest stable release from GHCR:
+
+```bash
+docker run --rm -p 9092:9092 -p 8081:8081 \
+  ghcr.io/jonas-lomholdt/memkafka:latest
+```
+
+For contributor builds from the current checkout, build and run the image locally:
+
 ```bash
 docker build -t memkafka .
 docker run --rm -p 9092:9092 -p 8081:8081 memkafka
 ```
+
+Stable releases publish four tags. For release `v0.1.0`, these are `0.1.0`, `0.1`, `0`, and `latest`.
+
+GitHub creates the first container package as private. After that first publication, the maintainer must open the package page and choose **Package settings → Change visibility → Public** before anonymous pulls will work. Only after this step will `docker pull ghcr.io/jonas-lomholdt/memkafka:latest` work without credentials. This change cannot be reverted: a public package cannot be made private again.
 
 The container runs as a non-root user and advertises Kafka at `127.0.0.1:9092` by default. Override the advertised address for Docker Compose or another container network:
 
