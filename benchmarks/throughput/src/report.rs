@@ -1,4 +1,10 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    path::Path,
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -9,6 +15,7 @@ use crate::{config::WorkloadConfig, workload::RunMetrics};
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const CLIENT_VERSION: &str = "rskafka 0.6.0";
+static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -249,12 +256,17 @@ pub fn write_json_atomic(path: &Path, report: &BenchmarkReport) -> Result<()> {
         .file_name()
         .context("output JSON path must name a file")?
         .to_string_lossy();
-    let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
     let json = serde_json::to_vec_pretty(report).context("serialize benchmark report")?;
+    let (temporary, mut temporary_file) = create_unique_temporary(parent, &file_name)?;
 
     let write_result = (|| -> Result<()> {
-        fs::write(&temporary, json)
+        temporary_file
+            .write_all(&json)
             .with_context(|| format!("write temporary report {}", temporary.display()))?;
+        temporary_file
+            .sync_all()
+            .with_context(|| format!("sync temporary report {}", temporary.display()))?;
+        drop(temporary_file);
         fs::rename(&temporary, path).with_context(|| {
             format!(
                 "atomically replace report {} from {}",
@@ -268,6 +280,28 @@ pub fn write_json_atomic(path: &Path, report: &BenchmarkReport) -> Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     write_result
+}
+
+fn create_unique_temporary(parent: &Path, file_name: &str) -> Result<(std::path::PathBuf, File)> {
+    loop {
+        let temporary_id = NEXT_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{file_name}.{}.{temporary_id}.tmp",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create temporary report {}", temporary.display()));
+            }
+        }
+    }
 }
 
 fn command_output(program: &str, arguments: &[&str]) -> Result<String> {
@@ -313,6 +347,8 @@ fn median_u64(values: impl Iterator<Item = u64>) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use chrono::{TimeZone, Utc};
 
     use crate::{config::WorkloadConfig, workload::RunMetrics};
@@ -406,5 +442,42 @@ mod tests {
 
         assert!(message.contains("8.00 GiB"), "{message}");
         assert!(message.contains("4.00 GiB"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writer_does_not_follow_a_stale_pid_scoped_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = std::env::temp_dir().join(format!(
+            "memkafka-report-symlink-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        let sentinel = directory.join("sentinel.txt");
+        fs::write(&sentinel, "untouched").unwrap();
+        let output = directory.join("report.json");
+        let stale_temporary = directory.join(format!(".report.json.{}.0.tmp", std::process::id()));
+        symlink(&sentinel, &stale_temporary).unwrap();
+        let report = BenchmarkReport::new(
+            Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0)
+                .single()
+                .unwrap(),
+            "0123456789abcdef".to_owned(),
+            WorkloadConfig::default(),
+            MachineMetadata::fixture(),
+            vec![run(1, 100.0)],
+        )
+        .unwrap();
+
+        super::write_json_atomic(&output, &report).unwrap();
+
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "untouched");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&output).unwrap()).unwrap()["schemaVersion"],
+            1
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -12,6 +12,73 @@ use memkafka_throughput_benchmark::{
     workload,
 };
 
+#[cfg(unix)]
+struct LocalSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl LocalSignals {
+    fn new() -> Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt()).context("listen for SIGINT")?,
+            terminate: signal(SignalKind::terminate()).context("listen for SIGTERM")?,
+        })
+    }
+
+    async fn receive(&mut self) -> Result<&'static str> {
+        tokio::select! {
+            signal = self.interrupt.recv() => signal.map(|()| "SIGINT").context("SIGINT stream closed"),
+            signal = self.terminate.recv() => signal.map(|()| "SIGTERM").context("SIGTERM stream closed"),
+        }
+    }
+}
+
+#[cfg(windows)]
+struct LocalSignals {
+    ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+#[cfg(windows)]
+impl LocalSignals {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            ctrl_c: tokio::signal::windows::ctrl_c().context("listen for Ctrl-C")?,
+        })
+    }
+
+    async fn receive(&mut self) -> Result<&'static str> {
+        self.ctrl_c
+            .recv()
+            .await
+            .map(|()| "Ctrl-C")
+            .context("Ctrl-C stream closed")
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct LocalSignals;
+
+#[cfg(not(any(unix, windows)))]
+impl LocalSignals {
+    fn new() -> Result<Self> {
+        Ok(Self)
+    }
+
+    async fn receive(&mut self) -> Result<&'static str> {
+        tokio::signal::ctrl_c().await.context("listen for Ctrl-C")?;
+        Ok("Ctrl-C")
+    }
+}
+
+enum ActiveRunOutcome {
+    Workload(Result<workload::RunMetrics>),
+    Interrupted(Result<&'static str>),
+}
+
 #[derive(Debug, Parser)]
 #[command(
     about = "Measure validated end-to-end Kafka throughput",
@@ -86,6 +153,9 @@ async fn run_external(args: &Args, bootstrap_server: &str, config: &WorkloadConf
 }
 
 async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
+    // Install process signal handlers only for local mode and before any child
+    // exists. External mode retains the operating system's normal signal behavior.
+    let mut signals = LocalSignals::new().context("install local benchmark signal handlers")?;
     if !args.skip_memory_check {
         report::ensure_available_memory(&config, report::available_memory())
             .context("benchmark memory preflight")?;
@@ -109,10 +179,16 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
             log_path.display()
         );
 
+        let outcome = tokio::select! {
+            result = workload::run(broker.bootstrap_server(), &topic, &config) => {
+                ActiveRunOutcome::Workload(result)
+            }
+            interruption = signals.receive() => ActiveRunOutcome::Interrupted(interruption),
+        };
         let metrics =
-            match workload::run(broker.bootstrap_server(), &topic, &config).await {
-                Ok(metrics) => metrics,
-                Err(error) => {
+            match outcome {
+                ActiveRunOutcome::Workload(Ok(metrics)) => metrics,
+                ActiveRunOutcome::Workload(Err(error)) => {
                     let shutdown_result = broker.stop();
                     let error = error.context(format!(
                     "run {run_number}/{} failed for topic {topic} with broker PID {pid} (log: {})",
@@ -124,6 +200,16 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
                         Err(shutdown_error) => Err(error
                             .context(format!("broker cleanup also failed: {shutdown_error:#}"))),
                     };
+                }
+                ActiveRunOutcome::Interrupted(interruption) => {
+                    let shutdown_result = broker.stop().with_context(|| {
+                        format!(
+                            "clean up interrupted run {run_number}/{} broker PID {pid} (log: {})",
+                            args.runs,
+                            log_path.display()
+                        )
+                    });
+                    return interruption_result(interruption, shutdown_result, pid, &log_path);
                 }
             };
 
@@ -141,8 +227,7 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
                 log_path.display()
             )
         });
-        let peak_rss_bytes = peak_result?;
-        shutdown_result?;
+        let peak_rss_bytes = combine_peak_and_shutdown(peak_result, shutdown_result)?;
 
         let run = BenchmarkRun::new(run_number, topic, pid, metrics, peak_rss_bytes);
         eprintln!(
@@ -167,6 +252,40 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
     Ok(())
 }
 
+fn interruption_result(
+    interruption: Result<&'static str>,
+    shutdown_result: Result<()>,
+    pid: u32,
+    log_path: &std::path::Path,
+) -> Result<()> {
+    match (interruption, shutdown_result) {
+        (Ok(signal), Ok(())) => anyhow::bail!(
+            "benchmark interrupted by {signal}; broker PID {pid} was stopped (log: {})",
+            log_path.display()
+        ),
+        (Ok(signal), Err(shutdown_error)) => anyhow::bail!(
+            "benchmark interrupted by {signal}, and cleanup failed for broker PID {pid}: {shutdown_error:#}"
+        ),
+        (Err(signal_error), Ok(())) => {
+            Err(signal_error.context(format!("local signal listener failed; broker PID {pid} was stopped")))
+        }
+        (Err(signal_error), Err(shutdown_error)) => Err(signal_error.context(format!(
+            "local signal listener failed, and cleanup failed for broker PID {pid}: {shutdown_error:#}"
+        ))),
+    }
+}
+
+fn combine_peak_and_shutdown(peak_result: Result<u64>, shutdown_result: Result<()>) -> Result<u64> {
+    match (peak_result, shutdown_result) {
+        (Ok(peak), Ok(())) => Ok(peak),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(peak_error), Err(shutdown_error)) => {
+            Err(peak_error.context(format!("broker shutdown also failed: {shutdown_error:#}")))
+        }
+    }
+}
+
 fn unique_topic(prefix: &str) -> Result<String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -181,7 +300,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::Args;
+    use super::{Args, combine_peak_and_shutdown};
 
     #[test]
     fn parses_the_external_broker_workload_flags() {
@@ -234,5 +353,18 @@ mod tests {
         assert_eq!(args.runs, 3);
         assert!(args.skip_memory_check);
         assert_eq!(args.output_json, PathBuf::from("/tmp/local.json"));
+    }
+
+    #[test]
+    fn preserves_peak_rss_and_shutdown_errors_together() {
+        let error = combine_peak_and_shutdown(
+            Err(anyhow::anyhow!("RSS sampler failed")),
+            Err(anyhow::anyhow!("broker shutdown failed")),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("RSS sampler failed"), "{message}");
+        assert!(message.contains("broker shutdown failed"), "{message}");
     }
 }

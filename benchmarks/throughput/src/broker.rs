@@ -71,6 +71,7 @@ impl BrokerGuard {
         let schema_registry_addr = ports.schema_registry_addr();
         let bootstrap_server = kafka_addr.to_string();
         let log_path = new_log_path()?;
+        let sampler_stop = Arc::new(AtomicBool::new(false));
         let log = open_log(&log_path)?;
         let stderr = log
             .try_clone()
@@ -99,18 +100,26 @@ impl BrokerGuard {
                 log_path.display()
             )
         })?;
-        let pid = child.id();
-        let sampler_stop = Arc::new(AtomicBool::new(false));
-        let sampler = spawn_rss_sampler(pid, Arc::clone(&sampler_stop));
+        // Establish exact-child ownership immediately. From this point onward,
+        // every error (including RSS thread creation) drops the guard and reaps it.
         let mut guard = Self {
+            pid: child.id(),
             child: Some(child),
             bootstrap_server,
             log_path,
-            pid,
             sampler_stop,
-            sampler: Some(sampler),
+            sampler: None,
             peak_rss_bytes: None,
         };
+        guard.sampler = Some(
+            spawn_rss_sampler(guard.pid, Arc::clone(&guard.sampler_stop)).with_context(|| {
+                format!(
+                    "start RSS sampler for broker PID {} (log: {})",
+                    guard.pid,
+                    guard.log_path.display()
+                )
+            })?,
+        );
 
         guard.wait_until_ready(kafka_addr)?;
         Ok(guard)
@@ -181,25 +190,14 @@ impl BrokerGuard {
     fn wait_until_ready(&mut self, kafka_addr: SocketAddrV4) -> Result<()> {
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
+            self.ensure_running_during_startup("before readiness probe")?;
             if TcpStream::connect_timeout(&SocketAddr::V4(kafka_addr), READINESS_POLL_INTERVAL)
                 .is_ok()
             {
+                self.ensure_running_during_startup("after successful readiness probe")?;
                 return Ok(());
             }
 
-            if let Some(status) = self
-                .child
-                .as_mut()
-                .context("broker child is unavailable during startup")?
-                .try_wait()
-                .with_context(|| format!("inspect broker PID {} during startup", self.pid))?
-            {
-                bail!(
-                    "broker PID {} exited before readiness with {status} (log: {})",
-                    self.pid,
-                    self.log_path.display()
-                );
-            }
             if Instant::now() >= deadline {
                 bail!(
                     "broker PID {} did not accept Kafka connections at {} within {:.0}s (log: {})",
@@ -211,6 +209,29 @@ impl BrokerGuard {
             }
             thread::sleep(READINESS_POLL_INTERVAL);
         }
+    }
+
+    fn ensure_running_during_startup(&mut self, phase: &str) -> Result<()> {
+        if let Some(status) = self
+            .child
+            .as_mut()
+            .context("broker child is unavailable during startup")?
+            .try_wait()
+            .with_context(|| {
+                format!(
+                    "inspect broker PID {} during startup ({phase}; log: {})",
+                    self.pid,
+                    self.log_path.display()
+                )
+            })?
+        {
+            bail!(
+                "broker PID {} exited before readiness with {status} ({phase}; log: {})",
+                self.pid,
+                self.log_path.display()
+            );
+        }
+        Ok(())
     }
 
     fn stop_sampler(&mut self) {
@@ -229,27 +250,29 @@ impl Drop for BrokerGuard {
     }
 }
 
-fn spawn_rss_sampler(pid: u32, stop: Arc<AtomicBool>) -> JoinHandle<u64> {
-    thread::spawn(move || {
-        let pid = Pid::from_u32(pid);
-        let mut system = System::new();
-        let mut peak = 0;
-        loop {
-            system.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&[pid]),
-                true,
-                ProcessRefreshKind::nothing().with_memory(),
-            );
-            if let Some(process) = system.process(pid) {
-                peak = peak.max(process.memory());
+fn spawn_rss_sampler(pid: u32, stop: Arc<AtomicBool>) -> std::io::Result<JoinHandle<u64>> {
+    thread::Builder::new()
+        .name(format!("memkafka-rss-{pid}"))
+        .spawn(move || {
+            let pid = Pid::from_u32(pid);
+            let mut system = System::new();
+            let mut peak = 0;
+            loop {
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&[pid]),
+                    true,
+                    ProcessRefreshKind::nothing().with_memory(),
+                );
+                if let Some(process) = system.process(pid) {
+                    peak = peak.max(process.memory());
+                }
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                thread::sleep(RSS_SAMPLE_INTERVAL);
             }
-            if stop.load(Ordering::Acquire) {
-                break;
-            }
-            thread::sleep(RSS_SAMPLE_INTERVAL);
-        }
-        peak
-    })
+            peak
+        })
 }
 
 fn new_log_path() -> Result<PathBuf> {
