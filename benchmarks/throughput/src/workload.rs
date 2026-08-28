@@ -1,17 +1,17 @@
-use std::{ops::Range, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, future::Future, ops::Range, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use rskafka::{
     BackoffConfig,
     client::{
         ClientBuilder,
-        partition::{Compression, PartitionClient, UnknownTopicHandling},
+        partition::{Compression, OffsetAt, PartitionClient, UnknownTopicHandling},
     },
 };
 use serde::Serialize;
 use tokio::{
     sync::watch,
-    task::JoinSet,
+    task::{Id, JoinSet},
     time::{Instant, timeout, timeout_at},
 };
 
@@ -23,6 +23,87 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const WORKLOAD_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const FETCH_MAX_BYTES: i32 = 8 * 1024 * 1024;
 const FETCH_MAX_WAIT_MS: i32 = 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskRole {
+    Producer,
+    Consumer,
+}
+
+impl fmt::Display for TaskRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Producer => formatter.write_str("producer"),
+            Self::Consumer => formatter.write_str("consumer"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskContext {
+    role: TaskRole,
+    partition: i32,
+    expected_final_offset: u64,
+}
+
+impl TaskContext {
+    fn new(role: TaskRole, partition: i32, expected_final_offset: u64) -> Self {
+        Self {
+            role,
+            partition,
+            expected_final_offset,
+        }
+    }
+}
+
+impl fmt::Display for TaskContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} partition {}, expected final offset {}",
+            self.role, self.partition, self.expected_final_offset
+        )
+    }
+}
+
+#[derive(Default)]
+struct TaskGroup {
+    tasks: JoinSet<Result<()>>,
+    contexts: HashMap<Id, TaskContext>,
+}
+
+impl TaskGroup {
+    fn spawn<F>(&mut self, context: TaskContext, task: F)
+    where
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        let handle = self.tasks.spawn(task);
+        self.contexts.insert(handle.id(), context);
+    }
+
+    async fn abort_and_drain(&mut self) {
+        self.tasks.abort_all();
+        while self.tasks.join_next().await.is_some() {}
+        self.contexts.clear();
+    }
+
+    fn active_contexts(&self) -> String {
+        let mut contexts = self
+            .contexts
+            .values()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        contexts.sort();
+        contexts.join("; ")
+    }
+}
+
+#[derive(Default)]
+struct TaskProgress {
+    producers: usize,
+    consumers: usize,
+    producer_seconds: Option<f64>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,29 +212,37 @@ pub async fn run(
     }
 
     let (start_tx, start_rx) = watch::channel(None);
-    let mut producers = JoinSet::new();
-    let mut consumers = JoinSet::new();
+    let mut tasks = TaskGroup::default();
     for (partition, (client, range)) in clients
-        .into_iter()
+        .iter()
+        .cloned()
         .zip(partition_ranges(config.messages, config.partitions))
         .enumerate()
     {
-        let partition = i32::try_from(partition).context("partition index exceeds i32")?;
-        producers.spawn(produce_partition(
-            Arc::clone(&client),
-            partition,
-            range.clone(),
-            config.payload_bytes,
-            config.batch_records,
-            start_rx.clone(),
-        ));
-        consumers.spawn(consume_partition(
-            client,
-            partition,
-            range.end,
-            config.payload_bytes,
-            start_rx.clone(),
-        ));
+        let partition = i32::try_from(partition)
+            .with_context(|| format!("run topic {topic}: partition index exceeds i32"))?;
+        let expected_final_offset = range.end;
+        tasks.spawn(
+            TaskContext::new(TaskRole::Producer, partition, expected_final_offset),
+            produce_partition(
+                Arc::clone(&client),
+                partition,
+                range,
+                config.payload_bytes,
+                config.batch_records,
+                start_rx.clone(),
+            ),
+        );
+        tasks.spawn(
+            TaskContext::new(TaskRole::Consumer, partition, expected_final_offset),
+            consume_partition(
+                client,
+                partition,
+                expected_final_offset,
+                config.payload_bytes,
+                start_rx.clone(),
+            ),
+        );
     }
 
     let start = Instant::now();
@@ -162,9 +251,16 @@ pub async fn run(
         .context("publish common workload start instant")?;
     let deadline = start + WORKLOAD_DEADLINE;
 
-    join_tasks(&mut producers, deadline, topic, "producer").await?;
-    let producer_seconds = start.elapsed().as_secs_f64();
-    join_tasks(&mut consumers, deadline, topic, "consumer").await?;
+    let producer_seconds = coordinate_tasks(
+        tasks,
+        config.partitions as usize,
+        config.partitions as usize,
+        start,
+        deadline,
+        topic,
+    )
+    .await?;
+    validate_final_partition_lengths(&clients, config, deadline, topic).await?;
     let end_to_end_seconds = start.elapsed().as_secs_f64();
 
     Ok(RunMetrics::new(
@@ -296,29 +392,145 @@ async fn wait_for_start(start_rx: &mut watch::Receiver<Option<Instant>>) -> Resu
     }
 }
 
-async fn join_tasks(
-    tasks: &mut JoinSet<Result<()>>,
+async fn coordinate_tasks(
+    mut tasks: TaskGroup,
+    expected_producers: usize,
+    expected_consumers: usize,
+    start: Instant,
     deadline: Instant,
     topic: &str,
-    role: &str,
-) -> Result<()> {
-    timeout_at(deadline, async {
-        while let Some(result) = tasks.join_next().await {
-            result
-                .with_context(|| format!("run topic {topic}: {role} task panicked"))?
-                .with_context(|| format!("run topic {topic}: {role} task failed"))?;
+) -> Result<f64> {
+    let mut progress = TaskProgress::default();
+    let outcome = timeout_at(deadline, async {
+        while let Some(result) = tasks.tasks.join_next_with_id().await {
+            let (id, result) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let context = tasks.contexts.remove(&error.id()).with_context(|| {
+                        format!("run topic {topic}: find context for panicked task")
+                    })?;
+                    bail!("run topic {topic}: {context} panicked: {error}");
+                }
+            };
+            let context = tasks
+                .contexts
+                .remove(&id)
+                .with_context(|| format!("run topic {topic}: find context for completed task"))?;
+            result.with_context(|| format!("run topic {topic}: {context} failed"))?;
+
+            match context.role {
+                TaskRole::Producer => {
+                    progress.producers += 1;
+                    if progress.producers == expected_producers {
+                        progress.producer_seconds = Some(start.elapsed().as_secs_f64());
+                    }
+                }
+                TaskRole::Consumer => progress.consumers += 1,
+            }
         }
-        Ok(())
+
+        if progress.producers != expected_producers || progress.consumers != expected_consumers {
+            bail!(
+                "run topic {topic}: task set ended after {}/{} producers and {}/{} consumers",
+                progress.producers,
+                expected_producers,
+                progress.consumers,
+                expected_consumers
+            );
+        }
+        progress
+            .producer_seconds
+            .context("all producer tasks completed without a producer completion time")
     })
-    .await
-    .with_context(|| format!("run topic {topic}: {role} tasks exceeded workload deadline"))?
+    .await;
+
+    match outcome {
+        Ok(Ok(producer_seconds)) => Ok(producer_seconds),
+        Ok(Err(error)) => {
+            tasks.abort_and_drain().await;
+            Err(error)
+        }
+        Err(_) => {
+            let active = tasks.active_contexts();
+            tasks.abort_and_drain().await;
+            bail!(
+                "run topic {topic}: workload deadline exceeded after {}/{} producers and {}/{} consumers; active tasks: {active}",
+                progress.producers,
+                expected_producers,
+                progress.consumers,
+                expected_consumers
+            )
+        }
+    }
+}
+
+async fn validate_final_partition_lengths(
+    clients: &[Arc<PartitionClient>],
+    config: &WorkloadConfig,
+    deadline: Instant,
+    topic: &str,
+) -> Result<()> {
+    for (partition, client) in clients.iter().enumerate() {
+        let partition = i32::try_from(partition)
+            .with_context(|| format!("run topic {topic}: partition index exceeds i32"))?;
+        let expected_records = config.records_in_partition(partition);
+        let latest_offset = timeout_at(
+            deadline,
+            timeout(REQUEST_DEADLINE, client.get_offset(OffsetAt::Latest)),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "run topic {topic}, partition {partition}, expected final offset {expected_records}: workload deadline exceeded during final offset check"
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "run topic {topic}, partition {partition}, expected final offset {expected_records}: latest-offset request timed out"
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "run topic {topic}, partition {partition}, expected final offset {expected_records}: fetch latest offset"
+            )
+        })?;
+        validate_partition_length(partition, expected_records, latest_offset)
+            .with_context(|| format!("run topic {topic}: validate final partition length"))?;
+    }
+
+    Ok(())
+}
+
+fn validate_partition_length(
+    partition: i32,
+    expected_records: u64,
+    latest_offset: i64,
+) -> Result<()> {
+    let expected_offset = i64::try_from(expected_records).with_context(|| {
+        format!("partition {partition}: expected final offset exceeds i64 ({expected_records})")
+    })?;
+    if latest_offset != expected_offset {
+        bail!(
+            "partition {partition}: expected final offset {expected_offset}, got {latest_offset}"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use anyhow::bail;
+    use tokio::time::{Instant, sleep};
+
     use crate::config::WorkloadConfig;
 
-    use super::{RunMetrics, partition_ranges, run};
+    use super::{
+        RunMetrics, TaskContext, TaskGroup, TaskRole, coordinate_tasks, partition_ranges, run,
+        validate_partition_length,
+    };
 
     #[test]
     fn computes_producer_and_end_to_end_rates_from_exact_totals() {
@@ -350,5 +562,45 @@ mod tests {
                 .to_string()
                 .contains("validate workload configuration")
         );
+    }
+
+    #[tokio::test]
+    async fn reports_a_consumer_failure_without_waiting_for_a_slow_producer() {
+        let mut tasks = TaskGroup::default();
+        tasks.spawn(TaskContext::new(TaskRole::Producer, 0, 10), async move {
+            sleep(Duration::from_secs(5)).await;
+            bail!("producer request timed out")
+        });
+        tasks.spawn(TaskContext::new(TaskRole::Consumer, 0, 10), async move {
+            bail!("record validation failed")
+        });
+        let started = Instant::now();
+
+        let error = coordinate_tasks(
+            tasks,
+            1,
+            1,
+            started,
+            started + Duration::from_secs(1),
+            "test-topic",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let error = format!("{error:#}");
+        assert!(error.contains("consumer partition 0"));
+        assert!(error.contains("record validation failed"));
+        assert!(!error.contains("producer request timed out"));
+    }
+
+    #[test]
+    fn rejects_a_final_partition_offset_beyond_the_expected_record_count() {
+        let error = validate_partition_length(2, 3, 4).unwrap_err();
+
+        let error = error.to_string();
+        assert!(error.contains("partition 2"));
+        assert!(error.contains("expected final offset 3"));
+        assert!(error.contains("got 4"));
     }
 }
