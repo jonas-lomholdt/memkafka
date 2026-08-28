@@ -12,6 +12,8 @@ const ROW_HEIGHT: f64 = 42.0;
 const PANEL_HEADER_HEIGHT: f64 = 58.0;
 const PANEL_GAP: f64 = 28.0;
 const FOOTER_HEIGHT: f64 = 118.0;
+const SUBTITLE_MAX_CHARACTERS: usize = 132;
+const RUN_LABEL_MAX_CHARACTERS: usize = 16;
 const VALUE_LABEL_MAX_CHARACTERS: usize = 36;
 const MEDIAN_LABEL_MAX_CHARACTERS: usize = 40;
 const FOOTER_MAX_CHARACTERS: usize = 132;
@@ -56,13 +58,20 @@ pub fn render(report: &BenchmarkReport) -> Result<String> {
     );
     svg.push_str("  <rect width=\"100%\" height=\"100%\" rx=\"16\" fill=\"#f8fafc\"/>\n");
     svg.push_str("  <text class=\"title\" x=\"48\" y=\"44\">MemKafka throughput</text>\n");
+    let subtitle = truncate_label(
+        &format!(
+            "{} records · {}-byte values · {} partitions · batches of {}",
+            format_integer(report.workload.messages),
+            format_integer(report.workload.payload_bytes as u64),
+            report.workload.partitions,
+            format_integer(report.workload.batch_records as u64),
+        ),
+        SUBTITLE_MAX_CHARACTERS,
+    );
     writeln!(
         svg,
-        "  <text class=\"subtitle\" x=\"48\" y=\"66\">{} records · {}-byte values · {} partitions · batches of {}</text>",
-        format_integer(report.workload.messages),
-        format_integer(report.workload.payload_bytes as u64),
-        report.workload.partitions,
-        format_integer(report.workload.batch_records as u64),
+        "  <text class=\"subtitle\" x=\"48\" y=\"66\">{}</text>",
+        escape_xml(&subtitle),
     )?;
 
     render_panel(
@@ -184,11 +193,12 @@ fn render_panel(
             ),
             VALUE_LABEL_MAX_CHARACTERS,
         );
+        let run_label = truncate_label(&format!("Run {}", run.run), RUN_LABEL_MAX_CHARACTERS);
         writeln!(
             svg,
-            "  <text class=\"run-label\" x=\"48\" y=\"{:.1}\">Run {}</text>",
+            "  <text class=\"run-label\" x=\"48\" y=\"{:.1}\">{}</text>",
             bar_y + 17.0,
-            run.run,
+            escape_xml(&run_label),
         )?;
         writeln!(
             svg,
@@ -434,7 +444,12 @@ mod tests {
         report.machine.operating_system_version = "V".repeat(500);
         report.machine.architecture = "A".repeat(500);
         report.commit = "f".repeat(500);
+        report.workload.messages = u64::MAX;
+        report.workload.payload_bytes = usize::MAX;
+        report.workload.partitions = i32::MAX;
+        report.workload.batch_records = usize::MAX;
         for run in &mut report.runs {
+            run.run = usize::MAX;
             run.producer_records_per_second = f64::MAX;
             run.producer_gib_per_second = f64::MAX;
             run.end_to_end_records_per_second = f64::MAX;
@@ -458,6 +473,16 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
+        assert!(
+            text_for_class("subtitle")
+                .iter()
+                .all(|label| label.chars().count() <= 132)
+        );
+        assert!(
+            text_for_class("run-label")
+                .iter()
+                .all(|label| label.chars().count() <= 16)
+        );
         assert!(
             text_for_class("value-label")
                 .iter()

@@ -287,21 +287,25 @@ pub fn write_artifacts_atomic(
     svg_path: &Path,
     report: &BenchmarkReport,
 ) -> Result<()> {
-    let (json_path, svg_path) = resolve_distinct_output_paths(json_path, svg_path)?;
+    let (mut json_output, mut svg_output) = reserve_distinct_output_paths(json_path, svg_path)?;
 
     let mut json = serde_json::to_string_pretty(report).context("serialize benchmark report")?;
     json.push('\n');
     let svg = crate::svg::render(report).context("render benchmark SVG")?;
 
-    let json_temporary = stage_artifact(&json_path, json.as_bytes(), "JSON")?;
-    let svg_temporary = match stage_artifact(&svg_path, svg.as_bytes(), "SVG") {
+    let json_temporary = stage_artifact(json_output.path(), json.as_bytes(), "JSON")?;
+    let svg_temporary = match stage_artifact(svg_output.path(), svg.as_bytes(), "SVG") {
         Ok(temporary) => temporary,
         Err(error) => {
             let _ = fs::remove_file(&json_temporary);
             return Err(error);
         }
     };
-    let json_backup = match backup_existing_artifact(&json_path) {
+    let json_backup = match if json_output.placeholder_created {
+        Ok(None)
+    } else {
+        backup_existing_artifact(json_output.path())
+    } {
         Ok(backup) => backup,
         Err(error) => {
             let _ = fs::remove_file(&json_temporary);
@@ -310,13 +314,16 @@ pub fn write_artifacts_atomic(
         }
     };
 
-    if let Err(error) = fs::rename(&json_temporary, &json_path).with_context(|| {
-        format!(
-            "atomically replace JSON artifact {} from {}",
-            json_path.display(),
-            json_temporary.display()
-        )
-    }) {
+    let json_publish_result = json_output.remove_placeholder().and_then(|()| {
+        fs::rename(&json_temporary, json_output.path()).with_context(|| {
+            format!(
+                "atomically replace JSON artifact {} from {}",
+                json_output.path().display(),
+                json_temporary.display()
+            )
+        })
+    });
+    if let Err(error) = json_publish_result {
         let _ = fs::remove_file(&json_temporary);
         let _ = fs::remove_file(&svg_temporary);
         if let Some(backup) = json_backup {
@@ -325,15 +332,18 @@ pub fn write_artifacts_atomic(
         return Err(error);
     }
 
-    if let Err(error) = fs::rename(&svg_temporary, &svg_path).with_context(|| {
-        format!(
-            "atomically replace SVG artifact {} from {}",
-            svg_path.display(),
-            svg_temporary.display()
-        )
-    }) {
+    let svg_publish_result = svg_output.remove_placeholder().and_then(|()| {
+        fs::rename(&svg_temporary, svg_output.path()).with_context(|| {
+            format!(
+                "atomically replace SVG artifact {} from {}",
+                svg_output.path().display(),
+                svg_temporary.display()
+            )
+        })
+    });
+    if let Err(error) = svg_publish_result {
         let _ = fs::remove_file(&svg_temporary);
-        return rollback_json_after_svg_failure(&json_path, json_backup, error);
+        return rollback_json_after_svg_failure(json_output.path(), json_backup, error);
     }
 
     if let Some(backup) = json_backup {
@@ -346,18 +356,74 @@ pub fn write_artifacts_atomic(
 #[derive(Debug)]
 struct ResolvedOutputPath {
     publication: PathBuf,
-    existing_identity: Option<PathBuf>,
 }
 
-fn resolve_distinct_output_paths(json_path: &Path, svg_path: &Path) -> Result<(PathBuf, PathBuf)> {
+struct OutputReservation {
+    publication: PathBuf,
+    placeholder_created: bool,
+}
+
+impl OutputReservation {
+    fn reserve(resolved: ResolvedOutputPath, artifact: &str) -> Result<Self> {
+        let placeholder_created = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&resolved.publication)
+        {
+            Ok(file) => {
+                drop(file);
+                true
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "reserve {artifact} artifact destination {}",
+                        resolved.publication.display()
+                    )
+                });
+            }
+        };
+        Ok(Self {
+            publication: resolved.publication,
+            placeholder_created,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.publication
+    }
+
+    fn remove_placeholder(&mut self) -> Result<()> {
+        if !self.placeholder_created {
+            return Ok(());
+        }
+        fs::remove_file(&self.publication).with_context(|| {
+            format!(
+                "remove reserved artifact placeholder {}",
+                self.publication.display()
+            )
+        })?;
+        self.placeholder_created = false;
+        Ok(())
+    }
+}
+
+impl Drop for OutputReservation {
+    fn drop(&mut self) {
+        if self.placeholder_created && fs::remove_file(&self.publication).is_ok() {
+            self.placeholder_created = false;
+        }
+    }
+}
+
+fn reserve_distinct_output_paths(
+    json_path: &Path,
+    svg_path: &Path,
+) -> Result<(OutputReservation, OutputReservation)> {
     let json = resolve_output_path(json_path, "JSON")?;
     let svg = resolve_output_path(svg_path, "SVG")?;
-    let same_existing_destination = json
-        .existing_identity
-        .as_ref()
-        .zip(svg.existing_identity.as_ref())
-        .is_some_and(|(json, svg)| json == svg);
-    if json.publication == svg.publication || same_existing_destination {
+    if json.publication == svg.publication {
         bail!(
             "JSON output {} and SVG output {} resolve to the same destination {}",
             json_path.display(),
@@ -365,7 +431,29 @@ fn resolve_distinct_output_paths(json_path: &Path, svg_path: &Path) -> Result<(P
             json.publication.display(),
         );
     }
-    Ok((json.publication, svg.publication))
+    let json = OutputReservation::reserve(json, "JSON")?;
+    let svg = OutputReservation::reserve(svg, "SVG")?;
+    let json_identity = fs::canonicalize(json.path()).with_context(|| {
+        format!(
+            "resolve reserved JSON artifact destination {}",
+            json.path().display()
+        )
+    })?;
+    let svg_identity = fs::canonicalize(svg.path()).with_context(|| {
+        format!(
+            "resolve reserved SVG artifact destination {}",
+            svg.path().display()
+        )
+    })?;
+    if json_identity == svg_identity {
+        bail!(
+            "JSON output {} and SVG output {} resolve to the same destination {}",
+            json_path.display(),
+            svg_path.display(),
+            json_identity.display(),
+        );
+    }
+    Ok((json, svg))
 }
 
 fn resolve_output_path(path: &Path, artifact: &str) -> Result<ResolvedOutputPath> {
@@ -381,22 +469,7 @@ fn resolve_output_path(path: &Path, artifact: &str) -> Result<ResolvedOutputPath
     let canonical_parent = fs::canonicalize(parent)
         .with_context(|| format!("resolve {artifact} artifact directory {}", parent.display()))?;
     let publication = canonical_parent.join(file_name);
-    let existing_identity = match fs::canonicalize(&publication) {
-        Ok(identity) => Some(identity),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "resolve existing {artifact} artifact {}",
-                    publication.display()
-                )
-            });
-        }
-    };
-    Ok(ResolvedOutputPath {
-        publication,
-        existing_identity,
-    })
+    Ok(ResolvedOutputPath { publication })
 }
 
 fn stage_artifact(path: &Path, contents: &[u8], artifact: &str) -> Result<std::path::PathBuf> {
@@ -694,6 +767,7 @@ mod tests {
         assert!(svg.contains("commit 0123456789abcdef"), "{svg}");
         assert!(json.ends_with('\n'));
         assert!(svg.ends_with('\n'));
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -841,5 +915,87 @@ mod tests {
         let error = result.unwrap_err();
         assert!(error.to_string().contains("same destination"), "{error:#}");
         assert_eq!(contents, "original artifact");
+    }
+
+    #[test]
+    fn rejects_absent_case_aliases_without_leaving_publication_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "memkafka-case-output-alias-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        let case_probe = directory.join("case-probe");
+        let case_probe_alias = directory.join("CASE-PROBE");
+        fs::write(&case_probe, "probe").unwrap();
+        let case_insensitive = case_probe_alias.exists();
+        fs::remove_file(&case_probe).unwrap();
+        if !case_insensitive {
+            fs::remove_dir(&directory).unwrap();
+            return;
+        }
+
+        let json_output = directory.join("latest.json");
+        let svg_output = directory.join("LATEST.JSON");
+        let report = BenchmarkReport::new(
+            Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0)
+                .single()
+                .unwrap(),
+            "0123456789abcdef".to_owned(),
+            WorkloadConfig::default(),
+            MachineMetadata::fixture(),
+            vec![run(1, 100.0)],
+        )
+        .unwrap();
+
+        let result = super::write_artifacts_atomic(&json_output, &svg_output, &report);
+        let remaining_entries = fs::read_dir(&directory).unwrap().count();
+        fs::remove_dir_all(&directory).unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("same destination"), "{error:#}");
+        assert_eq!(remaining_entries, 0, "publication left files behind");
+    }
+
+    #[test]
+    fn svg_rename_failure_restores_absent_json_and_leaves_no_reservations() {
+        let directory = std::env::temp_dir().join(format!(
+            "memkafka-absent-output-rollback-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        let json_output = directory.join("latest.json");
+        let svg_output = directory.join("throughput.svg");
+        fs::create_dir(&svg_output).unwrap();
+        let report = BenchmarkReport::new(
+            Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0)
+                .single()
+                .unwrap(),
+            "0123456789abcdef".to_owned(),
+            WorkloadConfig::default(),
+            MachineMetadata::fixture(),
+            vec![run(1, 100.0)],
+        )
+        .unwrap();
+
+        let error = super::write_artifacts_atomic(&json_output, &svg_output, &report).unwrap_err();
+        let remaining_entries = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !json_output.exists(),
+            "JSON publication was not rolled back"
+        );
+        assert!(svg_output.is_dir(), "existing SVG destination changed");
+        assert_eq!(
+            remaining_entries,
+            vec![std::ffi::OsString::from("throughput.svg")],
+            "publication left reservation, staging, or backup files"
+        );
+        fs::remove_dir_all(directory).unwrap();
+        assert!(format!("{error:#}").contains("replace SVG artifact"));
     }
 }
