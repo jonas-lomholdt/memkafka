@@ -50,6 +50,7 @@ case "${0##*/}" in
   docker)
     operation=${1:-}
     shift || true
+    printf '%s %s\n' "${operation}" "$*" >>"${FAKE_DOCKER_LOG}"
     case "${operation}" in
       image)
         exit 0

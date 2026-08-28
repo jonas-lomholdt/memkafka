@@ -29,6 +29,7 @@ run_kafbat() {
   env \
     PATH="${FAKE_BIN}:${PATH}" \
     FAKE_CURL_LOG="${TEST_ROOT}/${name}-curl.log" \
+    FAKE_DOCKER_LOG="${TEST_ROOT}/${name}-docker.log" \
     FAKE_LOG_DIR="${log_dir}" \
     FAKE_RECORDER_WRITES="${recorder_writes}" \
     FAKE_REQUIRE_MAX_TIME="${require_max_time}" \
@@ -38,6 +39,43 @@ run_kafbat() {
   set -e
   RUN_LOG_DIR="${log_dir}"
   RUN_OUTPUT="${output}"
+}
+
+test_only_kafbat_uses_the_recorder_listener() {
+  local docker_log
+
+  run_kafbat topology true false
+  if ((RUN_STATUS != 0)); then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'expected Kafbat scenario to succeed while checking listener topology\n' >&2
+    return 1
+  fi
+  docker_log="${TEST_ROOT}/topology-docker.log"
+  if ! grep -F \
+      'KAFKA_ADVERTISED_LISTENERS=PROXY://api-version-proxy:9092,DIRECT://kafka:19094' \
+      "${docker_log}" >/dev/null; then
+    cat "${docker_log}" >&2
+    printf 'Kafka did not advertise distinct proxy and direct listeners\n' >&2
+    return 1
+  fi
+  if ! grep -F 'KAFKA_INTER_BROKER_LISTENER_NAME=DIRECT' \
+      "${docker_log}" >/dev/null; then
+    cat "${docker_log}" >&2
+    printf 'Kafka did not declare the direct inter-broker listener\n' >&2
+    return 1
+  fi
+  if ! grep -F 'KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=api-version-proxy:9092' \
+      "${docker_log}" >/dev/null; then
+    cat "${docker_log}" >&2
+    printf 'Kafbat did not bootstrap through the recorder listener\n' >&2
+    return 1
+  fi
+  if ! grep -F 'MEMKAFKA_BOOTSTRAP_SERVERS=kafka:19094' \
+      "${docker_log}" >/dev/null; then
+    cat "${docker_log}" >&2
+    printf 'setup seed did not bootstrap through the direct Kafka listener\n' >&2
+    return 1
+  fi
 }
 
 test_stale_observations_are_replaced() {
@@ -90,13 +128,17 @@ case "${1:-all}" in
   nonempty)
     test_empty_recorder_evidence_fails_the_scenario
     ;;
+  topology)
+    test_only_kafbat_uses_the_recorder_listener
+    ;;
   all)
+    test_only_kafbat_uses_the_recorder_listener
     test_stale_observations_are_replaced
     test_every_http_request_has_a_maximum_time
     test_empty_recorder_evidence_fails_the_scenario
     ;;
   *)
-    printf 'usage: %s [stale|max-time|nonempty|all]\n' "$0" >&2
+    printf 'usage: %s [stale|max-time|nonempty|topology|all]\n' "$0" >&2
     exit 2
     ;;
 esac

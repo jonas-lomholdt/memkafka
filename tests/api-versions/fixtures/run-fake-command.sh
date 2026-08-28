@@ -5,7 +5,16 @@ case "${0##*/}" in
   cargo)
     printf '%s\n' "${PWD}" >"${FAKE_RUN_CARGO_CWD}"
     printf '%s\n' "$$" >"${FAKE_RUN_CHILD_PID_FILE}"
-    if [[ "${FAKE_RUN_MODE}" == hang ]]; then
+    if [[ "${FAKE_RUN_MODE}" == descendant ]]; then
+      (
+        trap '' INT TERM
+        while true; do
+          sleep 1
+        done
+      ) &
+      printf '%s\n' "$!" >"${FAKE_RUN_DESCENDANT_PID_FILE}"
+    fi
+    if [[ "${FAKE_RUN_MODE}" == hang || "${FAKE_RUN_MODE}" == descendant ]]; then
       trap 'exit 143' TERM
       trap 'exit 130' INT
       while true; do
@@ -45,6 +54,11 @@ case "${0##*/}" in
     ;;
   python3)
     if [[ "${1:-}" == *bounded-command.py ]]; then
+      printf '%s\n' "$$" >"${FAKE_RUN_SUPERVISOR_PID_FILE}"
+      if [[ "$*" == *'--label build standalone recorder'* \
+        && -n "${BASH_ENV:-}" ]]; then
+        kill -TERM "${PPID}"
+      fi
       exec "${FAKE_RUN_REAL_PYTHON3}" "$@"
     fi
     printf '29092\n'

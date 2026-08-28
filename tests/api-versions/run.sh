@@ -56,6 +56,7 @@ DOTNET_WORK_DIRECTORY=""
 ACTIVE_COMMAND_PID=""
 ACTIVE_COMMAND_LABEL=""
 ACTIVE_COMMAND_SIGNAL=TERM
+DEFERRED_SIGNAL=""
 
 usage() {
   printf 'usage: %s --check|--update\n' "$0" >&2
@@ -95,19 +96,56 @@ stop_supervised_command() {
   wait "${process_id}" >/dev/null 2>&1 || true
 }
 
+defer_interrupt() {
+  if [[ -z "${DEFERRED_SIGNAL}" ]]; then
+    DEFERRED_SIGNAL=INT
+  fi
+}
+
+defer_termination() {
+  if [[ -z "${DEFERRED_SIGNAL}" ]]; then
+    DEFERRED_SIGNAL=TERM
+  fi
+}
+
+begin_supervisor_spawn() {
+  DEFERRED_SIGNAL=""
+  trap defer_interrupt INT
+  trap defer_termination TERM
+}
+
+finish_supervisor_spawn() {
+  local pending_signal=""
+
+  trap handle_interrupt INT
+  trap handle_termination TERM
+  pending_signal="${DEFERRED_SIGNAL}"
+  DEFERRED_SIGNAL=""
+  case "${pending_signal}" in
+    INT)
+      handle_interrupt
+      ;;
+    TERM)
+      handle_termination
+      ;;
+  esac
+}
+
 run_bounded() {
   local timeout_seconds=$1
   local label=$2
   local exit_code=0
   shift 2
 
+  ACTIVE_COMMAND_LABEL="${label}"
+  begin_supervisor_spawn
   python3 "${BOUNDED_COMMAND}" \
     --timeout "${timeout_seconds}" \
     --termination-grace "${TERMINATION_GRACE_SECONDS}" \
     --label "${label}" \
     "$@" &
   ACTIVE_COMMAND_PID=$!
-  ACTIVE_COMMAND_LABEL="${label}"
+  finish_supervisor_spawn
   if wait "${ACTIVE_COMMAND_PID}"; then
     exit_code=0
   else
@@ -302,6 +340,8 @@ start_recorder() {
 
   : >"${observation_file}"
   : >"${recorder_log}"
+  RECORDER_SCENARIO="${scenario}"
+  begin_supervisor_spawn
   python3 "${BOUNDED_COMMAND}" \
     --timeout "${RECORDER_LIFETIME_TIMEOUT_SECONDS}" \
     --termination-grace "${TERMINATION_GRACE_SECONDS}" \
@@ -312,7 +352,7 @@ start_recorder() {
     --scenario "${scenario}" \
     --output "${observation_file}" >"${recorder_log}" 2>&1 &
   PROXY_PID=$!
-  RECORDER_SCENARIO="${scenario}"
+  finish_supervisor_spawn
 
   while ((SECONDS < deadline)); do
     ready_address="$(awk -F= '/^READY listen=/{print $2; exit}' "${recorder_log}")"

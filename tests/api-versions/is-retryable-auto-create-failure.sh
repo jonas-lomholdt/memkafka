@@ -19,9 +19,19 @@ case "${SCENARIO}" in
       && grep -F 'failed: UnknownTopicOrPart' "${FAILURE_LOG}" >/dev/null
     ;;
   rskafka-0.6.0)
-    grep -F 'partition client: ServerError { protocol_error: UnknownTopicOrPartition' \
-      "${FAILURE_LOG}" >/dev/null \
-      && grep -F 'request: Topic("rust-delivery-' "${FAILURE_LOG}" >/dev/null
+    failed_test_count="$(grep -Ec '^test .* \.\.\. FAILED$' "${FAILURE_LOG}" || true)"
+    failed_summary_count="$(grep -Ec '^test result: FAILED\.' "${FAILURE_LOG}" || true)"
+    [[ "${failed_test_count}" == 1 ]] \
+      && [[ "${failed_summary_count}" == 1 ]] \
+      && grep -Fx \
+        'test publishes_and_fetches_in_order_then_reads_uncommitted_records_again ... FAILED' \
+        "${FAILURE_LOG}" >/dev/null \
+      && grep -E \
+        '^test result: FAILED\. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in .+$' \
+        "${FAILURE_LOG}" >/dev/null \
+      && grep -E \
+        '^partition client: ServerError \{ protocol_error: UnknownTopicOrPartition, .*request: Topic\("rust-delivery-[^"]+"\),' \
+        "${FAILURE_LOG}" >/dev/null
     ;;
   *)
     exit 1

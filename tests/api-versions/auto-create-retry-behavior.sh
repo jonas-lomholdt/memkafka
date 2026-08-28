@@ -29,6 +29,7 @@ assert_retryable confluent-kafka-2.15.0 confluent-exact.txt
 assert_retryable rskafka-0.6.0 rust-exact.txt
 assert_not_retryable rskafka-0.6.0 rust-timeout.txt
 assert_not_retryable rskafka-0.6.0 rust-wrong-topic.txt
+assert_not_retryable rskafka-0.6.0 rust-second-failure.txt
 assert_not_retryable franz-go-1.21.6 rust-exact.txt
 assert_not_retryable apache-kafka-java-4.3.1 generic-unknown-topic.txt
 assert_not_retryable confluent-kafka-flow-2.13.2 generic-unknown-topic.txt

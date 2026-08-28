@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from typing import Optional
 
@@ -33,33 +35,61 @@ def parse_args(arguments: Sequence[str]) -> argparse.Namespace:
 def main(arguments: Sequence[str]) -> int:
     parsed = parse_args(arguments)
     child: Optional[subprocess.Popen] = None
+    owned_process_group: Optional[int] = None
+    supervised_signals = {signal.SIGINT, signal.SIGTERM}
+    previous_signal_mask = signal.pthread_sigmask(
+        signal.SIG_BLOCK, supervised_signals
+    )
 
-    def stop_child(initial_signal: signal.Signals) -> None:
-        if child is None or child.poll() is not None:
+    def stop_owned_group(initial_signal: signal.Signals) -> None:
+        if (
+            child is None
+            or owned_process_group is None
+            or child.returncode is not None
+        ):
             return
-        child.send_signal(initial_signal)
+
         try:
-            child.wait(timeout=parsed.termination_grace)
-        except subprocess.TimeoutExpired:
+            os.killpg(owned_process_group, initial_signal)
+        except (PermissionError, ProcessLookupError):
+            child.wait()
+            return
+
+        time.sleep(parsed.termination_grace)
+        try:
+            os.killpg(owned_process_group, signal.SIGKILL)
+        except (PermissionError, ProcessLookupError):
+            pass
+        else:
             print(
-                f"command ignored {initial_signal.name} for "
-                f"{parsed.termination_grace:g}s; killing: {parsed.label}",
+                f"owned process group did not exit after {initial_signal.name} "
+                f"for {parsed.termination_grace:g}s; killed: {parsed.label}",
                 file=sys.stderr,
                 flush=True,
             )
-            child.kill()
-            child.wait()
+        child.wait()
 
     def forward_signal(signal_number: int, _frame: object) -> None:
         received_signal = signal.Signals(signal_number)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        stop_child(received_signal)
+        stop_owned_group(received_signal)
         raise SystemExit(128 + signal_number)
 
     signal.signal(signal.SIGINT, forward_signal)
     signal.signal(signal.SIGTERM, forward_signal)
-    child = subprocess.Popen(parsed.command, cwd=parsed.chdir)
+    try:
+        child = subprocess.Popen(
+            parsed.command,
+            cwd=parsed.chdir,
+            start_new_session=True,
+            preexec_fn=lambda: signal.pthread_sigmask(
+                signal.SIG_SETMASK, previous_signal_mask
+            ),
+        )
+        owned_process_group = child.pid
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_signal_mask)
 
     try:
         return child.wait(timeout=parsed.timeout)
@@ -69,7 +99,7 @@ def main(arguments: Sequence[str]) -> int:
             file=sys.stderr,
             flush=True,
         )
-        stop_child(signal.SIGTERM)
+        stop_owned_group(signal.SIGTERM)
         return 124
 
 

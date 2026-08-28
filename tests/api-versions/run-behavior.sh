@@ -6,6 +6,9 @@ readonly SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd "${SCRIPT_DIRECTORY}/../.." && pwd)"
 readonly RUN_SCRIPT="${SCRIPT_DIRECTORY}/run.sh"
 readonly FAKE_COMMAND="${SCRIPT_DIRECTORY}/fixtures/run-fake-command.sh"
+readonly SPAWN_SIGNAL_ENV="${SCRIPT_DIRECTORY}/fixtures/signal-during-spawn.bash"
+readonly BOUNDED_COMMAND="${SCRIPT_DIRECTORY}/bounded-command.py"
+readonly BOUNDED_COMMAND_BEHAVIOR="${SCRIPT_DIRECTORY}/bounded-command-behavior.py"
 readonly REAL_PYTHON3="$(command -v python3)"
 readonly TEST_ROOT="$(mktemp -d)"
 readonly FAKE_BIN="${TEST_ROOT}/bin"
@@ -13,7 +16,10 @@ readonly FAKE_BIN="${TEST_ROOT}/bin"
 RUNNER_PID=""
 RUN_OUTPUT=""
 FAKE_CHILD_PID_FILE=""
+FAKE_DESCENDANT_PID_FILE=""
+FAKE_SUPERVISOR_PID_FILE=""
 FAKE_DOCKER_LOG=""
+SPAWN_SIGNAL_MARKER=""
 
 terminate_exact_pid() {
   local process_id=$1
@@ -40,6 +46,12 @@ cleanup() {
   if [[ -n "${FAKE_CHILD_PID_FILE}" && -s "${FAKE_CHILD_PID_FILE}" ]]; then
     terminate_exact_pid "$(<"${FAKE_CHILD_PID_FILE}")"
   fi
+  if [[ -n "${FAKE_DESCENDANT_PID_FILE}" && -s "${FAKE_DESCENDANT_PID_FILE}" ]]; then
+    terminate_exact_pid "$(<"${FAKE_DESCENDANT_PID_FILE}")"
+  fi
+  if [[ -n "${FAKE_SUPERVISOR_PID_FILE}" && -s "${FAKE_SUPERVISOR_PID_FILE}" ]]; then
+    terminate_exact_pid "$(<"${FAKE_SUPERVISOR_PID_FILE}")"
+  fi
   rm -rf "${TEST_ROOT}"
   return "${exit_code}"
 }
@@ -54,10 +66,15 @@ start_runner() {
   local name=$1
   local fake_mode=$2
   local working_directory=$3
+  local build_timeout=${4:-1}
+  local bash_environment=${5:-}
 
   RUN_OUTPUT="${TEST_ROOT}/${name}.out"
   FAKE_CHILD_PID_FILE="${TEST_ROOT}/${name}-child.pid"
+  FAKE_DESCENDANT_PID_FILE="${TEST_ROOT}/${name}-descendant.pid"
+  FAKE_SUPERVISOR_PID_FILE="${TEST_ROOT}/${name}-supervisor.pid"
   FAKE_DOCKER_LOG="${TEST_ROOT}/${name}-docker.log"
+  SPAWN_SIGNAL_MARKER="${TEST_ROOT}/${name}-spawn-signal"
   (
     cd "${working_directory}"
     exec env \
@@ -65,10 +82,15 @@ start_runner() {
       FAKE_RUN_MODE="${fake_mode}" \
       FAKE_RUN_CARGO_CWD="${TEST_ROOT}/${name}-cargo-cwd" \
       FAKE_RUN_CHILD_PID_FILE="${FAKE_CHILD_PID_FILE}" \
+      FAKE_RUN_DESCENDANT_PID_FILE="${FAKE_DESCENDANT_PID_FILE}" \
+      FAKE_RUN_SUPERVISOR_PID_FILE="${FAKE_SUPERVISOR_PID_FILE}" \
       FAKE_RUN_DOCKER_LOG="${FAKE_DOCKER_LOG}" \
       FAKE_RUN_REAL_PYTHON3="${REAL_PYTHON3}" \
+      FAKE_RUN_SPAWN_SIGNAL_MARKER="${SPAWN_SIGNAL_MARKER}" \
+      BASH_ENV="${bash_environment}" \
       MEMKAFKA_API_VERSION_ARTIFACT_DIR="${TEST_ROOT}/${name}-artifacts" \
-      MEMKAFKA_API_VERSION_RECORDER_BUILD_TIMEOUT_SECONDS=1 \
+      MEMKAFKA_API_VERSION_RECORDER_BUILD_TIMEOUT_SECONDS="${build_timeout}" \
+      MEMKAFKA_API_VERSION_TERMINATION_GRACE_SECONDS=1 \
       "${RUN_SCRIPT}" --check
   ) >"${RUN_OUTPUT}" 2>&1 &
   RUNNER_PID=$!
@@ -118,6 +140,43 @@ assert_child_stopped() {
   fi
 }
 
+assert_pid_file_stopped() {
+  local pid_file=$1
+  local label=$2
+  local process_id
+
+  if [[ ! -s "${pid_file}" ]]; then
+    printf '%s never recorded its PID\n' "${label}" >&2
+    return 1
+  fi
+  process_id="$(<"${pid_file}")"
+  for _ in {1..40}; do
+    if ! kill -0 "${process_id}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  printf '%s left PID %s running\n' "${label}" "${process_id}" >&2
+  return 1
+}
+
+assert_cleanup_and_no_update() {
+  local signal_name=$1
+  local cleanup_count
+
+  cleanup_count="$(grep -c '^network rm ' "${FAKE_DOCKER_LOG}" || true)"
+  if [[ "${cleanup_count}" != 1 ]]; then
+    cat "${FAKE_DOCKER_LOG}" >&2
+    printf '%s performed cleanup %s times, expected once\n' \
+      "${signal_name}" "${cleanup_count}" >&2
+    return 1
+  fi
+  if [[ "$(<"${RUN_OUTPUT}")" == *'Updated Kafka API version evidence'* ]]; then
+    printf 'runner continued into evidence update after %s\n' "${signal_name}" >&2
+    return 1
+  fi
+}
+
 test_build_timeout_is_bounded_and_reaps_child() {
   start_runner timeout hang "${REPOSITORY_ROOT}"
   if ! wait_for_runner_with_deadline 8; then
@@ -142,7 +201,6 @@ test_signal_exits_and_cleans_once() {
   local signal_name=$1
   local expected_exit=$2
   local name="signal-${signal_name}"
-  local cleanup_count
 
   start_runner "${name}" hang "${REPOSITORY_ROOT}"
   if [[ ! -s "${FAKE_CHILD_PID_FILE}" ]]; then
@@ -161,18 +219,60 @@ test_signal_exits_and_cleans_once() {
     printf '%s exited %d, expected %d\n' "${signal_name}" "${RUN_EXIT}" "${expected_exit}" >&2
     return 1
   fi
-  cleanup_count="$(grep -c '^network rm ' "${FAKE_DOCKER_LOG}" || true)"
-  if [[ "${cleanup_count}" != 1 ]]; then
-    cat "${FAKE_DOCKER_LOG}" >&2
-    printf '%s performed cleanup %s times, expected once\n' \
-      "${signal_name}" "${cleanup_count}" >&2
-    return 1
-  fi
-  if [[ "$(<"${RUN_OUTPUT}")" == *'Updated Kafka API version evidence'* ]]; then
-    printf 'runner continued into evidence update after %s\n' "${signal_name}" >&2
-    return 1
-  fi
+  assert_cleanup_and_no_update "${signal_name}"
   assert_child_stopped
+}
+
+test_signal_during_supervisor_spawn_is_deferred_until_owned() {
+  start_runner immediate-signal hang "${REPOSITORY_ROOT}" 30 "${SPAWN_SIGNAL_ENV}"
+  if ! wait_for_runner_with_deadline 8; then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'runner did not exit after TERM during supervisor spawn\n' >&2
+    return 1
+  fi
+  if ((RUN_EXIT != 143)); then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'spawn-time TERM exited %d, expected 143\n' "${RUN_EXIT}" >&2
+    return 1
+  fi
+  if [[ ! -f "${SPAWN_SIGNAL_MARKER}" ]]; then
+    printf 'spawn-time TERM fixture did not reach the ownership gap\n' >&2
+    return 1
+  fi
+  for _ in {1..50}; do
+    [[ -s "${FAKE_SUPERVISOR_PID_FILE}" ]] && break
+    sleep 0.05
+  done
+  assert_pid_file_stopped "${FAKE_SUPERVISOR_PID_FILE}" "spawn-time supervisor"
+  if [[ -s "${FAKE_CHILD_PID_FILE}" ]]; then
+    assert_pid_file_stopped "${FAKE_CHILD_PID_FILE}" "spawn-time command"
+  fi
+  assert_cleanup_and_no_update TERM
+}
+
+test_signal_during_bounded_command_spawn_is_deferred_until_owned() {
+  "${REAL_PYTHON3}" "${BOUNDED_COMMAND_BEHAVIOR}" "${BOUNDED_COMMAND}"
+}
+
+test_timeout_kills_owned_descendants() {
+  start_runner descendant descendant "${REPOSITORY_ROOT}"
+  for _ in {1..50}; do
+    [[ -s "${FAKE_DESCENDANT_PID_FILE}" ]] && break
+    sleep 0.05
+  done
+  if ! wait_for_runner_with_deadline 8; then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'runner did not enforce the descendant timeout\n' >&2
+    return 1
+  fi
+  if ((RUN_EXIT != 124)); then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'descendant timeout exited %d, expected 124\n' "${RUN_EXIT}" >&2
+    return 1
+  fi
+  assert_pid_file_stopped "${FAKE_CHILD_PID_FILE}" "timed-out command"
+  assert_pid_file_stopped "${FAKE_DESCENDANT_PID_FILE}" "timed-out descendant"
+  assert_cleanup_and_no_update timeout
 }
 
 test_invocation_outside_repository_uses_repository_root() {
@@ -203,6 +303,13 @@ case "${1:-all}" in
   int)
     test_signal_exits_and_cleans_once INT 130
     ;;
+  immediate)
+    test_signal_during_bounded_command_spawn_is_deferred_until_owned
+    test_signal_during_supervisor_spawn_is_deferred_until_owned
+    ;;
+  descendant)
+    test_timeout_kills_owned_descendants
+    ;;
   outside)
     test_invocation_outside_repository_uses_repository_root
     ;;
@@ -210,10 +317,13 @@ case "${1:-all}" in
     test_build_timeout_is_bounded_and_reaps_child
     test_signal_exits_and_cleans_once TERM 143
     test_signal_exits_and_cleans_once INT 130
+    test_signal_during_bounded_command_spawn_is_deferred_until_owned
+    test_signal_during_supervisor_spawn_is_deferred_until_owned
+    test_timeout_kills_owned_descendants
     test_invocation_outside_repository_uses_repository_root
     ;;
   *)
-    printf 'usage: %s [timeout|term|int|outside|all]\n' "$0" >&2
+    printf 'usage: %s [timeout|term|int|immediate|descendant|outside|all]\n' "$0" >&2
     exit 2
     ;;
 esac

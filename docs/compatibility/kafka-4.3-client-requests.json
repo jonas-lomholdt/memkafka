@@ -285,67 +285,33 @@
       "version": "1.5.0",
       "requests": [
         {
-          "apiKey": 0,
-          "versions": [
-            13
-          ]
-        },
-        {
           "apiKey": 1,
           "versions": [
-            17,
-            18
+            17
           ]
         },
         {
           "apiKey": 2,
           "versions": [
-            9,
-            11
+            9
           ]
         },
         {
           "apiKey": 3,
           "versions": [
-            12,
-            13
-          ]
-        },
-        {
-          "apiKey": 8,
-          "versions": [
-            10
+            12
           ]
         },
         {
           "apiKey": 9,
           "versions": [
-            9,
-            10
+            9
           ]
         },
         {
           "apiKey": 10,
           "versions": [
             6
-          ]
-        },
-        {
-          "apiKey": 11,
-          "versions": [
-            9
-          ]
-        },
-        {
-          "apiKey": 12,
-          "versions": [
-            4
-          ]
-        },
-        {
-          "apiKey": 14,
-          "versions": [
-            5
           ]
         },
         {
@@ -364,12 +330,6 @@
           "apiKey": 18,
           "versions": [
             4
-          ]
-        },
-        {
-          "apiKey": 19,
-          "versions": [
-            7
           ]
         },
         {
