@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -287,21 +287,21 @@ pub fn write_artifacts_atomic(
     svg_path: &Path,
     report: &BenchmarkReport,
 ) -> Result<()> {
-    ensure_distinct_output_paths(json_path, svg_path)?;
+    let (json_path, svg_path) = resolve_distinct_output_paths(json_path, svg_path)?;
 
     let mut json = serde_json::to_string_pretty(report).context("serialize benchmark report")?;
     json.push('\n');
     let svg = crate::svg::render(report).context("render benchmark SVG")?;
 
-    let json_temporary = stage_artifact(json_path, json.as_bytes(), "JSON")?;
-    let svg_temporary = match stage_artifact(svg_path, svg.as_bytes(), "SVG") {
+    let json_temporary = stage_artifact(&json_path, json.as_bytes(), "JSON")?;
+    let svg_temporary = match stage_artifact(&svg_path, svg.as_bytes(), "SVG") {
         Ok(temporary) => temporary,
         Err(error) => {
             let _ = fs::remove_file(&json_temporary);
             return Err(error);
         }
     };
-    let json_backup = match backup_existing_artifact(json_path) {
+    let json_backup = match backup_existing_artifact(&json_path) {
         Ok(backup) => backup,
         Err(error) => {
             let _ = fs::remove_file(&json_temporary);
@@ -310,7 +310,7 @@ pub fn write_artifacts_atomic(
         }
     };
 
-    if let Err(error) = fs::rename(&json_temporary, json_path).with_context(|| {
+    if let Err(error) = fs::rename(&json_temporary, &json_path).with_context(|| {
         format!(
             "atomically replace JSON artifact {} from {}",
             json_path.display(),
@@ -325,7 +325,7 @@ pub fn write_artifacts_atomic(
         return Err(error);
     }
 
-    if let Err(error) = fs::rename(&svg_temporary, svg_path).with_context(|| {
+    if let Err(error) = fs::rename(&svg_temporary, &svg_path).with_context(|| {
         format!(
             "atomically replace SVG artifact {} from {}",
             svg_path.display(),
@@ -333,7 +333,7 @@ pub fn write_artifacts_atomic(
         )
     }) {
         let _ = fs::remove_file(&svg_temporary);
-        return rollback_json_after_svg_failure(json_path, json_backup, error);
+        return rollback_json_after_svg_failure(&json_path, json_backup, error);
     }
 
     if let Some(backup) = json_backup {
@@ -343,11 +343,60 @@ pub fn write_artifacts_atomic(
     Ok(())
 }
 
-fn ensure_distinct_output_paths(json_path: &Path, svg_path: &Path) -> Result<()> {
-    if json_path == svg_path {
-        bail!("JSON and SVG output paths must be different");
+#[derive(Debug)]
+struct ResolvedOutputPath {
+    publication: PathBuf,
+    existing_identity: Option<PathBuf>,
+}
+
+fn resolve_distinct_output_paths(json_path: &Path, svg_path: &Path) -> Result<(PathBuf, PathBuf)> {
+    let json = resolve_output_path(json_path, "JSON")?;
+    let svg = resolve_output_path(svg_path, "SVG")?;
+    let same_existing_destination = json
+        .existing_identity
+        .as_ref()
+        .zip(svg.existing_identity.as_ref())
+        .is_some_and(|(json, svg)| json == svg);
+    if json.publication == svg.publication || same_existing_destination {
+        bail!(
+            "JSON output {} and SVG output {} resolve to the same destination {}",
+            json_path.display(),
+            svg_path.display(),
+            json.publication.display(),
+        );
     }
-    Ok(())
+    Ok((json.publication, svg.publication))
+}
+
+fn resolve_output_path(path: &Path, artifact: &str) -> Result<ResolvedOutputPath> {
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("output {artifact} path must name a file"))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create {artifact} artifact directory {}", parent.display()))?;
+    let canonical_parent = fs::canonicalize(parent)
+        .with_context(|| format!("resolve {artifact} artifact directory {}", parent.display()))?;
+    let publication = canonical_parent.join(file_name);
+    let existing_identity = match fs::canonicalize(&publication) {
+        Ok(identity) => Some(identity),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "resolve existing {artifact} artifact {}",
+                    publication.display()
+                )
+            });
+        }
+    };
+    Ok(ResolvedOutputPath {
+        publication,
+        existing_identity,
+    })
 }
 
 fn stage_artifact(path: &Path, contents: &[u8], artifact: &str) -> Result<std::path::PathBuf> {
@@ -723,5 +772,74 @@ mod tests {
             .count();
         assert_eq!(temporary_json_files, 0);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_absolute_and_relative_parent_aliases_before_replacement() {
+        let relative_directory = std::path::PathBuf::from(format!(
+            "target/memkafka-relative-output-alias-test-{}",
+            std::process::id()
+        ));
+        let absolute_directory = std::env::current_dir().unwrap().join(&relative_directory);
+        let _ = fs::remove_dir_all(&absolute_directory);
+        fs::create_dir_all(absolute_directory.join("nested")).unwrap();
+        let absolute_output = absolute_directory.join("latest.json");
+        let relative_alias = relative_directory.join("nested/../latest.json");
+        fs::write(&absolute_output, "original artifact").unwrap();
+        let report = BenchmarkReport::new(
+            Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0)
+                .single()
+                .unwrap(),
+            "0123456789abcdef".to_owned(),
+            WorkloadConfig::default(),
+            MachineMetadata::fixture(),
+            vec![run(1, 100.0)],
+        )
+        .unwrap();
+
+        let result = super::write_artifacts_atomic(&absolute_output, &relative_alias, &report);
+        let contents = fs::read_to_string(&absolute_output).unwrap();
+        fs::remove_dir_all(&absolute_directory).unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("same destination"), "{error:#}");
+        assert_eq!(contents, "original artifact");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_parent_alias_before_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let directory = std::env::temp_dir().join(format!(
+            "memkafka-symlinked-output-parent-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let actual_parent = directory.join("actual");
+        let parent_alias = directory.join("alias");
+        fs::create_dir_all(&actual_parent).unwrap();
+        symlink(&actual_parent, &parent_alias).unwrap();
+        let actual_output = actual_parent.join("latest.json");
+        let aliased_output = parent_alias.join("latest.json");
+        fs::write(&actual_output, "original artifact").unwrap();
+        let report = BenchmarkReport::new(
+            Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0)
+                .single()
+                .unwrap(),
+            "0123456789abcdef".to_owned(),
+            WorkloadConfig::default(),
+            MachineMetadata::fixture(),
+            vec![run(1, 100.0)],
+        )
+        .unwrap();
+
+        let result = super::write_artifacts_atomic(&actual_output, &aliased_output, &report);
+        let contents = fs::read_to_string(&actual_output).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("same destination"), "{error:#}");
+        assert_eq!(contents, "original artifact");
     }
 }

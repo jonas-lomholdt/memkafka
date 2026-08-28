@@ -12,6 +12,9 @@ const ROW_HEIGHT: f64 = 42.0;
 const PANEL_HEADER_HEIGHT: f64 = 58.0;
 const PANEL_GAP: f64 = 28.0;
 const FOOTER_HEIGHT: f64 = 118.0;
+const VALUE_LABEL_MAX_CHARACTERS: usize = 36;
+const MEDIAN_LABEL_MAX_CHARACTERS: usize = 40;
+const FOOTER_MAX_CHARACTERS: usize = 132;
 
 pub fn render(report: &BenchmarkReport) -> Result<String> {
     ensure!(
@@ -97,19 +100,25 @@ pub fn render(report: &BenchmarkReport) -> Result<String> {
         .map(|run| run.peak_rss_bytes)
         .max()
         .unwrap_or(0);
-    let machine = format!(
-        "{} · {} {} · {} · {} logical cores",
-        report.machine.cpu,
-        report.machine.operating_system,
-        report.machine.operating_system_version,
-        report.machine.architecture,
-        report.machine.logical_cores,
+    let machine = truncate_label(
+        &format!(
+            "{} · {} {} · {} · {} logical cores",
+            report.machine.cpu,
+            report.machine.operating_system,
+            report.machine.operating_system_version,
+            report.machine.architecture,
+            report.machine.logical_cores,
+        ),
+        FOOTER_MAX_CHARACTERS,
     );
-    let identity = format!(
-        "Peak broker RSS {} GiB · commit {} · generated {}",
-        format_rate(peak_rss as f64 / 1024.0_f64.powi(3)),
-        report.commit,
-        report.generated_at.to_rfc3339(),
+    let identity = truncate_label(
+        &format!(
+            "Peak broker RSS {} GiB · commit {} · generated {}",
+            format_rate(peak_rss as f64 / 1024.0_f64.powi(3)),
+            report.commit,
+            report.generated_at.to_rfc3339(),
+        ),
+        FOOTER_MAX_CHARACTERS,
     );
     writeln!(
         svg,
@@ -167,6 +176,14 @@ fn render_panel(
         let rate = finite_nonnegative((panel.rate)(run));
         let gib_rate = finite_nonnegative((panel.gib_rate)(run));
         let bar_width = rate / scale * PLOT_WIDTH;
+        let value_label = truncate_label(
+            &format!(
+                "{} records/s · {} GiB/s",
+                format_integer(rate.round() as u64),
+                format_rate(gib_rate),
+            ),
+            VALUE_LABEL_MAX_CHARACTERS,
+        );
         writeln!(
             svg,
             "  <text class=\"run-label\" x=\"48\" y=\"{:.1}\">Run {}</text>",
@@ -180,17 +197,24 @@ fn render_panel(
         )?;
         writeln!(
             svg,
-            "  <text class=\"value-label\" x=\"{:.1}\" y=\"{:.1}\">{} records/s · {} GiB/s</text>",
+            "  <text class=\"value-label\" x=\"{:.1}\" y=\"{:.1}\">{}</text>",
             LEFT + PLOT_WIDTH + 12.0,
             bar_y + 17.0,
-            format_integer(rate.round() as u64),
-            format_rate(gib_rate),
+            escape_xml(&value_label),
         )?;
     }
 
     let median_rate = finite_nonnegative(panel.median_rate);
     let median_gib_rate = finite_nonnegative(panel.median_gib_rate);
     let median_x = LEFT + median_rate / scale * PLOT_WIDTH;
+    let median_label = truncate_label(
+        &format!(
+            "Median {} records/s · {} GiB/s",
+            format_integer(median_rate.round() as u64),
+            format_rate(median_gib_rate),
+        ),
+        MEDIAN_LABEL_MAX_CHARACTERS,
+    );
     writeln!(
         svg,
         "  <line class=\"median-guide\" x1=\"{median_x:.1}\" x2=\"{median_x:.1}\" y1=\"{:.1}\" y2=\"{plot_bottom:.1}\"/>",
@@ -198,11 +222,10 @@ fn render_panel(
     )?;
     writeln!(
         svg,
-        "  <text class=\"median-label\" x=\"{:.1}\" y=\"{:.1}\">Median {} records/s · {} GiB/s</text>",
+        "  <text class=\"median-label\" x=\"{:.1}\" y=\"{:.1}\">{}</text>",
         (median_x + 6.0).min(WIDTH - 300.0),
         plot_top - 12.0,
-        format_integer(median_rate.round() as u64),
-        format_rate(median_gib_rate),
+        escape_xml(&median_label),
     )?;
     Ok(())
 }
@@ -249,6 +272,18 @@ fn format_rate(value: f64) -> String {
     format!("{:.3}", finite_nonnegative(value))
 }
 
+fn truncate_label(value: &str, maximum_characters: usize) -> String {
+    if value.chars().count() <= maximum_characters {
+        return value.to_owned();
+    }
+    let mut truncated = value
+        .chars()
+        .take(maximum_characters.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
 fn escape_xml(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -258,10 +293,18 @@ fn escape_xml(value: &str) -> String {
             '>' => escaped.push_str("&gt;"),
             '"' => escaped.push_str("&quot;"),
             '\'' => escaped.push_str("&apos;"),
-            _ => escaped.push(character),
+            _ if is_xml_1_0_character(character) => escaped.push(character),
+            _ => escaped.push_str("&#xFFFD;"),
         }
     }
     escaped
+}
+
+fn is_xml_1_0_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'
+    )
 }
 
 #[cfg(test)]
@@ -364,6 +407,75 @@ mod tests {
 
         assert!(svg.contains("CPU &amp;&lt;&gt;&quot;&apos;"), "{svg}");
         assert!(!svg.contains("CPU &<>\"'"), "{svg}");
+    }
+
+    #[test]
+    fn sanitizes_xml_1_0_invalid_characters() {
+        let mut report = report(&[(100.0, 90.0), (100.0, 90.0), (100.0, 90.0)]);
+        report.machine.cpu = "CPU \0\u{b}\u{1f}\u{fffe}\u{ffff} tail".to_owned();
+
+        let svg = super::render(&report).unwrap();
+
+        assert!(
+            svg.contains("CPU &#xFFFD;&#xFFFD;&#xFFFD;&#xFFFD;&#xFFFD; tail"),
+            "{svg}"
+        );
+        assert!(svg.chars().all(|character| matches!(
+            character,
+            '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'
+        )));
+    }
+
+    #[test]
+    fn truncates_long_dynamic_labels_to_their_viewbox_columns() {
+        let mut report = report(&[(100.0, 90.0), (100.0, 90.0), (100.0, 90.0)]);
+        report.machine.cpu = "C".repeat(500);
+        report.machine.operating_system = "O".repeat(500);
+        report.machine.operating_system_version = "V".repeat(500);
+        report.machine.architecture = "A".repeat(500);
+        report.commit = "f".repeat(500);
+        for run in &mut report.runs {
+            run.producer_records_per_second = f64::MAX;
+            run.producer_gib_per_second = f64::MAX;
+            run.end_to_end_records_per_second = f64::MAX;
+            run.end_to_end_gib_per_second = f64::MAX;
+        }
+        report.median.producer_records_per_second = f64::MAX;
+        report.median.producer_gib_per_second = f64::MAX;
+        report.median.end_to_end_records_per_second = f64::MAX;
+        report.median.end_to_end_gib_per_second = f64::MAX;
+
+        let svg = super::render(&report).unwrap();
+        let text_for_class = |class: &str| {
+            svg.lines()
+                .filter(move |line| line.contains(&format!("class=\"{class}\"")))
+                .map(|line| {
+                    line.split_once('>')
+                        .and_then(|(_, content)| content.rsplit_once('<'))
+                        .map(|(content, _)| content)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            text_for_class("value-label")
+                .iter()
+                .all(|label| label.chars().count() <= 36)
+        );
+        assert!(
+            text_for_class("median-label")
+                .iter()
+                .all(|label| label.chars().count() <= 40)
+        );
+        assert!(
+            text_for_class("footer")
+                .iter()
+                .all(|label| label.chars().count() <= 132)
+        );
+        assert!(svg.matches('…').count() >= 4, "{svg}");
+        assert!(!svg.contains(&"C".repeat(500)), "{svg}");
+        assert!(!svg.contains(&"f".repeat(500)), "{svg}");
     }
 
     #[test]
