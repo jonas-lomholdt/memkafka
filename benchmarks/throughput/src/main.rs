@@ -74,6 +74,104 @@ impl LocalSignals {
     }
 }
 
+#[derive(Clone)]
+struct InterruptionLatch {
+    sender: tokio::sync::watch::Sender<Option<&'static str>>,
+}
+
+impl InterruptionLatch {
+    fn new() -> (Self, tokio::sync::watch::Receiver<Option<&'static str>>) {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        (Self { sender }, receiver)
+    }
+
+    fn record(&self, signal: &'static str) {
+        self.sender.send_if_modified(|latched| {
+            if latched.is_some() {
+                false
+            } else {
+                *latched = Some(signal);
+                true
+            }
+        });
+    }
+}
+
+struct SignalMonitor {
+    receiver: tokio::sync::watch::Receiver<Option<&'static str>>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+impl SignalMonitor {
+    fn start() -> Result<Self> {
+        let mut signals = LocalSignals::new().context("install local benchmark signal handlers")?;
+        let (latch, receiver) = InterruptionLatch::new();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                interruption = signals.receive() => {
+                    latch.record(interruption?);
+                    let _ = (&mut stopped).await;
+                    Ok(())
+                }
+                _ = &mut stopped => Ok(()),
+            }
+        });
+        Ok(Self {
+            receiver,
+            stop: Some(stop),
+            task: Some(task),
+        })
+    }
+
+    async fn wait_for_interruption(&mut self) -> Result<&'static str> {
+        loop {
+            if let Some(signal) = *self.receiver.borrow() {
+                return Ok(signal);
+            }
+            self.receiver
+                .changed()
+                .await
+                .context("local signal monitor stopped before interruption")?;
+        }
+    }
+
+    async fn latched_after_yield(&self) -> Option<&'static str> {
+        tokio::task::yield_now().await;
+        *self.receiver.borrow()
+    }
+
+    async fn checkpoint(&self, checkpoint: &str) -> Result<()> {
+        tokio::task::yield_now().await;
+        ensure_not_interrupted(&self.receiver, checkpoint)
+    }
+
+    async fn stop(mut self, require_success_gate: bool) -> Result<()> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.await.context("join local signal monitor")??;
+        }
+        if require_success_gate {
+            ensure_not_interrupted(&self.receiver, "final local lifecycle gate")?;
+        }
+        Ok(())
+    }
+}
+
+fn ensure_not_interrupted(
+    receiver: &tokio::sync::watch::Receiver<Option<&'static str>>,
+    checkpoint: &str,
+) -> Result<()> {
+    if let Some(signal) = *receiver.borrow() {
+        anyhow::bail!("benchmark interrupted by {signal} at {checkpoint}");
+    }
+    Ok(())
+}
+
 enum ActiveRunOutcome {
     Workload(Result<workload::RunMetrics>),
     Interrupted(Result<&'static str>),
@@ -153,9 +251,18 @@ async fn run_external(args: &Args, bootstrap_server: &str, config: &WorkloadConf
 }
 
 async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
-    // Install process signal handlers only for local mode and before any child
-    // exists. External mode retains the operating system's normal signal behavior.
-    let mut signals = LocalSignals::new().context("install local benchmark signal handlers")?;
+    let mut monitor = SignalMonitor::start()?;
+    let result = run_local_inner(args, config, &mut monitor).await;
+    let require_success_gate = result.is_ok();
+    let monitor_result = monitor.stop(require_success_gate).await;
+    combine_local_and_monitor(result, monitor_result)
+}
+
+async fn run_local_inner(
+    args: &Args,
+    config: WorkloadConfig,
+    monitor: &mut SignalMonitor,
+) -> Result<()> {
     if !args.skip_memory_check {
         report::ensure_available_memory(&config, report::available_memory())
             .context("benchmark memory preflight")?;
@@ -163,6 +270,7 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
 
     let mut runs = Vec::with_capacity(args.runs);
     for run_number in 1..=args.runs {
+        monitor.checkpoint("before fresh broker spawn").await?;
         let mut broker = BrokerGuard::start(&args.broker_binary).with_context(|| {
             format!(
                 "run {run_number}/{}: start fresh broker {}",
@@ -178,40 +286,65 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
             args.runs,
             log_path.display()
         );
+        if let Some(signal) = monitor.latched_after_yield().await {
+            let shutdown_result = broker.stop().with_context(|| {
+                format!(
+                    "clean up interrupted run {run_number}/{} broker PID {pid} after startup (log: {})",
+                    args.runs,
+                    log_path.display()
+                )
+            });
+            return interruption_result(Ok(signal), shutdown_result, pid, &log_path);
+        }
 
         let outcome = tokio::select! {
+            biased;
+            interruption = monitor.wait_for_interruption() => {
+                ActiveRunOutcome::Interrupted(interruption)
+            }
             result = workload::run(broker.bootstrap_server(), &topic, &config) => {
                 ActiveRunOutcome::Workload(result)
             }
-            interruption = signals.receive() => ActiveRunOutcome::Interrupted(interruption),
         };
-        let metrics =
-            match outcome {
-                ActiveRunOutcome::Workload(Ok(metrics)) => metrics,
-                ActiveRunOutcome::Workload(Err(error)) => {
-                    let shutdown_result = broker.stop();
-                    let error = error.context(format!(
-                    "run {run_number}/{} failed for topic {topic} with broker PID {pid} (log: {})",
-                    args.runs,
-                    log_path.display()
-                ));
-                    return match shutdown_result {
-                        Ok(()) => Err(error),
-                        Err(shutdown_error) => Err(error
-                            .context(format!("broker cleanup also failed: {shutdown_error:#}"))),
-                    };
-                }
-                ActiveRunOutcome::Interrupted(interruption) => {
-                    let shutdown_result = broker.stop().with_context(|| {
+        let post_selection_interruption = monitor.latched_after_yield().await;
+        let metrics = match (post_selection_interruption, outcome) {
+            (Some(signal), _) => {
+                let shutdown_result = broker.stop().with_context(|| {
                         format!(
-                            "clean up interrupted run {run_number}/{} broker PID {pid} (log: {})",
+                            "clean up interrupted run {run_number}/{} broker PID {pid} after workload selection (log: {})",
                             args.runs,
                             log_path.display()
                         )
                     });
-                    return interruption_result(interruption, shutdown_result, pid, &log_path);
-                }
-            };
+                return interruption_result(Ok(signal), shutdown_result, pid, &log_path);
+            }
+            (None, ActiveRunOutcome::Workload(Ok(metrics))) => metrics,
+            (None, ActiveRunOutcome::Workload(Err(error))) => {
+                let shutdown_result = broker.stop();
+                let error = error.context(format!(
+                    "run {run_number}/{} failed for topic {topic} with broker PID {pid} (log: {})",
+                    args.runs,
+                    log_path.display()
+                ));
+                return match shutdown_result {
+                    Ok(()) => Err(error),
+                    Err(shutdown_error) => {
+                        Err(error
+                            .context(format!("broker cleanup also failed: {shutdown_error:#}")))
+                    }
+                };
+            }
+            (None, ActiveRunOutcome::Interrupted(interruption)) => {
+                let shutdown_result = broker.stop().with_context(|| {
+                    format!(
+                        "clean up interrupted run {run_number}/{} broker PID {pid} (log: {})",
+                        args.runs,
+                        log_path.display()
+                    )
+                });
+                return interruption_result(interruption, shutdown_result, pid, &log_path);
+            }
+        };
 
         let peak_result = broker.peak_rss_bytes().with_context(|| {
             format!(
@@ -227,6 +360,10 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
                 log_path.display()
             )
         });
+        if let Some(signal) = monitor.latched_after_yield().await {
+            let cleanup_result = combine_peak_and_shutdown(peak_result, shutdown_result).map(drop);
+            return interruption_result(Ok(signal), cleanup_result, pid, &log_path);
+        }
         let peak_rss_bytes = combine_peak_and_shutdown(peak_result, shutdown_result)?;
 
         let run = BenchmarkRun::new(run_number, topic, pid, metrics, peak_rss_bytes);
@@ -240,9 +377,12 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
         runs.push(run);
     }
 
+    monitor.checkpoint("before report aggregation").await?;
     let report = BenchmarkReport::capture(config, runs).context("aggregate benchmark report")?;
+    monitor.checkpoint("before report writing").await?;
     report::write_json_atomic(&args.output_json, &report)
         .with_context(|| format!("write benchmark report to {}", args.output_json.display()))?;
+    monitor.checkpoint("before local benchmark success").await?;
     eprintln!(
         "median: producer {:.0} records/s, end-to-end {:.0} records/s; report {}",
         report.median.producer_records_per_second,
@@ -250,6 +390,17 @@ async fn run_local(args: &Args, config: WorkloadConfig) -> Result<()> {
         args.output_json.display(),
     );
     Ok(())
+}
+
+fn combine_local_and_monitor(result: Result<()>, monitor_result: Result<()>) -> Result<()> {
+    match (result, monitor_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(monitor_error)) => Err(error.context(format!(
+            "signal monitor shutdown also failed: {monitor_error:#}"
+        ))),
+    }
 }
 
 fn interruption_result(
@@ -300,7 +451,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Args, combine_peak_and_shutdown};
+    use super::{Args, InterruptionLatch, combine_peak_and_shutdown, ensure_not_interrupted};
 
     #[test]
     fn parses_the_external_broker_workload_flags() {
@@ -366,5 +517,27 @@ mod tests {
 
         assert!(message.contains("RSS sampler failed"), "{message}");
         assert!(message.contains("broker shutdown failed"), "{message}");
+    }
+
+    #[test]
+    fn latches_only_the_first_local_interruption() {
+        let (latch, receiver) = InterruptionLatch::new();
+
+        latch.record("SIGINT");
+        latch.record("SIGTERM");
+
+        assert_eq!(*receiver.borrow(), Some("SIGINT"));
+    }
+
+    #[test]
+    fn pre_success_gate_rejects_a_latched_interruption() {
+        let (latch, receiver) = InterruptionLatch::new();
+        latch.record("SIGTERM");
+
+        let error = ensure_not_interrupted(&receiver, "before success").unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("SIGTERM"), "{message}");
+        assert!(message.contains("before success"), "{message}");
     }
 }
