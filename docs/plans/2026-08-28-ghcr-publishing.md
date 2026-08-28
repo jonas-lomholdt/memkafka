@@ -160,11 +160,13 @@ The publish job must not run when verification fails.
 
 - [ ] **Step 2: Write the failing publish-ref behavior test**
 
-Create `tests/publish-ref-behavior.sh` to exercise the shared publish-context resolver with literal cases. Require:
+Create `tests/publish-ref-behavior.sh` to exercise the shared publish-context resolver through its GitHub multiline `tags` output with literal cases. Parse that output exactly as a workflow step would receive it, resolve the small Docker metadata-action rule set used here, and require:
 
-- `refs/heads/main` => `channel=edge`;
-- `refs/tags/v1.2.3` => `channel=release`, `version=1.2.3`, `major_minor=1.2`, `major=1`;
+- `refs/heads/main` => exactly `edge` and `sha-0123456`;
+- `refs/tags/v1.2.3` => exactly `1.2.3`, `1.2`, `1`, and `latest`;
 - rejection for `refs/tags/v01.2.3`, `refs/tags/v1.2.3-rc1`, and `refs/heads/release`.
+
+This must prove no cross-channel tags leak between the `main` and release publications.
 
 Run it before the helper exists and expect a failure about the missing resolver script.
 
@@ -175,7 +177,7 @@ Create `scripts/ci/resolve-publish-context.sh` and run it before registry login.
 - `refs/heads/main`; or
 - `refs/tags/vMAJOR.MINOR.PATCH`, where each numeric component is `0` or a non-zero digit followed by digits.
 
-Reject every other ref. For `main`, emit `channel=edge`. For stable tags, emit `channel=release`, `version`, `major_minor`, and `major`. This prevents `latest` from being moved by `alpha`, `beta`, `rc`, or leading-zero tags even though the workflow glob is broad.
+Reject every other ref. Emit one GitHub multiline output named `tags` whose value is the complete newline-delimited `docker/metadata-action` rule list for the accepted ref. For `main`, emit raw `edge` plus short-SHA rules. For stable tags, emit raw rules for patch, minor, major, and `latest`. This keeps the publication contract in one place and prevents `latest` from being moved by `alpha`, `beta`, `rc`, or leading-zero tags even though the workflow glob is broad.
 
 In `.github/workflows/publish.yml`, replace the existing release-tag validation step with:
 
@@ -203,13 +205,7 @@ Use current major releases from the verified Docker publisher:
     images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
     flavor: |
       latest=false
-    tags: |
-      type=raw,value=edge,enable=${{ steps.publish_context.outputs.channel == 'edge' }}
-      type=sha,prefix=sha-,format=short,enable=${{ steps.publish_context.outputs.channel == 'edge' }}
-      type=raw,value=${{ steps.publish_context.outputs.version }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
-      type=raw,value=${{ steps.publish_context.outputs.major_minor }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
-      type=raw,value=${{ steps.publish_context.outputs.major }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
-      type=raw,value=latest,enable=${{ steps.publish_context.outputs.channel == 'release' }}
+    tags: ${{ steps.publish_context.outputs.tags }}
 - uses: docker/build-push-action@v7
   with:
     context: .
@@ -221,7 +217,7 @@ Use current major releases from the verified Docker publisher:
     sbom: true
 ```
 
-The metadata action supplies the dynamic revision/version/created labels. The static Dockerfile labels preserve source/description/license. `main` must produce exactly `edge` and `sha-<short-commit>`, without `latest`. A release must produce exactly patch, minor, major, and `latest`, without `edge` or SHA tags.
+The metadata action supplies the dynamic revision/version/created labels. The static Dockerfile labels preserve source/description/license. The resolver output must remain the single source of truth: `main` produces exactly `edge` and `sha-<short-commit>`, without `latest`, and a release produces exactly patch, minor, major, and `latest`, without `edge` or SHA tags.
 
 - [ ] **Step 5: Add anonymous-pull documentation**
 

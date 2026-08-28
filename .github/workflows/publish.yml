@@ -70,13 +70,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=false
-          tags: |
-            type=raw,value=edge,enable=${{ steps.publish_context.outputs.channel == 'edge' }}
-            type=sha,prefix=sha-,format=short,enable=${{ steps.publish_context.outputs.channel == 'edge' }}
-            type=raw,value=${{ steps.publish_context.outputs.version }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
-            type=raw,value=${{ steps.publish_context.outputs.major_minor }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
-            type=raw,value=${{ steps.publish_context.outputs.major }},enable=${{ steps.publish_context.outputs.channel == 'release' }}
-            type=raw,value=latest,enable=${{ steps.publish_context.outputs.channel == 'release' }}
+          tags: ${{ steps.publish_context.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/jonas-lomholdt/memkafka
             org.opencontainers.image.description=Fast, single-binary, in-memory Kafka-compatible broker for development and integration tests
