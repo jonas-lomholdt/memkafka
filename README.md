@@ -139,3 +139,17 @@ See the [v0.1 design specification](docs/2026-08-26-memkafka-design.md) for the 
 ## License
 
 MemKafka is open source under the [MIT License](LICENSE). Copyright © 2026 Jonas Lomholdt.
+
+## Throughput benchmark
+
+![MemKafka throughput benchmark](docs/benchmarks/throughput.svg)
+
+For the checked-in 1,000,000 × 4,096-byte workload, the median producer rate is exactly **59,279.651315284114 records/s**, the median end-to-end rate is exactly **59,278.700625094956 records/s**, and peak broker RSS is **4,257,611,776 bytes (3.965 GiB)**. This sample was measured on an Apple M1 Pro running Darwin 26.6 at commit `c504630cbac68f845c1d8e724a4b4e6ef563a1ee`; see the [raw JSON](docs/benchmarks/latest.json).
+
+> **Machine-specific sample, not a universal performance guarantee.** Results vary with hardware, operating system, and system load.
+
+Rerun the same benchmark from the repository root:
+
+```bash
+benchmarks/throughput/run.sh
+```

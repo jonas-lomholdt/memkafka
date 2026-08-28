@@ -19,6 +19,24 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
 
+      - name: Check throughput benchmark formatting
+        run: >-
+          cargo fmt
+          --manifest-path benchmarks/throughput/Cargo.toml
+          -- --check
+
+      - name: Run Clippy on throughput benchmark
+        run: >-
+          cargo clippy --locked
+          --manifest-path benchmarks/throughput/Cargo.toml
+          --all-targets
+          -- -D warnings
+
+      - name: Run throughput benchmark unit tests
+        run: >-
+          cargo test --locked
+          --manifest-path benchmarks/throughput/Cargo.toml
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -135,6 +153,17 @@ jobs:
           MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
         working-directory: tests/go-client
         run: go test -count=1 -mod=readonly ./...
+
+      - name: Run throughput benchmark correctness smoke
+        run: |
+          cargo run --release --locked --manifest-path benchmarks/throughput/Cargo.toml -- \
+            --bootstrap-server 127.0.0.1:9092 \
+            --messages 10000 \
+            --payload-bytes 4096 \
+            --partitions 8 \
+            --batch-records 256 \
+            --output-json /tmp/memkafka-throughput-smoke.json
+          jq -e '.messages == 10000 and .valueBytes == 40960000' /tmp/memkafka-throughput-smoke.json
 
       - name: Build Kafbat probe producer image
         run: >-
