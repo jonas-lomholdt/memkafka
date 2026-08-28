@@ -141,6 +141,8 @@ MemKafka supports non-transactional idempotent production: it allocates process-
 
 The broker advertises `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, `CreateTopics 2-6`, `FindCoordinator 0-2`, `JoinGroup 0-5`, `SyncGroup 0-3`, `Heartbeat 0-3`, `LeaveGroup 0-3`, `OffsetCommit 2-7`, `OffsetFetch 1-5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, and read-only `DescribeConfigs 1`.
 
+See the [Kafka API parity roadmap](docs/kafka-api-parity-roadmap.md) for the Kafka 4.3 gap matrix and recommended execution order.
+
 CI runs the Confluent Kafka + Avro suite against both the native binary and its Docker image, runs the pinned Confluent.Kafka 2.13.2 flow-profile runner against a native broker in forced-topic mode, then runs separate Java 25, Rust, Go 1.27, and Kafbat UI suites against the image.
 
 It excludes persistence, replication, transactional IDs, transactional and control batches, transactions, exactly-once semantics, producer epoch recovery, authentication, TLS, retention, topic deletion, Protobuf, and JSON Schema.
