@@ -143,6 +143,8 @@ MemKafka supports non-transactional idempotent production: it allocates process-
 
 The broker advertises `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, `CreateTopics 2-6`, `FindCoordinator 0-2`, `JoinGroup 0-5`, `SyncGroup 0-3`, `Heartbeat 0-3`, `LeaveGroup 0-3`, `OffsetCommit 2-7`, `OffsetFetch 1-5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, and read-only `DescribeConfigs 1`.
 
+MemKafka targets Apache Kafka 4.3 and the pinned current-client matrix, not legacy Kafka clients. The planned support window for each API runs from the lowest wire version actually negotiated by those clients through Kafka 4.3's latest version for that API. Kafka requires this window to be contiguous. Versions below the evidence-backed floor are not compatibility targets, and client upgrades may move the floor upward but never downward merely to admit an older client. The separate Confluent.Kafka 2.13.2 flow profile is an explicit current application-compatibility floor, not a promise to support older releases.
+
 See the [Kafka API parity roadmap](docs/kafka-api-parity-roadmap.md) for the Kafka 4.3 gap matrix and recommended execution order.
 
 CI runs the Confluent Kafka + Avro suite against both the native binary and its Docker image, runs the pinned Confluent.Kafka 2.13.2 flow-profile runner against a native broker in forced-topic mode, then runs separate Java 25, Rust, Go 1.27, and Kafbat UI suites against the image.

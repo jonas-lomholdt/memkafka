@@ -40,6 +40,7 @@ The target is therefore **client-visible behavior**, measured with unmodified cl
 ### Quick navigation
 
 - [What parity means](#what-parity-means)
+- [Protocol version support policy](#protocol-version-support-policy)
 - [Current implementation inventory](#current-implementation-inventory)
 - [Complete Kafka 4.3 stable API-key matrix](#complete-kafka-43-stable-api-key-matrix)
 - [Priority roadmap](#priority-roadmap)
@@ -73,6 +74,24 @@ Parity explicitly does **not** include:
 A plausible no-op is not parity. If `DeleteTopics` returns success but Metadata still exposes the topic, if `EndTxn` succeeds but `read_committed` sees aborted records, or if an alter operation reports success without an observable state change, a client can detect the mismatch. MemKafka must implement the semantic effect or return a clear Kafka error.
 
 The [Kafka 4.3 protocol](https://kafka.apache.org/43/design/protocol) defines wire shapes and version ranges. The [Kafka 4.3 Admin API](https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/admin/Admin.html) is a useful client-visible map of management and inspection workflows.
+
+## Protocol version support policy
+
+MemKafka targets one current Kafka baseline, presently Apache Kafka 4.3. It does not preserve older wire versions merely for legacy Kafka releases or clients.
+
+Each API has one contiguous supported window because Kafka's `ApiVersions` response can advertise only a minimum and maximum version:
+
+- the **ceiling** is the latest stable request version for that API in the pinned Kafka baseline;
+- the **floor** is the lowest version observed from the pinned current-client matrix while exercising that API;
+- every version between the floor and ceiling is supported and tested;
+- versions below the floor are rejected and are not compatibility targets;
+- a floor may move upward when all pinned clients move forward, but it does not move downward to admit an older client.
+
+The current client floor is Confluent.Kafka 2.15.0, the separate Confluent.Kafka 2.13.2 flow profile, Apache Kafka Java 4.3.1, rskafka 0.6.0, franz-go 1.21.6, and Kafbat UI 1.5.0. These are scenario-specific pins, not promises that every feature in each client is supported. Adding or replacing a client requires recording the API versions it negotiates in its black-box scenarios. A client update that asks for a lower version than the recorded floor fails compatibility review instead of silently expanding the support window downward.
+
+Before a new API is advertised, its named current-client or tool scenario runs against the pinned Kafka broker to establish the floor. An API without such evidence remains unadvertised. Existing ranges are implementation inventory, not permanent compatibility promises; the first capability-registry cut records actual negotiation and narrows any unnecessarily low floors.
+
+Kafka 4.3's complete version ranges remain in the matrix as protocol reference data. Versions below MemKafka's evidence-backed floor do not prevent an API from reaching `implemented`; missing the Kafka 4.3 ceiling or any version inside the supported window does.
 
 ## Current implementation inventory
 
@@ -122,13 +141,13 @@ This matrix contains all 77 entries in the stable Api Keys table from the [offic
 
 Status means:
 
-- `implemented`: full Kafka 4.3 request range and target behavior are covered;
+- `implemented`: the evidence-backed client floor through the Kafka 4.3 ceiling and the target behavior are covered;
 - `partial`: advertised today, but version or semantic parity is incomplete;
 - `missing`: not advertised or dispatched.
 
 No API currently meets the strict `implemented` definition; the 17 advertised keys are `partial` and the other 60 are `missing`.
 
-`kafka-protocol = 0.18.0` is confirmed in `Cargo.toml`. Its installed generated sources omit Streams keys 88 and 89 entirely (`†`). Concrete top-level request/response `Message::VERSIONS` do not cover Kafka 4.3's full stable range for ListOffsets, OffsetCommit, OffsetFetch, InitProducerId, WriteTxnMarkers, DescribeLogDirs, ShareFetch, ShareAcknowledge, AddRaftVoter, WriteShareGroupState, ReadShareGroupStateSummary, and DescribeShareGroupOffsets (`‡`). For OffsetCommit, OffsetFetch, and InitProducerId, only the request codec lags: it stops at v9, v9, and v5 respectively while each response codec reaches the official v10, v10, and v6 maximum. Those rows require a generated-protocol dependency update, a maintained fork, or an upstream contribution before the full range can be decoded safely.
+`kafka-protocol = 0.18.0` is confirmed in `Cargo.toml`. Its installed generated sources omit Streams keys 88 and 89 entirely (`†`). Concrete top-level request/response `Message::VERSIONS` do not reach Kafka 4.3's latest stable version for ListOffsets, OffsetCommit, OffsetFetch, InitProducerId, WriteTxnMarkers, DescribeLogDirs, ShareFetch, ShareAcknowledge, AddRaftVoter, WriteShareGroupState, ReadShareGroupStateSummary, and DescribeShareGroupOffsets (`‡`). For OffsetCommit, OffsetFetch, and InitProducerId, only the request codec lags: it stops at v9, v9, and v5 respectively while each response codec reaches the official v10, v10, and v6 maximum. Those rows require a generated-protocol dependency update, a maintained fork, or an upstream contribution before the Kafka 4.3 ceiling can be decoded safely.
 
 ### Core data plane and discovery
 
@@ -268,7 +287,8 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 
 **State and semantic work:**
 
-- create one machine-readable capability registry containing key, min/max version, flexible ranges, handler, maturity, and proof lanes;
+- capture the API key/version pairs used by every pinned black-box client scenario and check them into a machine-readable client-floor artifact;
+- create one machine-readable capability registry containing key, evidence-backed floor, Kafka 4.3 ceiling, flexible ranges, handler, maturity, and proof lanes;
 - generate or validate `ApiVersions`, dispatcher coverage, per-version test cases, and the checked-in compatibility artifact from it;
 - introduce version-aware handler patterns and response/error builders;
 - build the pinned Kafka 4.3 differential harness;
@@ -276,9 +296,9 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 - add stable topic IDs and propagate them through Metadata, Fetch, ListOffsets, commits, and topic recreation;
 - implement flexible versions/tagged fields as specified by [KIP-482](https://cwiki.apache.org/confluence/spaces/KAFKA/pages/120722234/KIP-482%2BThe%2BKafka%2BProtocol%2Bshould%2BSupport%2BOptional%2BTagged%2BFields);
 - implement Fetch sessions from [KIP-227](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=74687799), leader epochs, timestamp offsets, and complete current error paths;
-- finish all advertised classic group versions, including static membership.
+- finish every classic-group version inside the supported client-floor-to-Kafka-4.3 window, including static membership.
 
-**Acceptance:** min/max/rejected version probes for every advertised key; normalized Kafka 4.3 differentials for success and error paths; existing Java/.NET/Go/Rust/Kafbat lanes stay green; static-member restart and incremental Fetch scenarios pass through real clients.
+**Acceptance:** floor/ceiling and rejected-below/rejected-above probes for every advertised key; CI proves each advertised floor exactly matches current-client evidence; normalized Kafka 4.3 differentials for success and error paths; existing Java/.NET/Go/Rust/Kafbat lanes stay green; static-member restart and incremental Fetch scenarios pass through real clients.
 
 **Dependencies:** generated protocol upgrade/fork; Kafka 4.3 test image; capability artifact schema; stable topic-ID store.
 
@@ -392,8 +412,8 @@ Each cut should be specified and reviewed independently. No dates or effort esti
 
 | Cut | Vertical slice | Real-client or tool acceptance scenario unlocked |
 | ---: | --- | --- |
-| 1 | Add the pinned Kafka 4.3 differential runner and one capability registry that validates `ApiVersions`, dispatch, and a generated compatibility JSON artifact. | A probe enumerates every stable key against Kafka and MemKafka and fails CI on advertisement drift. |
-| 2 | Upgrade/fork generated protocol schemas and make unsupported key/version handling response-aware, including flexible headers and ApiVersions fallback. | A current Java client negotiates at min/max versions; a deliberately newer ApiVersions request receives Kafka's fallback rather than a dropped connection. |
+| 1 | Add the pinned Kafka 4.3 differential runner, capture negotiated versions from every pinned current-client scenario, and create one capability registry that validates `ApiVersions`, dispatch, and generated compatibility artifacts. | A probe enumerates every stable key, records the client-backed floor, and fails CI on advertisement or floor drift. |
+| 2 | Upgrade/fork generated protocol schemas and make unsupported key/version handling response-aware, including flexible headers and ApiVersions fallback. | Pinned clients negotiate within the floor-to-ceiling window; requests immediately below and above it receive Kafka-compatible rejection rather than a dropped connection. |
 | 3 | Introduce stable topic IDs and implement modern Metadata, DescribeCluster, and DescribeTopicPartitions together. | Java `Admin.describeCluster()` and paginated `describeTopics()` agree on one broker; delete/recreate preparation can distinguish topic incarnations. |
 | 4 | Add Fetch session state, incremental updates/forgotten topics, and session errors. | A Java or librdkafka consumer sustains an incremental Fetch session across partition additions and recovers from an invalid session epoch. |
 | 5 | Add partition leader epochs, OffsetForLeaderEpoch, and timestamp ListOffsets. | Java `offsetsForTimes()` returns the first eligible record and a consumer validates/truncates against a deterministic leader epoch. |
@@ -418,19 +438,20 @@ Maintain one machine-readable registry for every API key and version. It should 
 
 - the runtime `ApiVersions` response;
 - dispatcher/handler coverage;
-- supported/rejected min/max test vectors;
+- the evidence-backed current-client floor and Kafka-baseline ceiling;
+- supported floor/ceiling and rejected-below/rejected-above test vectors;
 - the checked-in compatibility artifact consumed by docs;
 - maturity and real-client proof metadata.
 
-CI should fail if code, `ApiVersions`, the generated artifact, or the published matrix disagrees.
+CI should fail if code, `ApiVersions`, captured current-client evidence, the generated artifact, or the published matrix disagrees. It should also fail if a client update would lower a recorded floor without an explicit policy change.
 
 ### Protocol and version tests
 
 For each advertised API:
 
-- decode and encode the minimum and maximum supported versions;
+- decode and encode the evidence-backed floor and Kafka-baseline ceiling;
 - exercise each version boundary where fields or headers change;
-- reject one version below and above the range with the closest Kafka behavior;
+- reject one version below the floor and above the ceiling with the closest Kafka behavior;
 - assert flexible compact fields, tagged fields, nullability, defaults, and response header version;
 - cover per-resource partial success, not only whole-request success/failure;
 - compare all documented error paths with Kafka 4.3.
@@ -485,7 +506,7 @@ Add gates when their dependencies are behaviorally mature:
 - fuzz length prefixes, request headers, flexible/tagged fields, record batches, and malformed/truncated payloads;
 - assert one malformed connection cannot corrupt broker state;
 - property-test monotonic unique offsets, topic-ID uniqueness across recreation, epoch fencing, assignment disjointness, commit visibility, and atomic mutation;
-- seed the corpus with every min/max schema and differential failure.
+- seed the corpus with every supported floor/ceiling schema and differential failure.
 
 ## Success criteria and guardrails
 
@@ -505,7 +526,8 @@ The public rule remains: a feature is supported only when an unmodified real cli
 
 An API advances to `behavioral` only when:
 
-- its advertised versions have min/max/rejected codec and error tests;
+- its advertised floor-to-ceiling window has boundary/rejected codec and error tests;
+- each pinned client scenario negotiates at or above the recorded floor;
 - all state mutations are atomic and failure paths prove no mutation;
 - its cross-API effects are tested;
 - a real client scenario exercises the API without patches or test hooks;
@@ -519,6 +541,7 @@ It advances to `ecosystem-proven` when a Kafka 4.3 differential passes after doc
 - No replication/controller machinery when deterministic single-broker semantics suffice.
 - No silent no-ops.
 - No Kafka configuration-file parity; expose only a small MemKafka-native setup surface where a scenario needs state.
+- No legacy wire-version work below the evidence-backed floor; client pins may raise floors but do not lower them.
 - No API advertisement before the handler, state semantics, errors, and real-client test exist.
 - No production, durability, availability, security-hardening, or performance-equivalence claims.
 - Keep unsupported-version and unsupported-feature errors explicit throughout migration.

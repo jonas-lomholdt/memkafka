@@ -553,6 +553,16 @@ CI includes a separate black-box suite pinned to Confluent.Kafka 2.13.2. It repr
 
 Focused Rust tests additionally prove `InitProducerId` allocation, epoch fencing, per-partition sequence isolation, exact-retry deduplication, original-offset replay, retry-window bounds, and rejection without partial append. The real-client test proves negotiation and normal publish/consume interoperability; the Rust tests prove failure and retry semantics that are not deterministic to induce through a black-box network client.
 
+### 12.7 Protocol version support policy
+
+MemKafka targets Apache Kafka 4.3 and the pinned current-client matrix. It does not retain wire versions solely for legacy Kafka releases or clients.
+
+For each API, the supported window is contiguous: its ceiling is Kafka 4.3's latest stable request version and its floor is the lowest version observed while the pinned Java, .NET, Go, Rust, and Kafbat scenarios exercise that API. Every version between the floor and ceiling must behave compatibly because `ApiVersions` cannot advertise gaps. Versions below the floor are rejected and are not compatibility targets.
+
+Negotiated API key/version evidence must be captured by black-box CI and checked against the advertised window. Pinned-client upgrades may raise a floor after all lanes have moved forward. A client update that asks for a version below the recorded floor fails review; MemKafka does not lower the floor merely to admit an older client.
+
+Before advertising a new API, its named current-client or tool scenario runs against the pinned Kafka broker to establish the floor. An API without that evidence remains unadvertised. The separate Confluent.Kafka 2.13.2 flow profile is an explicit current application-compatibility floor; compatibility with older Confluent.Kafka releases is not a target.
+
 ## 13. Explicit v0.1 exclusions
 
 The following are not implemented or simulated in v0.1:
@@ -567,6 +577,7 @@ The following are not implemented or simulated in v0.1:
 - TLS, SASL, authentication, authorization, or multi-tenant isolation;
 - realistic latency, network faults, disk faults, broker restarts, or performance benchmarking against Kafka;
 - legacy message-set formats predating RecordBatch magic `2`;
+- Kafka wire versions below the evidence-backed current-client floor;
 - Protobuf or JSON Schema registry support;
 - schema references, compatibility enforcement, compatibility configuration changes, deletion, or semantic schema normalization;
 - Java, Rust, and Go client compatibility beyond their explicitly tested slices, or guaranteed compatibility with Python and other Kafka clients until each has its own black-box suite.
