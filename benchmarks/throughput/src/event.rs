@@ -24,15 +24,33 @@ pub fn record(partition: i32, sequence: u64, payload_bytes: usize) -> Result<Rec
 
     let partition_identity = format!("{partition:02}");
     let sequence_identity = format!("{sequence:020}");
+    let empty_value = serde_json::to_vec(&EventEnvelope {
+        partition: &partition_identity,
+        sequence: &sequence_identity,
+        timestamp: FIXED_TIMESTAMP,
+        padding: String::new(),
+    })
+    .context("serialize empty benchmark event")?;
+    let padding_bytes = payload_bytes.checked_sub(empty_value.len()).with_context(|| {
+        format!(
+            "payload_bytes must be at least the {partition_identity}-partition JSON envelope length ({})",
+            empty_value.len()
+        )
+    })?;
     let value = serde_json::to_vec(&EventEnvelope {
         partition: &partition_identity,
         sequence: &sequence_identity,
         timestamp: FIXED_TIMESTAMP,
-        padding: " ".repeat(payload_bytes - MIN_PAYLOAD_BYTES),
+        padding: " ".repeat(padding_bytes),
     })
     .context("serialize benchmark event")?;
 
-    debug_assert_eq!(value.len(), payload_bytes);
+    if value.len() != payload_bytes {
+        bail!(
+            "serialized value length mismatch: expected {payload_bytes}, got {}",
+            value.len()
+        );
+    }
 
     Ok(Record {
         key: Some(format!("p{partition_identity}-s{sequence_identity}").into_bytes()),
@@ -117,6 +135,15 @@ mod tests {
             Some(b"EquipmentMoved".as_slice())
         );
         assert_eq!(record.timestamp.to_rfc3339(), "2026-08-28T00:00:00+00:00");
+    }
+
+    #[test]
+    fn keeps_the_requested_payload_size_for_partition_100() {
+        let record = record(100, 42, 4096).unwrap();
+        let record_and_offset = RecordAndOffset { record, offset: 42 };
+
+        assert_eq!(record_and_offset.record.value.as_ref().unwrap().len(), 4096);
+        validate(&record_and_offset, 100, 42, 4096).unwrap();
     }
 
     #[test]
