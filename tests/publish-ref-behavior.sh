@@ -199,6 +199,8 @@ assert_workflow_contract() {
     assert_file_contains 'main publication requires same repository' "$publish_workflow" 'github.event.workflow_run.head_repository.full_name == github.repository'
     assert_file_contains 'release publication delegates to full verification' "$publish_workflow" 'uses: ./.github/workflows/verify.yml'
     assert_file_contains 'main publication uses verified SHA' "$publish_workflow" 'github.event.workflow_run.head_sha'
+    assert_file_contains 'publication resolves checked-out commit' "$publish_workflow" 'git rev-parse --verify HEAD^{commit}'
+    assert_file_contains 'publication context uses checked-out commit' "$publish_workflow" 'MEMKAFKA_PUBLISH_SHA: ${{ steps.source.outputs.target_sha }}'
     assert_file_contains 'primary image build has an id' "$publish_workflow" 'id: build'
     assert_file_contains 'primary image build captures its digest' "$publish_workflow" 'steps.build.outputs.digest'
     assert_file_contains 'aliases are promoted from the digest' "$publish_workflow" 'docker buildx imagetools create'

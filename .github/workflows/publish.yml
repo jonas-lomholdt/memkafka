@@ -57,12 +57,28 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
+      - name: Resolve checked-out commit
+        id: source
+        env:
+          EXPECTED_MAIN_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
+        run: |
+          set -euo pipefail
+
+          target_sha="$(git rev-parse --verify HEAD^{commit})"
+          if [[ -n "$EXPECTED_MAIN_SHA" && "$target_sha" != "$EXPECTED_MAIN_SHA" ]]; then
+            printf 'Checked out %s, expected verified main commit %s\n' \
+              "$target_sha" "$EXPECTED_MAIN_SHA" >&2
+            exit 1
+          fi
+
+          printf 'target_sha=%s\n' "$target_sha" >> "$GITHUB_OUTPUT"
+
       - name: Resolve publish context
         id: publish_context
         env:
           MEMKAFKA_PUBLISH_REF: ${{ github.event_name == 'workflow_run' && 'refs/heads/main' || github.ref }}
           MEMKAFKA_PUBLISH_REF_NAME: ${{ github.event_name == 'workflow_run' && 'main' || github.ref_name }}
-          MEMKAFKA_PUBLISH_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          MEMKAFKA_PUBLISH_SHA: ${{ steps.source.outputs.target_sha }}
         run: scripts/ci/resolve-publish-context.sh
 
       - name: Set up QEMU
