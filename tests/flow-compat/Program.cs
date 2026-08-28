@@ -12,20 +12,37 @@ IConsumer<string, string>? orderedConsumer = null;
 
 try
 {
-    var binaryName = OperatingSystem.IsWindows() ? "memkafka.exe" : "memkafka";
-    var binary = Environment.GetEnvironmentVariable("MEMKAFKA_BINARY")
-        ?? Path.Combine(repositoryRoot, "target", "debug", binaryName);
-    if (!File.Exists(binary))
+    var probeMode = Environment.GetEnvironmentVariable("MEMKAFKA_API_VERSION_PROBE")
+        ?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
+    string bootstrapServers;
+    if (probeMode)
     {
-        throw new FileNotFoundException(
-            $"MemKafka binary not found at '{binary}'. Run 'cargo build' first.",
-            binary);
+        bootstrapServers = Environment.GetEnvironmentVariable("MEMKAFKA_BOOTSTRAP_SERVERS")
+            ?? throw new InvalidOperationException(
+                "MEMKAFKA_BOOTSTRAP_SERVERS is required when MEMKAFKA_API_VERSION_PROBE=true");
+        if (string.IsNullOrWhiteSpace(bootstrapServers))
+        {
+            throw new InvalidOperationException(
+                "MEMKAFKA_BOOTSTRAP_SERVERS is required when MEMKAFKA_API_VERSION_PROBE=true");
+        }
     }
+    else
+    {
+        var binaryName = OperatingSystem.IsWindows() ? "memkafka.exe" : "memkafka";
+        var binary = Environment.GetEnvironmentVariable("MEMKAFKA_BINARY")
+            ?? Path.Combine(repositoryRoot, "target", "debug", binaryName);
+        if (!File.Exists(binary))
+        {
+            throw new FileNotFoundException(
+                $"MemKafka binary not found at '{binary}'. Run 'cargo build' first.",
+                binary);
+        }
 
-    process = StartMemKafka(binary, repositoryRoot);
-    processOutput = new ProcessOutput(process);
-    var endpoints = await processOutput.ReadEndpointsAsync(process);
-    var bootstrapServers = endpoints.BootstrapServers;
+        process = StartMemKafka(binary, repositoryRoot);
+        processOutput = new ProcessOutput(process);
+        var endpoints = await processOutput.ReadEndpointsAsync(process);
+        bootstrapServers = endpoints.BootstrapServers;
+    }
     var suffix = Guid.NewGuid().ToString("N");
     var topics = new[]
     {
@@ -34,6 +51,24 @@ try
         $"comet-itinerary-update-{suffix}",
         $"comet-moves-outbound-{suffix}",
     };
+
+    using var admin = new AdminClientBuilder(new AdminClientConfig
+    {
+        BootstrapServers = bootstrapServers,
+        SocketTimeoutMs = 5_000,
+        ApiVersionRequestTimeoutMs = 5_000,
+    }).Build();
+    if (probeMode)
+    {
+        await admin.CreateTopicsAsync(
+            topics.Select(topic => new TopicSpecification
+            {
+                Name = topic,
+                NumPartitions = 2,
+                ReplicationFactor = 1,
+            }),
+            new CreateTopicsOptions { RequestTimeout = TimeSpan.FromSeconds(5) });
+    }
 
     var assigned = new TaskCompletionSource<IReadOnlyList<TopicPartition>>(
         TaskCreationOptions.RunContinuationsAsynchronously);
@@ -54,12 +89,6 @@ try
     subscriptionConsumer.Subscribe(topics);
     var assignment = await ConsumeUntilAssignedAsync(subscriptionConsumer, assigned);
 
-    using var admin = new AdminClientBuilder(new AdminClientConfig
-    {
-        BootstrapServers = bootstrapServers,
-        SocketTimeoutMs = 5_000,
-        ApiVersionRequestTimeoutMs = 5_000,
-    }).Build();
     foreach (var topic in topics)
     {
         AssertTopicPartitions(admin.GetMetadata(topic, TimeSpan.FromSeconds(5)), topic, 2);

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,14 +15,78 @@ import (
 )
 
 func TestMetadataAutoCreatesTwoPartitions(t *testing.T) {
-	admin := adminClient(t)
+	probeMode := apiVersionProbeEnabled(os.LookupEnv)
+	var options []kgo.Opt
+	if probeMode {
+		options = append(options, kgo.MetadataMinAge(25*time.Millisecond))
+	}
+	client := kafkaClient(t, options...)
+	admin := kadm.NewClient(client)
 	topic := uniqueTopic("go-auto")
 
-	details, err := admin.ListTopics(testContext(t), topic)
-	if err != nil {
-		t.Fatalf("load topic metadata: %v", err)
-	}
+	details := autoCreatedTopicDetails(t, admin, topic, probeMode)
 	assertPartitionCount(t, details, topic, 2)
+}
+
+func autoCreatedTopicDetails(
+	t *testing.T,
+	admin *kadm.Client,
+	topic string,
+	probeMode bool,
+) kadm.TopicDetails {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for {
+		details, err := admin.ListTopics(ctx, topic)
+		if err != nil {
+			t.Fatalf("load topic metadata: %v", err)
+		}
+		detail, exists := details[topic]
+		if !probeMode || !exists || !errors.Is(detail.Err, kerr.UnknownTopicOrPartition) {
+			return details
+		}
+		select {
+		case <-time.After(25 * time.Millisecond):
+		case <-ctx.Done():
+			t.Fatalf("load auto-created topic metadata within five seconds: %v", ctx.Err())
+		}
+	}
+}
+
+func apiVersionProbeEnabled(lookup func(string) (string, bool)) bool {
+	value, _ := lookup("MEMKAFKA_API_VERSION_PROBE")
+	return strings.EqualFold(value, "true")
+}
+
+func TestAPIVersionProbeEnabledUsesLookup(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		set   bool
+		want  bool
+	}{
+		{name: "missing", want: false},
+		{name: "non-true", value: "1", set: true, want: false},
+		{name: "case-insensitive true", value: "TrUe", set: true, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookup := func(name string) (string, bool) {
+				if name != "MEMKAFKA_API_VERSION_PROBE" || !test.set {
+					return "", false
+				}
+				return test.value, true
+			}
+			if got := apiVersionProbeEnabled(lookup); got != test.want {
+				t.Fatalf("apiVersionProbeEnabled() = %t, want %t", got, test.want)
+			}
+		})
+	}
 }
 
 func TestAdminCreatesSixPartitionTopic(t *testing.T) {
@@ -96,16 +161,22 @@ func TestPublishConsumeOrderAndUncommittedRedelivery(t *testing.T) {
 
 func adminClient(t *testing.T) *kadm.Client {
 	t.Helper()
-	client, err := kgo.NewClient(
+	return kadm.NewClient(kafkaClient(t))
+}
+
+func kafkaClient(t *testing.T, options ...kgo.Opt) *kgo.Client {
+	t.Helper()
+	options = append(options,
 		kgo.SeedBrokers(bootstrapServers()),
 		kgo.AllowAutoTopicCreation(),
 		kgo.RequestTimeoutOverhead(5*time.Second),
 	)
+	client, err := kgo.NewClient(options...)
 	if err != nil {
 		t.Fatalf("create Kafka client: %v", err)
 	}
 	t.Cleanup(client.Close)
-	return kadm.NewClient(client)
+	return client
 }
 
 func assertPartitionCount(t *testing.T, details kadm.TopicDetails, topic string, expected int) {

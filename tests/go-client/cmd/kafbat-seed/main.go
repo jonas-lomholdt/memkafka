@@ -18,20 +18,16 @@ import (
 )
 
 func main() {
-	bootstrapServers := requiredEnvironment("MEMKAFKA_BOOTSTRAP_SERVERS")
-	topic := requiredEnvironment("MEMKAFKA_KAFBAT_TOPIC")
-	key := requiredEnvironment("MEMKAFKA_KAFBAT_KEY")
-	value := requiredEnvironment("MEMKAFKA_KAFBAT_VALUE")
-	groupID := requiredEnvironment("MEMKAFKA_KAFBAT_GROUP")
-	registryURL := requiredEnvironment("MEMKAFKA_SCHEMA_REGISTRY_URL")
-	avroTopic := requiredEnvironment("MEMKAFKA_KAFBAT_AVRO_TOPIC")
-	avroValue := requiredEnvironment("MEMKAFKA_KAFBAT_AVRO_VALUE")
+	configuration, err := configurationFromEnvironment(os.LookupEnv)
+	if err != nil {
+		panic(err)
+	}
 
 	client, err := kgo.NewClient(
-		kgo.SeedBrokers(bootstrapServers),
+		kgo.SeedBrokers(configuration.bootstrapServers),
 		kgo.DisableIdempotentWrite(),
-		kgo.ConsumerGroup(groupID),
-		kgo.ConsumeTopics(topic),
+		kgo.ConsumerGroup(configuration.groupID),
+		kgo.ConsumeTopics(configuration.topic),
 		kgo.SessionTimeout(60*time.Second),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.MaxProduceRequestsInflightPerBroker(1),
@@ -44,29 +40,41 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	for _, topicName := range []string{topic, avroTopic} {
+	topics := []string{configuration.topic}
+	if !configuration.stringOnly {
+		topics = append(topics, configuration.avroTopic)
+	}
+	for _, topicName := range topics {
 		if _, err := kadm.NewClient(client).CreateTopic(ctx, 1, 1, nil, topicName); err != nil {
 			panic(fmt.Errorf("create probe topic %s: %w", topicName, err))
 		}
 	}
-	schemaID, err := registerAvroSchema(ctx, registryURL, avroTopic+"-value")
-	if err != nil {
-		panic(err)
+	records := []*kgo.Record{
+		{
+			Topic:     configuration.topic,
+			Partition: 0,
+			Key:       []byte(configuration.key),
+			Value:     []byte(configuration.value),
+		},
 	}
-	results := client.ProduceSync(ctx,
-		&kgo.Record{
-			Topic:     topic,
+	var schemaID int
+	if !configuration.stringOnly {
+		schemaID, err = registerAvroSchema(
+			ctx,
+			configuration.registryURL,
+			configuration.avroTopic+"-value",
+		)
+		if err != nil {
+			panic(err)
+		}
+		records = append(records, &kgo.Record{
+			Topic:     configuration.avroTopic,
 			Partition: 0,
-			Key:       []byte(key),
-			Value:     []byte(value),
-		},
-		&kgo.Record{
-			Topic:     avroTopic,
-			Partition: 0,
-			Key:       []byte(key),
-			Value:     encodeAvroRecord(schemaID, avroValue),
-		},
-	)
+			Key:       []byte(configuration.key),
+			Value:     encodeAvroRecord(schemaID, configuration.avroValue),
+		})
+	}
+	results := client.ProduceSync(ctx, records...)
 	for _, result := range results {
 		if result.Err != nil {
 			panic(fmt.Errorf("produce probe record to %s: %w", result.Record.Topic, result.Err))
@@ -79,8 +87,10 @@ func main() {
 			))
 		}
 	}
-	fmt.Printf("seeded %s[0]@0\n", topic)
-	fmt.Printf("seeded Avro %s[0]@0 schema=%d\n", avroTopic, schemaID)
+	fmt.Printf("seeded %s[0]@0\n", configuration.topic)
+	if !configuration.stringOnly {
+		fmt.Printf("seeded Avro %s[0]@0 schema=%d\n", configuration.avroTopic, schemaID)
+	}
 
 	for {
 		fetches := client.PollRecords(context.Background(), 10)
@@ -88,8 +98,10 @@ func main() {
 			panic(fmt.Errorf("group poll: %v", errs))
 		}
 		for _, consumed := range fetches.Records() {
-			if consumed.Topic == topic && string(consumed.Key) == key && string(consumed.Value) == value {
-				fmt.Printf("group active %s\n", groupID)
+			if consumed.Topic == configuration.topic &&
+				string(consumed.Key) == configuration.key &&
+				string(consumed.Value) == configuration.value {
+				fmt.Printf("group active %s\n", configuration.groupID)
 				for {
 					if errs := client.PollRecords(context.Background(), 10).Errors(); len(errs) != 0 {
 						panic(fmt.Errorf("group heartbeat poll: %v", errs))
@@ -98,6 +110,61 @@ func main() {
 			}
 		}
 	}
+}
+
+type seedConfiguration struct {
+	bootstrapServers string
+	topic            string
+	key              string
+	value            string
+	groupID          string
+	registryURL      string
+	avroTopic        string
+	avroValue        string
+	stringOnly       bool
+}
+
+func configurationFromEnvironment(lookup func(string) (string, bool)) (seedConfiguration, error) {
+	configuration := seedConfiguration{}
+	var err error
+	configuration.bootstrapServers, err = requiredEnvironment(lookup, "MEMKAFKA_BOOTSTRAP_SERVERS")
+	if err != nil {
+		return seedConfiguration{}, err
+	}
+	configuration.topic, err = requiredEnvironment(lookup, "MEMKAFKA_KAFBAT_TOPIC")
+	if err != nil {
+		return seedConfiguration{}, err
+	}
+	configuration.key, err = requiredEnvironment(lookup, "MEMKAFKA_KAFBAT_KEY")
+	if err != nil {
+		return seedConfiguration{}, err
+	}
+	configuration.value, err = requiredEnvironment(lookup, "MEMKAFKA_KAFBAT_VALUE")
+	if err != nil {
+		return seedConfiguration{}, err
+	}
+	configuration.groupID, err = requiredEnvironment(lookup, "MEMKAFKA_KAFBAT_GROUP")
+	if err != nil {
+		return seedConfiguration{}, err
+	}
+	stringOnly, _ := lookup("MEMKAFKA_KAFBAT_STRING_ONLY")
+	configuration.stringOnly = strings.EqualFold(stringOnly, "true")
+	if configuration.stringOnly {
+		return configuration, nil
+	}
+	configuration.registryURL, err = requiredEnvironment(lookup, "MEMKAFKA_SCHEMA_REGISTRY_URL")
+	if err != nil {
+		return seedConfiguration{}, err
+	}
+	configuration.avroTopic, err = requiredEnvironment(lookup, "MEMKAFKA_KAFBAT_AVRO_TOPIC")
+	if err != nil {
+		return seedConfiguration{}, err
+	}
+	configuration.avroValue, err = requiredEnvironment(lookup, "MEMKAFKA_KAFBAT_AVRO_VALUE")
+	if err != nil {
+		return seedConfiguration{}, err
+	}
+	return configuration, nil
 }
 
 const avroSchema = `{"type":"record","name":"KafbatProbe","fields":[{"name":"message","type":"string"}]}`
@@ -147,10 +214,10 @@ func encodeAvroRecord(schemaID int, value string) []byte {
 	return append(payload, value...)
 }
 
-func requiredEnvironment(name string) string {
-	value := os.Getenv(name)
-	if value == "" {
-		panic(fmt.Errorf("%s is required", name))
+func requiredEnvironment(lookup func(string) (string, bool), name string) (string, error) {
+	value, ok := lookup(name)
+	if !ok || value == "" {
+		return "", fmt.Errorf("%s is required", name)
 	}
-	return value
+	return value, nil
 }

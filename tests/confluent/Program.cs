@@ -18,6 +18,8 @@ Process? process = null;
 ProcessOutput? processOutput = null;
 try
 {
+    var kafkaOnly = Environment.GetEnvironmentVariable("MEMKAFKA_KAFKA_ONLY")
+        ?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
     var bootstrapServers = Environment.GetEnvironmentVariable("MEMKAFKA_BOOTSTRAP_SERVERS");
     var schemaRegistryUrl = Environment.GetEnvironmentVariable("MEMKAFKA_SCHEMA_REGISTRY_URL");
     if (string.IsNullOrWhiteSpace(bootstrapServers))
@@ -134,8 +136,11 @@ try
         Console.WriteLine("pass   cooperative selection is visible in the broker info log");
     }
 
-    await AssertSchemaRegistryAndAvro(admin, bootstrapServers, schemaRegistryUrl);
-    Console.WriteLine("pass   Schema Registry IDs, versions, errors, and real Avro publish/consume round-trip");
+    if (!kafkaOnly)
+    {
+        await AssertSchemaRegistryAndAvro(admin, bootstrapServers, schemaRegistryUrl);
+        Console.WriteLine("pass   Schema Registry IDs, versions, errors, and real Avro publish/consume round-trip");
+    }
 
     Console.WriteLine("PASS   Confluent.Kafka and Schema Registry Avro 2.15.0 black-box acceptance");
 }
