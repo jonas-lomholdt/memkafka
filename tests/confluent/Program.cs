@@ -142,7 +142,10 @@ try
         Console.WriteLine("pass   Schema Registry IDs, versions, errors, and real Avro publish/consume round-trip");
     }
 
-    Console.WriteLine("PASS   Confluent.Kafka and Schema Registry Avro 2.15.0 black-box acceptance");
+    Console.WriteLine(
+        kafkaOnly
+            ? "PASS   Confluent.Kafka 2.15.0 Kafka-only black-box acceptance"
+            : "PASS   Confluent.Kafka and Schema Registry Avro 2.15.0 black-box acceptance");
 }
 finally
 {

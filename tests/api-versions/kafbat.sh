@@ -24,6 +24,7 @@ readonly MESSAGES_RESPONSE="$(mktemp)"
 requested_log_dir="${MEMKAFKA_KAFBAT_LOG_DIR:-${TMPDIR:-/tmp}/memkafka-api-versions-kafbat-${SUFFIX}}"
 mkdir -p "${requested_log_dir}"
 readonly LOG_DIR="$(cd "${requested_log_dir}" && pwd)"
+readonly OBSERVATIONS_FILE="${LOG_DIR}/kafbat-1.5.0.jsonl"
 
 cleanup() {
   local exit_code=$?
@@ -98,7 +99,7 @@ if [[ "${KAFKA_ADDRESS}" == ":19092" ]]; then
   exit 1
 fi
 
-touch "${LOG_DIR}/kafbat-1.5.0.jsonl"
+: >"${OBSERVATIONS_FILE}"
 docker run --detach \
   --name "${PROXY_CONTAINER}" \
   --network "${NETWORK}" \
@@ -126,7 +127,8 @@ readonly KAFBAT_URL="http://127.0.0.1:${KAFBAT_PORT}"
 
 ready=false
 for _ in {1..60}; do
-  if curl --fail --silent --show-error "${KAFBAT_URL}/actuator/health" >/dev/null 2>&1; then
+  if curl --fail --silent --show-error --max-time 5 \
+      "${KAFBAT_URL}/actuator/health" >/dev/null 2>&1; then
     ready=true
     break
   fi
@@ -163,7 +165,7 @@ fi
 
 online=false
 for _ in {1..30}; do
-  if curl --fail --silent --show-error --request POST \
+  if curl --fail --silent --show-error --max-time 5 --request POST \
       "${KAFBAT_URL}/api/clusters/${CLUSTER_NAME}/cache" >"${CLUSTER_RESPONSE}" \
       && jq --exit-status '.status == "ONLINE"' "${CLUSTER_RESPONSE}" >/dev/null; then
     online=true
@@ -196,7 +198,7 @@ if [[ "${group_visible}" != true ]]; then
   exit 1
 fi
 
-curl --fail --silent --show-error \
+curl --fail --silent --show-error --max-time 5 \
   "${KAFBAT_URL}/api/clusters/${CLUSTER_NAME}/topics?perPage=100" >"${TOPICS_RESPONSE}"
 jq --exit-status --arg topic "${TOPIC}" \
   'any(.topics[]; .name == $topic and .partitionCount == 1)' \
@@ -210,5 +212,9 @@ sed -n 's/^data://p' "${MESSAGES_RESPONSE}" \
     'any(.[]; .type == "MESSAGE" and .message.key == $key and .message.value == $value)' \
     >/dev/null
 assert_seed_running "after exact message browsing"
+if [[ ! -s "${OBSERVATIONS_FILE}" ]]; then
+  echo "Kafka API version recorder did not observe any Kafka requests" >&2
+  exit 1
+fi
 
 echo "PASS   Kafbat UI returned the Kafka oracle group, topic, and exact string message"
