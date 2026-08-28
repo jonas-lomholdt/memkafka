@@ -240,7 +240,7 @@ pub fn manifest_json() -> Result<String, serde_json::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiKey, CAPABILITIES, manifest_json};
+    use super::{ApiCapability, ApiKey, CAPABILITIES, VersionWindow, manifest_json};
     use crate::kafka::api_versions;
 
     #[test]
@@ -457,10 +457,40 @@ mod tests {
     #[test]
     fn supported_boundaries_are_accepted_and_adjacent_versions_are_rejected() {
         for capability in CAPABILITIES {
-            assert!(capability.supports(capability.supported.min));
-            assert!(capability.supports(capability.supported.max));
-            assert!(!capability.supports(capability.supported.min - 1));
-            assert!(!capability.supports(capability.supported.max + 1));
+            assert_supported_boundaries_and_representable_neighbors(capability);
+        }
+    }
+
+    #[test]
+    fn boundary_assertions_handle_i16_extreme_windows() {
+        for supported in [
+            VersionWindow {
+                min: i16::MIN,
+                max: 0,
+            },
+            VersionWindow {
+                min: 0,
+                max: i16::MAX,
+            },
+        ] {
+            assert_supported_boundaries_and_representable_neighbors(&ApiCapability {
+                api_key: ApiKey::Produce,
+                name: "extreme-test-window",
+                supported,
+                kafka_4_3: supported,
+                proof_scenarios: &[],
+            });
+        }
+    }
+
+    fn assert_supported_boundaries_and_representable_neighbors(capability: &ApiCapability) {
+        assert!(capability.supports(capability.supported.min));
+        assert!(capability.supports(capability.supported.max));
+        if let Some(version) = capability.supported.min.checked_sub(1) {
+            assert!(!capability.supports(version));
+        }
+        if let Some(version) = capability.supported.max.checked_add(1) {
+            assert!(!capability.supports(version));
         }
     }
 

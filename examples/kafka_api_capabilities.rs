@@ -116,12 +116,16 @@ mod tests {
         ffi::OsString,
         fs,
         path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
-    use super::{Mode, parse_arguments, render_to_path};
+    use super::{Mode, NEXT_TEMPORARY_FILE, USAGE, parse_arguments, render_to_path};
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+    static FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn temporary_directory() -> PathBuf {
         let directory = std::env::temp_dir().join(format!(
@@ -155,24 +159,34 @@ mod tests {
                 OsString::from("extra"),
             ],
         ] {
-            assert!(parse_arguments(invalid).is_err());
+            assert_eq!(parse_arguments(invalid), Err(USAGE.to_owned()));
         }
     }
 
     #[test]
-    fn check_compares_exact_bytes() {
+    fn failed_check_preserves_exact_bytes_and_names_the_path() {
+        let _guard = FILE_TEST_LOCK.lock().expect("lock file tests");
         let directory = temporary_directory();
         let path = directory.join("capabilities.json");
         fs::write(&path, b"stable\n").expect("write checked file");
 
         render_to_path(Mode::Check, &path, "stable\n").expect("matching bytes pass");
-        assert!(render_to_path(Mode::Check, &path, "stable").is_err());
+        let error = render_to_path(Mode::Check, &path, "stable").expect_err("mismatch must fail");
 
+        assert_eq!(
+            error,
+            format!(
+                "{} does not match the generated Kafka API capability manifest",
+                path.display()
+            )
+        );
+        assert_eq!(fs::read(&path).expect("read checked file"), b"stable\n");
         fs::remove_dir_all(directory).expect("remove temporary test directory");
     }
 
     #[test]
     fn update_atomically_replaces_the_destination_via_a_sibling_file() {
+        let _guard = FILE_TEST_LOCK.lock().expect("lock file tests");
         let directory = temporary_directory();
         let path = directory.join("capabilities.json");
         fs::write(&path, b"old\n").expect("write old manifest");
@@ -186,6 +200,63 @@ mod tests {
                 .count(),
             1,
             "atomic update must not leave its sibling temporary file behind"
+        );
+        fs::remove_dir_all(directory).expect("remove temporary test directory");
+    }
+
+    #[test]
+    fn update_retries_a_sibling_temporary_file_collision() {
+        let _guard = FILE_TEST_LOCK.lock().expect("lock file tests");
+        let directory = temporary_directory();
+        let path = directory.join("capabilities.json");
+        let collision = directory.join(format!(
+            ".capabilities.json.{}.{}.tmp",
+            std::process::id(),
+            NEXT_TEMPORARY_FILE.load(Ordering::Relaxed)
+        ));
+        fs::write(&collision, b"owned by another writer\n").expect("create colliding sibling");
+
+        render_to_path(Mode::Update, &path, "new\n").expect("retry colliding sibling");
+
+        assert_eq!(fs::read(&path).expect("read updated manifest"), b"new\n");
+        assert_eq!(
+            fs::read(&collision).expect("read colliding sibling"),
+            b"owned by another writer\n"
+        );
+        assert_eq!(
+            fs::read_dir(&directory)
+                .expect("list manifest directory")
+                .count(),
+            2
+        );
+        fs::remove_dir_all(directory).expect("remove temporary test directory");
+    }
+
+    #[test]
+    fn failed_atomic_replace_preserves_destination_and_cleans_temporary_file() {
+        let _guard = FILE_TEST_LOCK.lock().expect("lock file tests");
+        let directory = temporary_directory();
+        let path = directory.join("capabilities.json");
+        fs::create_dir(&path).expect("create destination directory");
+        fs::write(path.join("sentinel"), b"preserved\n").expect("write destination sentinel");
+
+        let error =
+            render_to_path(Mode::Update, &path, "new\n").expect_err("atomic replace must fail");
+
+        assert!(
+            error.starts_with(&format!("failed to replace {} atomically:", path.display())),
+            "unexpected diagnostic: {error}"
+        );
+        assert_eq!(
+            fs::read(path.join("sentinel")).expect("read destination sentinel"),
+            b"preserved\n"
+        );
+        assert_eq!(
+            fs::read_dir(&directory)
+                .expect("list manifest directory")
+                .count(),
+            1,
+            "failed update must remove its sibling temporary file"
         );
         fs::remove_dir_all(directory).expect("remove temporary test directory");
     }
