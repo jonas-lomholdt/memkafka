@@ -95,7 +95,7 @@ fn parse_request_header(frame: &[u8]) -> Option<(i16, i16, Option<&str>)>;
 
 Serialize writes behind one `tokio::sync::Mutex` so concurrent connections cannot interleave JSON lines. Flush after each line so failed scenarios still leave diagnostics.
 
-Bind the listener before connecting upstream, accept port `0`, and print exactly `READY listen=<ip:port>` after binding. The orchestrator uses that address as Kafka's advertised listener; upstream connections open lazily when clients connect.
+Bind the listener before connecting upstream, accept port `0`, set `SO_REUSEADDR`, and print exactly `READY listen=<ip:port>` after binding. The orchestrator uses that address as Kafka's advertised listener; upstream connections open lazily when clients connect. Add a test that closes the recorder and immediately binds a new recorder to the same address.
 
 - [ ] **Step 4: Add the isolated container image**
 
@@ -363,7 +363,7 @@ pub(crate) fn capability(api_key: ApiKey) -> Option<&'static ApiCapability>;
 pub fn manifest_json() -> Result<String, serde_json::Error>;
 ```
 
-Define `CAPABILITIES` with the exact 17 rows from Task 5, sorted by numeric key. Keep it as the sole source of supported MemKafka versions. Handler modules no longer declare `VERSION_RANGE`. Expose the module as `#[doc(hidden)] pub mod capabilities` so the example can call `manifest_json()` without exposing the internal table or structs.
+Define `CAPABILITIES` with the 17 currently advertised ranges from `src/kafka/api_versions.rs`, sorted by numeric key, plus the Kafka 4.3 targets and proof scenarios listed in Task 5. Keep it as the sole source of supported MemKafka versions. Handler modules no longer declare `VERSION_RANGE`. Expose the module as `#[doc(hidden)] pub mod capabilities` so the example can call `manifest_json()` without exposing the internal table or structs. Task 5 narrows only the current floors after this refactor is green.
 
 - [ ] **Step 4: Generate `ApiVersions` from the registry**
 
