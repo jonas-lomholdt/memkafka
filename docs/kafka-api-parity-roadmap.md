@@ -1,6 +1,6 @@
 # Kafka API parity roadmap
 
-> **Snapshot:** 2026-08-28, targeting Apache Kafka 4.3. This is a living compatibility map. Kafka will evolve, and reaching 77/77 API keys would still not prove behavioral parity.
+> **Snapshot:** 2026-08-29, targeting Apache Kafka 4.3. This is a living compatibility map. Kafka will evolve, and reaching 77/77 API keys would still not prove behavioral parity.
 
 ## Executive recommendation
 
@@ -79,43 +79,43 @@ The [Kafka 4.3 protocol](https://kafka.apache.org/43/design/protocol) defines wi
 
 MemKafka targets one current Kafka baseline, presently Apache Kafka 4.3. It does not preserve older wire versions merely for legacy Kafka releases or clients.
 
-Each API has one contiguous supported window because Kafka's `ApiVersions` response can advertise only a minimum and maximum version:
+Each API has two distinct ranges:
 
-- the **ceiling** is the latest stable request version for that API in the pinned Kafka baseline;
-- the **floor** is the lowest version observed from the pinned current-client matrix while exercising that API;
-- every version between the floor and ceiling is supported and tested;
-- versions below the floor are rejected and are not compatibility targets;
+- the **current supported window** is the contiguous range implemented and advertised by MemKafka today;
+- the **Kafka 4.3 target window** starts at the lowest version observed from the pinned current-client matrix and extends through that API's latest stable Kafka 4.3 request version;
+- MemKafka advertises only implemented versions, with no gaps;
+- versions below the evidence-backed floor are rejected and are not compatibility targets;
 - a floor may move upward when all pinned clients move forward, but it does not move downward to admit an older client.
 
 The current client floor is Confluent.Kafka 2.15.0, the separate Confluent.Kafka 2.13.2 flow profile, Apache Kafka Java 4.3.1, rskafka 0.6.0, franz-go 1.21.6, and Kafbat UI 1.5.0. These are scenario-specific pins, not promises that every feature in each client is supported. Adding or replacing a client requires recording the API versions it negotiates in its black-box scenarios. A client update that asks for a lower version than the recorded floor fails compatibility review instead of silently expanding the support window downward.
 
-Before a new API is advertised, its named current-client or tool scenario runs against the pinned Kafka broker to establish the floor. An API without such evidence remains unadvertised. Existing ranges are implementation inventory, not permanent compatibility promises; the first capability-registry cut records actual negotiation and narrows any unnecessarily low floors.
+Before a new API is advertised, its named current-client or tool scenario runs against the pinned Kafka broker to establish the floor. An API without such evidence remains unadvertised. Existing ranges are implementation inventory, not permanent compatibility promises. The delivered capability-registry cut records actual negotiation and narrows unnecessarily low floors without advertising the still-unimplemented Kafka 4.3 target ceilings.
 
-Kafka 4.3's complete version ranges remain in the matrix as protocol reference data. Versions below MemKafka's evidence-backed floor do not prevent an API from reaching `implemented`; missing the Kafka 4.3 ceiling or any version inside the supported window does.
+Kafka 4.3's complete version ranges remain in the matrix as protocol reference data. Versions below MemKafka's evidence-backed floor do not prevent an API from reaching `implemented`; missing the Kafka 4.3 target ceiling or any version between the evidence floor and that ceiling does.
 
 ## Current implementation inventory
 
-The source of truth is the advertised list in `src/kafka/api_versions.rs`, the dispatcher and handlers under `src/kafka/`, broker state under `src/broker/`, and black-box tests under `tests/`.
+The source of truth for advertised versions is the central runtime capability registry, published as the generated [`kafka-api-capabilities.json`](compatibility/kafka-api-capabilities.json) manifest. The dispatcher, handlers, broker state, focused tests, and black-box suites establish what those versions do.
 
 “Proven” below distinguishes real-client evidence from focused wire tests. A wire test is valuable, but it does not independently justify a public compatibility claim.
 
 | Key | API | MemKafka | Kafka 4.3 | Current proven behavior | Important gaps |
 | ---: | --- | --- | --- | --- | --- |
-| 0 | Produce | 3-7 | 3-13 | Real Java, .NET, Go, and Rust clients append acknowledged ordered records; the flow-profile .NET client proves non-transactional idempotent production. | No transactions/control batches, broker epoch validation, newer flexible versions, or complete modern error surface. |
+| 0 | Produce | 7 | 3-13 | Real Java, .NET, Go, and Rust clients append acknowledged ordered records; the flow-profile .NET client proves non-transactional idempotent production. | No transactions/control batches, broker epoch validation, newer flexible versions, or complete modern error surface. |
 | 1 | Fetch | 4 | 4-18 | Real clients fetch ordered batches, seek, repeat uncommitted reads, and use earliest/latest behavior; wire tests cover long-polling and byte limits. | No fetch sessions, topic IDs, current/last-fetched leader epochs, diverging epochs, preferred replicas, or isolation semantics. |
-| 2 | ListOffsets | 1-3 | 1-11 | Real clients prove earliest/latest and seeking; wire tests prove unknown-partition errors. | Only timestamps `-2` and `-1`; timestamp lookup is rejected, leader epoch is always `-1`, and newer flexible/topic-ID schemas are absent. |
-| 3 | Metadata | 0-9 | 0-13 | Real clients prove discovery, advertised address, auto-creation, explicit partition counts, and all-topic listing paths. | No topic IDs, newer flexible versions, rack data, listener/security semantics, or realistic cluster changes. |
-| 8 | OffsetCommit | 2-7 | 2-10 | Real .NET consumers prove automatic/manual commit resume, redelivery without commit, and independent group offsets. | Static membership is rejected; retention timestamp, leader epoch, topic IDs, and newer versions are not implemented. |
-| 9 | OffsetFetch | 1-5 | 1-10 | Real .NET consumers prove committed-offset recovery and group isolation. | No multi-group request, topic IDs, member epoch, unstable transactional offsets, or full unknown-group behavior. |
-| 10 | FindCoordinator | 0-2 | 0-6 | Real group consumers discover the single coordinator. | Group coordinators only; transaction/share coordinator types and batched coordinator responses are absent. |
-| 11 | JoinGroup | 0-5 | 0-9 | Real .NET clients prove member-ID handshake, cooperative-sticky negotiation, A/B/C joins, and rebalance rounds. | Static membership is rejected; no reason field, skip-assignment behavior, newer schemas, or modern group protocol. |
-| 12 | Heartbeat | 0-3 | 0-4 | Real multi-member lifecycle proves heartbeats preserve active membership and silent members expire. | Static membership is rejected and v4 is absent. |
-| 13 | LeaveGroup | 0-3 | 0-5 | Real clients prove graceful leave and redistribution. | Static-member leave is rejected; reason fields and newer response semantics are absent. |
-| 14 | SyncGroup | 0-3 | 0-5 | Real cooperative-sticky clients prove leader-supplied opaque assignments and successive stable generations. | Static membership is rejected; protocol type/name response fields and newer schemas are absent. |
+| 2 | ListOffsets | 3 | 1-11 | Real clients prove earliest/latest and seeking; wire tests prove unknown-partition errors. | Only timestamps `-2` and `-1`; timestamp lookup is rejected, leader epoch is always `-1`, and newer flexible/topic-ID schemas are absent. |
+| 3 | Metadata | 4-9 | 0-13 | Real clients prove discovery, advertised address, auto-creation, explicit partition counts, and all-topic listing paths. | No topic IDs, newer flexible versions, rack data, listener/security semantics, or realistic cluster changes. |
+| 8 | OffsetCommit | 7 | 2-10 | Real .NET consumers prove automatic/manual commit resume, redelivery without commit, and independent group offsets. | Static membership is rejected; retention timestamp, leader epoch, topic IDs, and newer versions are not implemented. |
+| 9 | OffsetFetch | 5 | 1-10 | Real .NET consumers prove committed-offset recovery and group isolation. | No multi-group request, topic IDs, member epoch, unstable transactional offsets, or full unknown-group behavior. |
+| 10 | FindCoordinator | 2 | 0-6 | Real group consumers discover the single coordinator. | Group coordinators only; transaction/share coordinator types and batched coordinator responses are absent. |
+| 11 | JoinGroup | 5 | 0-9 | Real .NET clients prove member-ID handshake, cooperative-sticky negotiation, A/B/C joins, and rebalance rounds. | Static membership is rejected; no reason field, skip-assignment behavior, newer schemas, or modern group protocol. |
+| 12 | Heartbeat | 3 | 0-4 | Real multi-member lifecycle proves heartbeats preserve active membership and silent members expire. | Static membership is rejected and v4 is absent. |
+| 13 | LeaveGroup | 1-3 | 0-5 | Real clients prove graceful leave and redistribution. | Static-member leave is rejected; reason fields and newer response semantics are absent. |
+| 14 | SyncGroup | 3 | 0-5 | Real cooperative-sticky clients prove leader-supplied opaque assignments and successive stable generations. | Static membership is rejected; protocol type/name response fields and newer schemas are absent. |
 | 15 | DescribeGroups | 0 | 0-6 | Kafbat black-box coverage proves an active group is discoverable; wire tests assert state, metadata, assignments, ordering, and unknown groups. | No authorized operations, newer group fields/types, or version coverage beyond v0. |
 | 16 | ListGroups | 0 | 0-5 | Kafbat black-box coverage proves group listing; wire tests assert group IDs and protocol types. | No state/type filters, group states, or newer versions. |
-| 18 | ApiVersions | 0-4 | 0-4 | All pinned clients negotiate successfully; wire tests cover v3 and connection reuse. | The list is hand-maintained separately from dispatch; unsupported-new-version fallback and generated drift checks are absent. |
-| 19 | CreateTopics | 2-6 | 2-7 | Real Admin clients create topics, observe partition counts, and receive `INVALID_REPLICATION_FACTOR`; wire tests cover validation-only and errors. | Custom configs and manual replica assignments are rejected; v7 and topic-ID lifecycle are absent. |
+| 18 | ApiVersions | 3-4 | 0-4 | All pinned clients negotiate successfully; wire tests cover v3 and connection reuse. | Unsupported-new-version fallback remains incomplete; advertised ranges and dispatch gates now share the central registry. |
+| 19 | CreateTopics | 4-6 | 2-7 | Real Admin clients create topics, observe partition counts, and receive `INVALID_REPLICATION_FACTOR`; wire tests cover validation-only and errors. | Custom configs and manual replica assignments are rejected; v7 and topic-ID lifecycle are absent. |
 | 22 | InitProducerId | 0 | 0-6 | A real idempotent .NET producer obtains an ID and publishes; wire tests prove distinct IDs and transactional-ID rejection. | Non-transactional allocation only, epoch always `0`; no transactional IDs, fencing/recovery, or newer versions. |
 | 32 | DescribeConfigs | 1 | 1-4 | The Kafbat black-box path negotiates the read-only API; wire tests cover known and unknown topic/broker resources. | Successful resources return empty config lists; no synonyms, documentation, config source/sensitivity, or non-empty values. |
 
@@ -129,11 +129,11 @@ The source of truth is the advertised list in `src/kafka/api_versions.rs`, the d
 
 ### Current structural risks
 
-- version ranges live in handlers while the `ApiVersions` response and dispatcher are separate manual lists;
+- the registry now aligns `ApiVersions` and dispatch version gates, but handler semantics remain uneven across each advertised window;
 - handlers are generally written to one shared generated request type rather than making version-specific semantics explicit;
 - decode happens before dispatch version rejection, so unsupported schemas can become connection failures rather than the closest Kafka response;
 - topic identity is name-only, which blocks modern Metadata, Fetch, offsets, deletion/recreation safety, and KIP-848;
-- there is no differential Kafka oracle or machine-readable compatibility manifest.
+- a pinned Kafka 4.3.1 request-capture oracle and machine-readable manifests now exist, but normalized semantic differentials remain future work.
 
 ## Complete Kafka 4.3 stable API-key matrix
 
@@ -285,11 +285,16 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 
 **Ecosystem value:** makes current producer, consumer, and discovery support dependable across newer clients; prevents `ApiVersions`, decoding, dispatch, and docs from drifting.
 
-**State and semantic work:**
+**Foundation status:** cut 1 is delivered. CI now captures pinned-client request versions against Kafka 4.3.1, checks a generated compatibility manifest, and rejects drift from the central runtime capability registry. This is version evidence and consistency enforcement, not completion of the 17 advertised APIs; Kafka 4.3 ceilings and semantic gaps remain below.
+
+**Delivered foundation:**
 
 - capture the API key/version pairs used by every pinned black-box client scenario and check them into a machine-readable client-floor artifact;
-- create one machine-readable capability registry containing key, evidence-backed floor, Kafka 4.3 ceiling, flexible ranges, handler, maturity, and proof lanes;
-- generate or validate `ApiVersions`, dispatcher coverage, per-version test cases, and the checked-in compatibility artifact from it;
+- keep key, evidence-backed floor, current ceiling, Kafka 4.3 range, handler, maturity, and proof lanes in one runtime capability registry;
+- generate or validate `ApiVersions`, dispatcher coverage, per-version test cases, and the checked-in compatibility artifact from it.
+
+**Remaining state and semantic work:**
+
 - introduce version-aware handler patterns and response/error builders;
 - build the pinned Kafka 4.3 differential harness;
 - update generated protocol support for every P0 schema before advertising it;
@@ -412,7 +417,7 @@ Each cut should be specified and reviewed independently. No dates or effort esti
 
 | Cut | Vertical slice | Real-client or tool acceptance scenario unlocked |
 | ---: | --- | --- |
-| 1 | Add the pinned Kafka 4.3 differential runner, capture negotiated versions from every pinned current-client scenario, and create one capability registry that validates `ApiVersions`, dispatch, and generated compatibility artifacts. | A probe enumerates every stable key, records the client-backed floor, and fails CI on advertisement or floor drift. |
+| 1 (delivered) | Capture negotiated versions from every pinned current-client scenario against Kafka 4.3.1, and create one central runtime capability registry that validates `ApiVersions`, dispatch, and the generated compatibility manifest. | CI records the client-backed floor and fails on advertisement, manifest, or request-evidence drift. This proves version demand, not semantic parity. |
 | 2 | Upgrade/fork generated protocol schemas and make unsupported key/version handling response-aware, including flexible headers and ApiVersions fallback. | Pinned clients negotiate within the floor-to-ceiling window; requests immediately below and above it receive Kafka-compatible rejection rather than a dropped connection. |
 | 3 | Introduce stable topic IDs and implement modern Metadata, DescribeCluster, and DescribeTopicPartitions together. | Java `Admin.describeCluster()` and paginated `describeTopics()` agree on one broker; delete/recreate preparation can distinguish topic incarnations. |
 | 4 | Add Fetch session state, incremental updates/forgotten topics, and session errors. | A Java or librdkafka consumer sustains an incremental Fetch session across partition additions and recovers from an invalid session epoch. |
@@ -434,7 +439,7 @@ After cut 15, take P4, P5, and P6 as scenario-driven slices. Do not start a whol
 
 ### One capability source
 
-Maintain one machine-readable registry for every API key and version. It should generate or validate:
+The central runtime capability registry is the source for advertised API keys and versions. It currently drives or validates:
 
 - the runtime `ApiVersions` response;
 - dispatcher/handler coverage;
@@ -443,7 +448,7 @@ Maintain one machine-readable registry for every API key and version. It should 
 - the checked-in compatibility artifact consumed by docs;
 - maturity and real-client proof metadata.
 
-CI should fail if code, `ApiVersions`, captured current-client evidence, the generated artifact, or the published matrix disagrees. It should also fail if a client update would lower a recorded floor without an explicit policy change.
+The generated [`kafka-api-capabilities.json`](compatibility/kafka-api-capabilities.json) manifest publishes current supported windows, Kafka 4.3 ranges, and proof scenarios. The separate [`kafka-4.3-client-requests.json`](compatibility/kafka-4.3-client-requests.json) artifact records request versions observed from pinned clients against Kafka 4.3.1. CI fails if code, `ApiVersions`, captured current-client evidence, or the generated artifact disagrees. A client evidence change requires explicit compatibility review.
 
 ### Protocol and version tests
 
@@ -571,6 +576,7 @@ Repository evidence reviewed for this snapshot:
 - `src/schema_registry.rs`;
 - `README.md` and `docs/2026-08-26-memkafka-design.md`;
 - focused wire tests plus .NET, Java, Go, Rust, flow-profile, and Kafbat black-box tests under `tests/`;
+- the generated capability manifest and pinned-client Kafka 4.3.1 request evidence under `docs/compatibility/`;
 - `Cargo.toml` and the installed `kafka-protocol 0.18.0` generated sources;
 - the [Apache Kafka 4.3 protocol](https://kafka.apache.org/43/design/protocol), Kafka 4.3 [Admin API](https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/admin/Admin.html), and linked Apache KIPs.
 

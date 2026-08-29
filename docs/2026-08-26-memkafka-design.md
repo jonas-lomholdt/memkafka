@@ -1,7 +1,7 @@
 # MemKafka v0.1 Design Specification
 
 **Date:** 2026-08-26  
-**Updated:** 2026-08-27
+**Updated:** 2026-08-29
 **Status:** Implemented
 
 **Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, forced consumer-topic creation, group-aware Kafbat UI message browsing, non-transactional idempotent production, and the Avro Schema Registry subset are complete and covered by pinned black-box clients and focused protocol tests.
@@ -192,7 +192,9 @@ The initial Kafka API surface includes the narrow version set needed for these b
 - `InitProducerId`
 - `DescribeConfigs`
 
-The precise numeric versions are an interoperability decision: tests pin a `Confluent.Kafka` minor line, record what librdkafka negotiates, and lock the smallest working version set. Adding an API version requires corresponding black-box coverage and must never change existing semantics silently.
+The current advertised windows are `Produce 7`, `Fetch 4`, `ListOffsets 3`, `Metadata 4-9`, `ApiVersions 3-4`, `CreateTopics 4-6`, `FindCoordinator 2`, `JoinGroup 5`, `SyncGroup 3`, `Heartbeat 3`, `LeaveGroup 1-3`, `OffsetCommit 7`, `OffsetFetch 5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, and read-only `DescribeConfigs 1`.
+
+These supported wire windows come from the central runtime capability registry and its generated compatibility manifest. They do not imply complete Kafka 4.3 version or semantic parity. Adding a supported version requires corresponding protocol and black-box coverage and must never change existing semantics silently.
 
 The producer client chooses a partition using the metadata MemKafka advertises. MemKafka does not reimplement librdkafka's Murmur2 or sticky producer partitioners; it appends to the partition named in the Produce request.
 
@@ -557,9 +559,11 @@ Focused Rust tests additionally prove `InitProducerId` allocation, epoch fencing
 
 MemKafka targets Apache Kafka 4.3 and the pinned current-client matrix. It does not retain wire versions solely for legacy Kafka releases or clients.
 
-For each API, the supported window is contiguous: its ceiling is Kafka 4.3's latest stable request version and its floor is the lowest version observed while the pinned Java, .NET, Go, Rust, and Kafbat scenarios exercise that API. Every version between the floor and ceiling must behave compatibly because `ApiVersions` cannot advertise gaps. Versions below the floor are rejected and are not compatibility targets.
+Each API has a current supported window and a separate Kafka 4.3 target. The supported window is the contiguous range implemented and advertised today. The target starts at the lowest version observed while the pinned Java, .NET, Go, Rust, and Kafbat scenarios exercise that API and extends through Kafka 4.3's latest stable request version. MemKafka advertises only the implemented portion; missing target versions and semantic gaps remain future work. Versions below the evidence-backed floor are rejected and are not compatibility targets.
 
-Negotiated API key/version evidence must be captured by black-box CI and checked against the advertised window. Pinned-client upgrades may raise a floor after all lanes have moved forward. A client update that asks for a version below the recorded floor fails review; MemKafka does not lower the floor merely to admit an older client.
+The central runtime capability registry drives `ApiVersions` and dispatch version gates. Its generated [capability manifest](compatibility/kafka-api-capabilities.json) records current windows, Kafka 4.3 ceilings, and proof scenarios. Separate [request evidence](compatibility/kafka-4.3-client-requests.json) records versions observed from the pinned clients against Apache Kafka 4.3.1. Request capture proves version demand only; it does not establish behavioral parity or topic-creation timing.
+
+CI checks the generated manifest and reruns the pinned-client evidence lane. Pinned-client upgrades may raise a floor after all lanes have moved forward. Any evidence change fails CI until it receives explicit compatibility review; MemKafka does not lower a floor merely to admit an older client.
 
 Before advertising a new API, its named current-client or tool scenario runs against the pinned Kafka broker to establish the floor. An API without that evidence remains unadvertised. The separate Confluent.Kafka 2.13.2 flow profile is an explicit current application-compatibility floor; compatibility with older Confluent.Kafka releases is not a target.
 

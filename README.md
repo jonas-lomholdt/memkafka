@@ -141,9 +141,13 @@ For Schema Registry interoperability, MemKafka exposes `GET /schemas/ids/{id}/ve
 
 MemKafka supports non-transactional idempotent production: it allocates process-local producer IDs at epoch `0`, validates producer identity and per-partition sequence numbers, and deduplicates exact recent retries without appending them again.
 
-The broker advertises `Produce 3-7`, `Fetch 4`, `ListOffsets 1-3`, `Metadata 0-9`, `ApiVersions 0-4`, `CreateTopics 2-6`, `FindCoordinator 0-2`, `JoinGroup 0-5`, `SyncGroup 0-3`, `Heartbeat 0-3`, `LeaveGroup 0-3`, `OffsetCommit 2-7`, `OffsetFetch 1-5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, and read-only `DescribeConfigs 1`.
+The broker currently advertises `Produce 7`, `Fetch 4`, `ListOffsets 3`, `Metadata 4-9`, `ApiVersions 3-4`, `CreateTopics 4-6`, `FindCoordinator 2`, `JoinGroup 5`, `SyncGroup 3`, `Heartbeat 3`, `LeaveGroup 1-3`, `OffsetCommit 7`, `OffsetFetch 5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, and read-only `DescribeConfigs 1`.
 
-MemKafka targets Apache Kafka 4.3 and the pinned current-client matrix, not legacy Kafka clients. The planned support window for each API runs from the lowest wire version actually negotiated by those clients through Kafka 4.3's latest version for that API. Kafka requires this window to be contiguous. Versions below the evidence-backed floor are not compatibility targets, and client upgrades may move the floor upward but never downward merely to admit an older client. The separate Confluent.Kafka 2.13.2 flow profile is an explicit current application-compatibility floor, not a promise to support older releases.
+Those are the contiguous wire-version windows MemKafka supports today. They are not a claim that all 17 APIs are behaviorally complete. The separate target for each API runs from its evidence-backed current-client floor through Apache Kafka 4.3's latest stable request version; the remaining version and semantic gaps are tracked in the roadmap.
+
+The generated [Kafka API capability manifest](docs/compatibility/kafka-api-capabilities.json) records the current advertised windows, Kafka 4.3 target ceilings, and proof scenarios. The separate [pinned-client request evidence](docs/compatibility/kafka-4.3-client-requests.json) records which versions the current clients requested from Apache Kafka 4.3.1. That capture proves request-version demand, not behavioral parity or topic-creation timing. CI rejects drift between runtime capabilities, the generated manifest, and captured evidence; a client upgrade that changes the evidence requires an explicit compatibility review.
+
+MemKafka targets Apache Kafka 4.3 and the pinned current-client matrix, not legacy Kafka clients. Versions below the evidence-backed floor are not compatibility targets, and client upgrades may move the floor upward but never downward merely to admit an older client. The separate Confluent.Kafka 2.13.2 flow profile is an explicit current application-compatibility floor, not a promise to support older releases.
 
 See the [Kafka API parity roadmap](docs/kafka-api-parity-roadmap.md) for the Kafka 4.3 gap matrix and recommended execution order.
 
