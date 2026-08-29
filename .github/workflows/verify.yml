@@ -39,6 +39,19 @@ jobs:
           cargo test --locked
           --manifest-path benchmarks/throughput/Cargo.toml
 
+      - name: Check API version recorder formatting
+        run: cargo fmt --manifest-path tests/api-versions/proxy/Cargo.toml -- --check
+
+      - name: Run Clippy on API version recorder
+        run: >-
+          cargo clippy --locked
+          --manifest-path tests/api-versions/proxy/Cargo.toml
+          --all-targets
+          -- -D warnings
+
+      - name: Test API version recorder
+        run: cargo test --locked --manifest-path tests/api-versions/proxy/Cargo.toml
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -47,6 +60,11 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-targets --all-features
+
+      - name: Check Kafka API capability snapshot
+        run: >-
+          cargo run --quiet --example kafka_api_capabilities --
+          --check docs/compatibility/kafka-api-capabilities.json
 
       - name: Install .NET 10
         uses: actions/setup-dotnet@v6
@@ -113,6 +131,19 @@ jobs:
         working-directory: tests/go-client
         run: test -z "$(gofmt -l .)"
 
+      - name: Verify pinned-client Kafka API versions
+        env:
+          MEMKAFKA_API_VERSION_LOG_DIR: artifacts/api-versions
+        run: tests/api-versions/run.sh --check
+
+      - name: Upload Kafka API version diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kafka-api-version-diagnostics
+          path: artifacts/api-versions
+          if-no-files-found: warn
+
       - name: Start container for black-box tests
         run: >-
           docker run --detach --rm
@@ -169,13 +200,6 @@ jobs:
             --batch-records 256 \
             --output-json /tmp/memkafka-throughput-smoke.json
           jq -e '.messages == 10000 and .valueBytes == 40960000' /tmp/memkafka-throughput-smoke.json
-
-      - name: Build Kafbat probe producer image
-        run: >-
-          docker build
-          --file tests/kafbat/Dockerfile.seed
-          --tag memkafka-kafbat-seed:ci
-          .
 
       - name: Run Kafbat UI black-box test
         env:
