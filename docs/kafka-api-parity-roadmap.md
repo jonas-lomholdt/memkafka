@@ -20,7 +20,7 @@ Do not build a KRaft cluster, replica manager, disk log, or multi-process archit
 
 ### Snapshot scorecard
 
-| Measure | 2026-08-28 result |
+| Measure | 2026-08-29 result |
 | --- | ---: |
 | Stable API keys in the [Kafka 4.3 protocol table](https://kafka.apache.org/43/design/protocol#api-keys) | 77 |
 | API keys advertised by MemKafka | 17 |
@@ -448,7 +448,7 @@ The central runtime capability registry is the source for advertised API keys an
 - the checked-in compatibility artifact consumed by docs;
 - maturity and real-client proof metadata.
 
-The generated [`kafka-api-capabilities.json`](compatibility/kafka-api-capabilities.json) manifest publishes current supported windows, Kafka 4.3 ranges, and proof scenarios. The separate [`kafka-4.3-client-requests.json`](compatibility/kafka-4.3-client-requests.json) artifact records request versions observed from pinned clients against Kafka 4.3.1. CI fails if code, `ApiVersions`, captured current-client evidence, or the generated artifact disagrees. A client evidence change requires explicit compatibility review.
+The generated [`kafka-api-capabilities.json`](compatibility/kafka-api-capabilities.json) manifest publishes current supported windows, Kafka 4.3 ranges, and proof scenarios. The separate [`kafka-4.3-client-requests.json`](compatibility/kafka-4.3-client-requests.json) artifact records request versions observed from pinned clients against Kafka 4.3.1. CI independently checks the runtime registry against this generated manifest and the live pinned-client capture against the request-evidence artifact. Evidence changes require explicit compatibility review. No CI gate currently cross-validates registry floors or proof scenarios against the request-evidence JSON.
 
 ### Protocol and version tests
 
