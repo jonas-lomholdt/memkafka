@@ -84,9 +84,11 @@ async fn dispatch_version_gate_runs_before_body_matching() {
 #[tokio::test]
 async fn rejects_versions_below_current_client_floor_before_body_matching() {
     let dispatcher = test_dispatcher();
-    let mismatched_body = RequestKind::ApiVersions(ApiVersionsRequest::default());
-
-    for (api_key, rejected_version) in [
+    let (mismatched_body_api_key, mismatched_body) = (
+        ApiKey::DescribeGroups,
+        RequestKind::DescribeGroups(DescribeGroupsRequest::default()),
+    );
+    let rejected_versions = [
         (ApiKey::Produce, 6),
         (ApiKey::ListOffsets, 2),
         (ApiKey::Metadata, 3),
@@ -99,7 +101,16 @@ async fn rejects_versions_below_current_client_floor_before_body_matching() {
         (ApiKey::SyncGroup, 2),
         (ApiKey::ApiVersions, 2),
         (ApiKey::CreateTopics, 3),
-    ] {
+    ];
+
+    assert!(
+        rejected_versions
+            .iter()
+            .all(|(api_key, _)| *api_key != mismatched_body_api_key),
+        "mismatched body API key must be absent from every raised-floor row"
+    );
+
+    for (api_key, rejected_version) in rejected_versions {
         let request = DecodedRequest {
             header: RequestHeader::default()
                 .with_request_api_key(api_key as i16)
