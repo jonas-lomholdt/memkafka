@@ -26,7 +26,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::Produce,
         name: "Produce",
-        supported: VersionWindow { min: 3, max: 7 },
+        supported: VersionWindow { min: 7, max: 7 },
         kafka_4_3: VersionWindow { min: 3, max: 13 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -53,7 +53,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::ListOffsets,
         name: "ListOffsets",
-        supported: VersionWindow { min: 1, max: 3 },
+        supported: VersionWindow { min: 3, max: 3 },
         kafka_4_3: VersionWindow { min: 1, max: 11 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -67,7 +67,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::Metadata,
         name: "Metadata",
-        supported: VersionWindow { min: 0, max: 9 },
+        supported: VersionWindow { min: 4, max: 9 },
         kafka_4_3: VersionWindow { min: 0, max: 13 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -81,14 +81,14 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::OffsetCommit,
         name: "OffsetCommit",
-        supported: VersionWindow { min: 2, max: 7 },
+        supported: VersionWindow { min: 7, max: 7 },
         kafka_4_3: VersionWindow { min: 2, max: 10 },
         proof_scenarios: &["confluent-kafka-2.15.0"],
     },
     ApiCapability {
         api_key: ApiKey::OffsetFetch,
         name: "OffsetFetch",
-        supported: VersionWindow { min: 1, max: 5 },
+        supported: VersionWindow { min: 5, max: 5 },
         kafka_4_3: VersionWindow { min: 1, max: 10 },
         proof_scenarios: &[
             "confluent-kafka-2.15.0",
@@ -99,7 +99,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::FindCoordinator,
         name: "FindCoordinator",
-        supported: VersionWindow { min: 0, max: 2 },
+        supported: VersionWindow { min: 2, max: 2 },
         kafka_4_3: VersionWindow { min: 0, max: 6 },
         proof_scenarios: &[
             "confluent-kafka-2.15.0",
@@ -110,28 +110,28 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::JoinGroup,
         name: "JoinGroup",
-        supported: VersionWindow { min: 0, max: 5 },
+        supported: VersionWindow { min: 5, max: 5 },
         kafka_4_3: VersionWindow { min: 0, max: 9 },
         proof_scenarios: &["confluent-kafka-2.15.0", "confluent-kafka-flow-2.13.2"],
     },
     ApiCapability {
         api_key: ApiKey::Heartbeat,
         name: "Heartbeat",
-        supported: VersionWindow { min: 0, max: 3 },
+        supported: VersionWindow { min: 3, max: 3 },
         kafka_4_3: VersionWindow { min: 0, max: 4 },
         proof_scenarios: &["confluent-kafka-2.15.0", "confluent-kafka-flow-2.13.2"],
     },
     ApiCapability {
         api_key: ApiKey::LeaveGroup,
         name: "LeaveGroup",
-        supported: VersionWindow { min: 0, max: 3 },
+        supported: VersionWindow { min: 1, max: 3 },
         kafka_4_3: VersionWindow { min: 0, max: 5 },
         proof_scenarios: &["confluent-kafka-2.15.0", "confluent-kafka-flow-2.13.2"],
     },
     ApiCapability {
         api_key: ApiKey::SyncGroup,
         name: "SyncGroup",
-        supported: VersionWindow { min: 0, max: 3 },
+        supported: VersionWindow { min: 3, max: 3 },
         kafka_4_3: VersionWindow { min: 0, max: 5 },
         proof_scenarios: &["confluent-kafka-2.15.0", "confluent-kafka-flow-2.13.2"],
     },
@@ -152,7 +152,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::ApiVersions,
         name: "ApiVersions",
-        supported: VersionWindow { min: 0, max: 4 },
+        supported: VersionWindow { min: 3, max: 4 },
         kafka_4_3: VersionWindow { min: 0, max: 4 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -166,7 +166,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::CreateTopics,
         name: "CreateTopics",
-        supported: VersionWindow { min: 2, max: 6 },
+        supported: VersionWindow { min: 4, max: 6 },
         kafka_4_3: VersionWindow { min: 2, max: 7 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(document["apis"].as_array().map(Vec::len), Some(17));
         assert_eq!(document["apis"][0]["apiKey"], 0);
         assert_eq!(document["apis"][0]["name"], "Produce");
-        assert_eq!(document["apis"][0]["supported"]["min"], 3);
+        assert_eq!(document["apis"][0]["supported"]["min"], 7);
         assert_eq!(document["apis"][0]["supported"]["max"], 7);
         assert_eq!(document["apis"][0]["kafka43"]["min"], 3);
         assert_eq!(document["apis"][0]["kafka43"]["max"], 13);

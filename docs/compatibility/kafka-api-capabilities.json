@@ -6,7 +6,7 @@
       "apiKey": 0,
       "name": "Produce",
       "supported": {
-        "min": 3,
+        "min": 7,
         "max": 7
       },
       "kafka43": {
@@ -45,7 +45,7 @@
       "apiKey": 2,
       "name": "ListOffsets",
       "supported": {
-        "min": 1,
+        "min": 3,
         "max": 3
       },
       "kafka43": {
@@ -65,7 +65,7 @@
       "apiKey": 3,
       "name": "Metadata",
       "supported": {
-        "min": 0,
+        "min": 4,
         "max": 9
       },
       "kafka43": {
@@ -85,7 +85,7 @@
       "apiKey": 8,
       "name": "OffsetCommit",
       "supported": {
-        "min": 2,
+        "min": 7,
         "max": 7
       },
       "kafka43": {
@@ -100,7 +100,7 @@
       "apiKey": 9,
       "name": "OffsetFetch",
       "supported": {
-        "min": 1,
+        "min": 5,
         "max": 5
       },
       "kafka43": {
@@ -117,7 +117,7 @@
       "apiKey": 10,
       "name": "FindCoordinator",
       "supported": {
-        "min": 0,
+        "min": 2,
         "max": 2
       },
       "kafka43": {
@@ -134,7 +134,7 @@
       "apiKey": 11,
       "name": "JoinGroup",
       "supported": {
-        "min": 0,
+        "min": 5,
         "max": 5
       },
       "kafka43": {
@@ -150,7 +150,7 @@
       "apiKey": 12,
       "name": "Heartbeat",
       "supported": {
-        "min": 0,
+        "min": 3,
         "max": 3
       },
       "kafka43": {
@@ -166,7 +166,7 @@
       "apiKey": 13,
       "name": "LeaveGroup",
       "supported": {
-        "min": 0,
+        "min": 1,
         "max": 3
       },
       "kafka43": {
@@ -182,7 +182,7 @@
       "apiKey": 14,
       "name": "SyncGroup",
       "supported": {
-        "min": 0,
+        "min": 3,
         "max": 3
       },
       "kafka43": {
@@ -228,7 +228,7 @@
       "apiKey": 18,
       "name": "ApiVersions",
       "supported": {
-        "min": 0,
+        "min": 3,
         "max": 4
       },
       "kafka43": {
@@ -248,7 +248,7 @@
       "apiKey": 19,
       "name": "CreateTopics",
       "supported": {
-        "min": 2,
+        "min": 4,
         "max": 6
       },
       "kafka43": {

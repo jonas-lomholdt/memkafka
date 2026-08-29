@@ -65,20 +65,58 @@ async fn dispatch_version_gate_runs_before_body_matching() {
     };
 
     assert_eq!(
-        dispatcher.dispatch(&request(ApiKey::Metadata, -1)).await,
+        dispatcher.dispatch(&request(ApiKey::Metadata, 3)).await,
         Err(DispatchError::UnsupportedVersion {
             api_key: ApiKey::Metadata,
-            version: -1,
+            version: 3,
         })
     );
     assert_eq!(
-        dispatcher.dispatch(&request(ApiKey::Metadata, 0)).await,
+        dispatcher.dispatch(&request(ApiKey::Metadata, 4)).await,
         Err(DispatchError::BodyMismatch(ApiKey::Metadata))
     );
     assert_eq!(
         dispatcher.dispatch(&request(ApiKey::DeleteTopics, 0)).await,
         Err(DispatchError::UnsupportedApi(ApiKey::DeleteTopics))
     );
+}
+
+#[tokio::test]
+async fn rejects_versions_below_current_client_floor_before_body_matching() {
+    let dispatcher = test_dispatcher();
+    let mismatched_body = RequestKind::ApiVersions(ApiVersionsRequest::default());
+
+    for (api_key, rejected_version) in [
+        (ApiKey::Produce, 6),
+        (ApiKey::ListOffsets, 2),
+        (ApiKey::Metadata, 3),
+        (ApiKey::OffsetCommit, 6),
+        (ApiKey::OffsetFetch, 4),
+        (ApiKey::FindCoordinator, 1),
+        (ApiKey::JoinGroup, 4),
+        (ApiKey::Heartbeat, 2),
+        (ApiKey::LeaveGroup, 0),
+        (ApiKey::SyncGroup, 2),
+        (ApiKey::ApiVersions, 2),
+        (ApiKey::CreateTopics, 3),
+    ] {
+        let request = DecodedRequest {
+            header: RequestHeader::default()
+                .with_request_api_key(api_key as i16)
+                .with_request_api_version(rejected_version),
+            api_key,
+            body: mismatched_body.clone(),
+        };
+
+        assert_eq!(
+            dispatcher.dispatch(&request).await,
+            Err(DispatchError::UnsupportedVersion {
+                api_key,
+                version: rejected_version,
+            }),
+            "{api_key:?} v{rejected_version} must be rejected before body matching"
+        );
+    }
 }
 
 #[tokio::test]
@@ -103,19 +141,19 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
     assert_eq!(response.api_keys.len(), 17);
-    assert_api_range(&response, ApiKey::Metadata, 0, 9);
-    assert_api_range(&response, ApiKey::ApiVersions, 0, 4);
-    assert_api_range(&response, ApiKey::CreateTopics, 2, 6);
-    assert_api_range(&response, ApiKey::Produce, 3, 7);
-    assert_api_range(&response, ApiKey::ListOffsets, 1, 3);
+    assert_api_range(&response, ApiKey::Metadata, 4, 9);
+    assert_api_range(&response, ApiKey::ApiVersions, 3, 4);
+    assert_api_range(&response, ApiKey::CreateTopics, 4, 6);
+    assert_api_range(&response, ApiKey::Produce, 7, 7);
+    assert_api_range(&response, ApiKey::ListOffsets, 3, 3);
     assert_api_range(&response, ApiKey::Fetch, 4, 4);
-    assert_api_range(&response, ApiKey::FindCoordinator, 0, 2);
-    assert_api_range(&response, ApiKey::JoinGroup, 0, 5);
-    assert_api_range(&response, ApiKey::SyncGroup, 0, 3);
-    assert_api_range(&response, ApiKey::Heartbeat, 0, 3);
-    assert_api_range(&response, ApiKey::LeaveGroup, 0, 3);
-    assert_api_range(&response, ApiKey::OffsetCommit, 2, 7);
-    assert_api_range(&response, ApiKey::OffsetFetch, 1, 5);
+    assert_api_range(&response, ApiKey::FindCoordinator, 2, 2);
+    assert_api_range(&response, ApiKey::JoinGroup, 5, 5);
+    assert_api_range(&response, ApiKey::SyncGroup, 3, 3);
+    assert_api_range(&response, ApiKey::Heartbeat, 3, 3);
+    assert_api_range(&response, ApiKey::LeaveGroup, 1, 3);
+    assert_api_range(&response, ApiKey::OffsetCommit, 7, 7);
+    assert_api_range(&response, ApiKey::OffsetFetch, 5, 5);
     assert_api_range(&response, ApiKey::ListGroups, 0, 0);
     assert_api_range(&response, ApiKey::DescribeGroups, 0, 0);
     assert_api_range(&response, ApiKey::InitProducerId, 0, 0);
@@ -186,19 +224,19 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
 
         assert_eq!(header.correlation_id, correlation_id);
         assert_eq!(body.api_keys.len(), 17);
-        assert_api_range(&body, ApiKey::Metadata, 0, 9);
-        assert_api_range(&body, ApiKey::ApiVersions, 0, 4);
-        assert_api_range(&body, ApiKey::CreateTopics, 2, 6);
-        assert_api_range(&body, ApiKey::Produce, 3, 7);
-        assert_api_range(&body, ApiKey::ListOffsets, 1, 3);
+        assert_api_range(&body, ApiKey::Metadata, 4, 9);
+        assert_api_range(&body, ApiKey::ApiVersions, 3, 4);
+        assert_api_range(&body, ApiKey::CreateTopics, 4, 6);
+        assert_api_range(&body, ApiKey::Produce, 7, 7);
+        assert_api_range(&body, ApiKey::ListOffsets, 3, 3);
         assert_api_range(&body, ApiKey::Fetch, 4, 4);
-        assert_api_range(&body, ApiKey::FindCoordinator, 0, 2);
-        assert_api_range(&body, ApiKey::JoinGroup, 0, 5);
-        assert_api_range(&body, ApiKey::SyncGroup, 0, 3);
-        assert_api_range(&body, ApiKey::Heartbeat, 0, 3);
-        assert_api_range(&body, ApiKey::LeaveGroup, 0, 3);
-        assert_api_range(&body, ApiKey::OffsetCommit, 2, 7);
-        assert_api_range(&body, ApiKey::OffsetFetch, 1, 5);
+        assert_api_range(&body, ApiKey::FindCoordinator, 2, 2);
+        assert_api_range(&body, ApiKey::JoinGroup, 5, 5);
+        assert_api_range(&body, ApiKey::SyncGroup, 3, 3);
+        assert_api_range(&body, ApiKey::Heartbeat, 3, 3);
+        assert_api_range(&body, ApiKey::LeaveGroup, 1, 3);
+        assert_api_range(&body, ApiKey::OffsetCommit, 7, 7);
+        assert_api_range(&body, ApiKey::OffsetFetch, 5, 5);
         assert_api_range(&body, ApiKey::ListGroups, 0, 0);
         assert_api_range(&body, ApiKey::DescribeGroups, 0, 0);
         assert_api_range(&body, ApiKey::InitProducerId, 0, 0);
