@@ -79,23 +79,24 @@ The [Kafka 4.3 protocol](https://kafka.apache.org/43/design/protocol) defines wi
 
 MemKafka targets one current Kafka baseline, presently Apache Kafka 4.3. It does not preserve older wire versions merely for legacy Kafka releases or clients.
 
-Each API has two distinct ranges:
+The manifest and request evidence keep four concepts distinct:
 
-- the **current supported window** is the contiguous range implemented and advertised by MemKafka today;
-- the **Kafka 4.3 target window** starts at the lowest version observed from the pinned current-client matrix and extends through that API's latest stable Kafka 4.3 request version;
-- MemKafka advertises only implemented versions, with no gaps;
-- versions below the evidence-backed floor are rejected and are not compatibility targets;
-- a floor may move upward when all pinned clients move forward, but it does not move downward to admit an older client.
+- `supported` is MemKafka’s currently advertised and implemented contiguous window; `supported.min` preserves the evidence-backed current-client floor and `supported.max` is the present implementation ceiling;
+- `kafka43` is Apache Kafka 4.3’s complete stable request-version range and is protocol reference data, not MemKafka support or a target window;
+- the request-evidence artifact stores the concrete versions observed from each pinned current-client scenario against Kafka 4.3.1;
+- for an advertised API, the parity target is derived conceptually from the evidence-backed current-client floor through `kafka43.max`, subject to semantic coverage.
+
+The manifest does not materialize that derived parity target as a separate field. MemKafka advertises only implemented versions, with no gaps. Versions below that floor remain outside the compatibility target even when they appear in the full `kafka43` reference range. A floor may move upward when all pinned clients move forward, but it does not move downward to admit an older client.
 
 The current client floor is Confluent.Kafka 2.15.0, the separate Confluent.Kafka 2.13.2 flow profile, Apache Kafka Java 4.3.1, rskafka 0.6.0, franz-go 1.21.6, and Kafbat UI 1.5.0. These are scenario-specific pins, not promises that every feature in each client is supported. Adding or replacing a client requires recording the API versions it negotiates in its black-box scenarios. A client update that asks for a lower version than the recorded floor fails compatibility review instead of silently expanding the support window downward.
 
-Before a new API is advertised, its named current-client or tool scenario runs against the pinned Kafka broker to establish the floor. An API without such evidence remains unadvertised. Existing ranges are implementation inventory, not permanent compatibility promises. The delivered capability-registry cut records actual negotiation and narrows unnecessarily low floors without advertising the still-unimplemented Kafka 4.3 target ceilings.
+Before a new API is advertised, its named current-client or tool scenario runs against the pinned Kafka broker to establish the floor. An API without such evidence remains unadvertised. Existing ranges are implementation inventory, not permanent compatibility promises. The delivered capability-registry cut records actual negotiation and narrows unnecessarily low floors without advertising unimplemented versions through Kafka 4.3’s maximum.
 
-Kafka 4.3's complete version ranges remain in the matrix as protocol reference data. Versions below MemKafka's evidence-backed floor do not prevent an API from reaching `implemented`; missing the Kafka 4.3 target ceiling or any version between the evidence floor and that ceiling does.
+Kafka 4.3’s complete version ranges remain in the matrix as protocol reference data. For an advertised API, reaching `implemented` requires the derived evidence-floor-to-`kafka43.max` span plus the target semantics. Historical versions below the evidence-backed floor are not part of that parity target.
 
 ## Current implementation inventory
 
-The source of truth for advertised versions is the central runtime capability registry, published as the generated [`kafka-api-capabilities.json`](compatibility/kafka-api-capabilities.json) manifest. The dispatcher, handlers, broker state, focused tests, and black-box suites establish what those versions do.
+The source of truth for advertised versions is the central runtime capability registry, published as the generated [`kafka-api-capabilities.json`](compatibility/kafka-api-capabilities.json) manifest. In the inventory below, **MemKafka** is the current `supported` window and **Kafka 4.3** is the complete stable protocol range from `kafka43`; neither column materializes the derived parity-target window. The dispatcher, handlers, broker state, focused tests, and black-box suites establish what supported versions do.
 
 “Proven” below distinguishes real-client evidence from focused wire tests. A wire test is valuable, but it does not independently justify a public compatibility claim.
 
@@ -137,11 +138,11 @@ The source of truth for advertised versions is the central runtime capability re
 
 ## Complete Kafka 4.3 stable API-key matrix
 
-This matrix contains all 77 entries in the stable Api Keys table from the [official Kafka 4.3 protocol snapshot](https://kafka.apache.org/43/design/protocol#api-keys).
+This matrix contains all 77 entries in the stable Api Keys table from the [official Kafka 4.3 protocol snapshot](https://kafka.apache.org/43/design/protocol#api-keys). Its **Kafka 4.3 request range** column is complete protocol reference data, including historical versions below MemKafka’s evidence-backed floor; it is not a MemKafka support or target-window claim.
 
 Status means:
 
-- `implemented`: the evidence-backed client floor through the Kafka 4.3 ceiling and the target behavior are covered;
+- `implemented`: the derived parity target from the evidence-backed floor through `kafka43.max`, plus the target behavior, is covered;
 - `partial`: advertised today, but version or semantic parity is incomplete;
 - `missing`: not advertised or dispatched.
 
@@ -285,11 +286,11 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 
 **Ecosystem value:** makes current producer, consumer, and discovery support dependable across newer clients; prevents `ApiVersions`, decoding, dispatch, and docs from drifting.
 
-**Foundation status:** cut 1 is delivered. CI now captures pinned-client request versions against Kafka 4.3.1, checks a generated compatibility manifest, and rejects drift from the central runtime capability registry. This is version evidence and consistency enforcement, not completion of the 17 advertised APIs; Kafka 4.3 ceilings and semantic gaps remain below.
+**Foundation status:** cut 1 is delivered. CI now captures pinned-client request versions against Kafka 4.3.1 and independently checks a generated compatibility manifest against the central runtime capability registry. This is version evidence plus two independent consistency checks, not completion of the 17 advertised APIs; versions through Kafka 4.3’s maxima and semantic gaps remain below.
 
 **Delivered foundation:**
 
-- capture the API key/version pairs used by every pinned black-box client scenario and check them into a machine-readable client-floor artifact;
+- capture the API key/version pairs used by every pinned black-box client scenario and check them into a machine-readable request-evidence artifact;
 - keep key, evidence-backed floor, current ceiling, Kafka 4.3 range, handler, maturity, and proof lanes in one runtime capability registry;
 - generate or validate `ApiVersions`, dispatcher coverage, per-version test cases, and the checked-in compatibility artifact from it.
 
@@ -301,9 +302,9 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 - add stable topic IDs and propagate them through Metadata, Fetch, ListOffsets, commits, and topic recreation;
 - implement flexible versions/tagged fields as specified by [KIP-482](https://cwiki.apache.org/confluence/spaces/KAFKA/pages/120722234/KIP-482%2BThe%2BKafka%2BProtocol%2Bshould%2BSupport%2BOptional%2BTagged%2BFields);
 - implement Fetch sessions from [KIP-227](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=74687799), leader epochs, timestamp offsets, and complete current error paths;
-- finish every classic-group version inside the supported client-floor-to-Kafka-4.3 window, including static membership.
+- finish every classic-group version inside the derived evidence-floor-to-`kafka43.max` parity span, including static membership.
 
-**Acceptance:** floor/ceiling and rejected-below/rejected-above probes for every advertised key; CI proves each advertised floor exactly matches current-client evidence; normalized Kafka 4.3 differentials for success and error paths; existing Java/.NET/Go/Rust/Kafbat lanes stay green; static-member restart and incremental Fetch scenarios pass through real clients.
+**Acceptance:** floor/ceiling and rejected-below/rejected-above probes for every advertised key; a future cross-artifact gate proves each advertised floor exactly matches current-client evidence; normalized Kafka 4.3 differentials for success and error paths; existing Java/.NET/Go/Rust/Kafbat lanes stay green; static-member restart and incremental Fetch scenarios pass through real clients.
 
 **Dependencies:** generated protocol upgrade/fork; Kafka 4.3 test image; capability artifact schema; stable topic-ID store.
 
@@ -417,7 +418,7 @@ Each cut should be specified and reviewed independently. No dates or effort esti
 
 | Cut | Vertical slice | Real-client or tool acceptance scenario unlocked |
 | ---: | --- | --- |
-| 1 (delivered) | Capture negotiated versions from every pinned current-client scenario against Kafka 4.3.1, and create one central runtime capability registry that validates `ApiVersions`, dispatch, and the generated compatibility manifest. | CI records the client-backed floor and fails on advertisement, manifest, or request-evidence drift. This proves version demand, not semantic parity. |
+| 1 (delivered) | Capture negotiated versions from every pinned current-client scenario against Kafka 4.3.1, and create one central runtime capability registry that validates `ApiVersions`, dispatch, and the generated compatibility manifest. | CI independently rejects registry/manifest drift and live/checked-in request-evidence drift. The evidence informs floor review but is not cross-validated against the registry; it proves version demand, not semantic parity. |
 | 2 | Upgrade/fork generated protocol schemas and make unsupported key/version handling response-aware, including flexible headers and ApiVersions fallback. | Pinned clients negotiate within the floor-to-ceiling window; requests immediately below and above it receive Kafka-compatible rejection rather than a dropped connection. |
 | 3 | Introduce stable topic IDs and implement modern Metadata, DescribeCluster, and DescribeTopicPartitions together. | Java `Admin.describeCluster()` and paginated `describeTopics()` agree on one broker; delete/recreate preparation can distinguish topic incarnations. |
 | 4 | Add Fetch session state, incremental updates/forgotten topics, and session errors. | A Java or librdkafka consumer sustains an incremental Fetch session across partition additions and recovers from an invalid session epoch. |
@@ -443,12 +444,12 @@ The central runtime capability registry is the source for advertised API keys an
 
 - the runtime `ApiVersions` response;
 - dispatcher/handler coverage;
-- the evidence-backed current-client floor and Kafka-baseline ceiling;
+- the current `supported` window and complete Kafka-baseline reference range;
 - supported floor/ceiling and rejected-below/rejected-above test vectors;
 - the checked-in compatibility artifact consumed by docs;
 - maturity and real-client proof metadata.
 
-The generated [`kafka-api-capabilities.json`](compatibility/kafka-api-capabilities.json) manifest publishes current supported windows, Kafka 4.3 ranges, and proof scenarios. The separate [`kafka-4.3-client-requests.json`](compatibility/kafka-4.3-client-requests.json) artifact records request versions observed from pinned clients against Kafka 4.3.1. CI independently checks the runtime registry against this generated manifest and the live pinned-client capture against the request-evidence artifact. Evidence changes require explicit compatibility review. No CI gate currently cross-validates registry floors or proof scenarios against the request-evidence JSON.
+The generated [`kafka-api-capabilities.json`](compatibility/kafka-api-capabilities.json) manifest publishes current supported windows, complete Kafka 4.3 reference ranges, and proof scenarios. The separate [`kafka-4.3-client-requests.json`](compatibility/kafka-4.3-client-requests.json) artifact records request versions observed from pinned clients against Kafka 4.3.1. CI independently checks the runtime registry against this generated manifest and the live pinned-client capture against the request-evidence artifact. Evidence changes require explicit compatibility review. No CI gate currently cross-validates registry floors or proof scenarios against the request-evidence JSON.
 
 ### Protocol and version tests
 
