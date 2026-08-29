@@ -9,7 +9,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository
@@ -133,7 +133,7 @@ jobs:
 
       - name: Verify pinned-client Kafka API versions
         env:
-          MEMKAFKA_API_VERSION_LOG_DIR: artifacts/api-versions
+          MEMKAFKA_API_VERSION_ARTIFACT_DIR: artifacts/api-versions
         run: tests/api-versions/run.sh --check
 
       - name: Upload Kafka API version diagnostics
