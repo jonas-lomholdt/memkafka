@@ -9,6 +9,7 @@ cd "${REPOSITORY_ROOT}"
 readonly EVIDENCE_FILE="${REPOSITORY_ROOT}/docs/compatibility/kafka-4.3-client-requests.json"
 readonly BOUNDED_COMMAND="${SCRIPT_DIRECTORY}/bounded-command.py"
 readonly KAFKA_IMAGE="apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
+readonly KAFBAT_IMAGE="ghcr.io/kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1"
 readonly MAVEN_IMAGE="maven:3.9.11-eclipse-temurin-25"
 readonly PROXY_IMAGE="${MEMKAFKA_API_VERSION_PROXY_IMAGE:-memkafka-api-version-proxy:test}"
 readonly SEED_IMAGE="${MEMKAFKA_KAFBAT_SEED_IMAGE:-memkafka-kafbat-seed:ci}"
@@ -28,6 +29,7 @@ readonly NETWORK="memkafka-api-versions-host-${SUFFIX}"
 readonly MAX_AUTO_CREATE_ATTEMPTS=5
 readonly RECORDER_BUILD_TIMEOUT_SECONDS="${MEMKAFKA_API_VERSION_RECORDER_BUILD_TIMEOUT_SECONDS:-300}"
 readonly IMAGE_BUILD_TIMEOUT_SECONDS="${MEMKAFKA_API_VERSION_IMAGE_BUILD_TIMEOUT_SECONDS:-900}"
+readonly IMAGE_PULL_TIMEOUT_SECONDS="${MEMKAFKA_API_VERSION_IMAGE_PULL_TIMEOUT_SECONDS:-300}"
 readonly DOTNET_SETUP_TIMEOUT_SECONDS="${MEMKAFKA_API_VERSION_DOTNET_SETUP_TIMEOUT_SECONDS:-60}"
 readonly DOTNET_SCENARIO_TIMEOUT_SECONDS="${MEMKAFKA_API_VERSION_DOTNET_SCENARIO_TIMEOUT_SECONDS:-600}"
 readonly JAVA_MAVEN_SCENARIO_TIMEOUT_SECONDS="${MEMKAFKA_API_VERSION_JAVA_MAVEN_SCENARIO_TIMEOUT_SECONDS:-900}"
@@ -154,6 +156,43 @@ run_bounded() {
   ACTIVE_COMMAND_PID=""
   ACTIVE_COMMAND_LABEL=""
   return "${exit_code}"
+}
+
+prepare_remote_image() {
+  local image_label=$1
+  local image=$2
+  local pull_log=$3
+  local inspect_exit=0
+  local pull_exit=0
+
+  : >"${pull_log}"
+  if run_bounded \
+    "${INFRASTRUCTURE_TIMEOUT_SECONDS}" \
+    "inspect cached pinned ${image_label} image" \
+    -- docker image inspect "${image}" >/dev/null 2>>"${pull_log}"; then
+    printf 'using cached pinned %s image: %s\n' \
+      "${image_label}" "${image}" >>"${pull_log}"
+    return 0
+  else
+    inspect_exit=$?
+  fi
+  if ((inspect_exit == 124 || inspect_exit == 130 || inspect_exit == 143)); then
+    return "${inspect_exit}"
+  fi
+
+  printf 'pinned %s image is not cached; pulling: %s\n' \
+    "${image_label}" "${image}" >>"${pull_log}"
+  if run_bounded \
+    "${IMAGE_PULL_TIMEOUT_SECONDS}" \
+    "pull pinned ${image_label} image" \
+    -- docker pull "${image}" >>"${pull_log}" 2>&1; then
+    return 0
+  else
+    pull_exit=$?
+  fi
+  printf 'failed to pull pinned %s image within %ss; retained log: %s\n' \
+    "${image_label}" "${IMAGE_PULL_TIMEOUT_SECONDS}" "${pull_log}" >&3
+  return "${pull_exit}"
 }
 
 run_cleanup_command() {
@@ -606,6 +645,8 @@ require_positive_integer MEMKAFKA_API_VERSION_RECORDER_BUILD_TIMEOUT_SECONDS \
   "${RECORDER_BUILD_TIMEOUT_SECONDS}"
 require_positive_integer MEMKAFKA_API_VERSION_IMAGE_BUILD_TIMEOUT_SECONDS \
   "${IMAGE_BUILD_TIMEOUT_SECONDS}"
+require_positive_integer MEMKAFKA_API_VERSION_IMAGE_PULL_TIMEOUT_SECONDS \
+  "${IMAGE_PULL_TIMEOUT_SECONDS}"
 require_positive_integer MEMKAFKA_API_VERSION_DOTNET_SETUP_TIMEOUT_SECONDS \
   "${DOTNET_SETUP_TIMEOUT_SECONDS}"
 require_positive_integer MEMKAFKA_API_VERSION_DOTNET_SCENARIO_TIMEOUT_SECONDS \
@@ -656,6 +697,11 @@ mkdir -p "${RAW_DIRECTORY}"
 readonly TEMP_DIRECTORY="$(mktemp -d "${TMPDIR:-/tmp}/memkafka-api-versions.XXXXXX")"
 readonly GENERATED_EVIDENCE="${TEMP_DIRECTORY}/kafka-4.3-client-requests.json"
 readonly KAFKA_PORT="$(available_loopback_port)"
+
+LAST_LOG="${RAW_DIRECTORY}/kafka-image-pull.log"
+prepare_remote_image Kafka "${KAFKA_IMAGE}" "${LAST_LOG}"
+LAST_LOG="${RAW_DIRECTORY}/kafbat-image-pull.log"
+prepare_remote_image Kafbat "${KAFBAT_IMAGE}" "${LAST_LOG}"
 
 LAST_LOG="${RAW_DIRECTORY}/dotnet-sdks.log"
 run_bounded "${DOTNET_SETUP_TIMEOUT_SECONDS}" "list installed .NET SDKs" -- \

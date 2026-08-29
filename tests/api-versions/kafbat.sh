@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly BOUNDED_COMMAND="${SCRIPT_DIRECTORY}/bounded-command.py"
 readonly KAFKA_IMAGE="apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
 readonly PROXY_IMAGE="${MEMKAFKA_API_VERSION_PROXY_IMAGE:-memkafka-api-version-proxy:test}"
 readonly KAFBAT_IMAGE="ghcr.io/kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1"
@@ -20,6 +22,9 @@ readonly CLUSTER_RESPONSE="$(mktemp)"
 readonly GROUP_RESPONSE="$(mktemp)"
 readonly TOPICS_RESPONSE="$(mktemp)"
 readonly MESSAGES_RESPONSE="$(mktemp)"
+readonly IMAGE_PULL_TIMEOUT_SECONDS="${MEMKAFKA_API_VERSION_IMAGE_PULL_TIMEOUT_SECONDS:-300}"
+readonly INFRASTRUCTURE_TIMEOUT_SECONDS="${MEMKAFKA_API_VERSION_INFRASTRUCTURE_TIMEOUT_SECONDS:-60}"
+readonly TERMINATION_GRACE_SECONDS="${MEMKAFKA_API_VERSION_TERMINATION_GRACE_SECONDS:-5}"
 
 requested_log_dir="${MEMKAFKA_KAFBAT_LOG_DIR:-${TMPDIR:-/tmp}/memkafka-api-versions-kafbat-${SUFFIX}}"
 mkdir -p "${requested_log_dir}"
@@ -57,6 +62,65 @@ cleanup() {
 }
 trap cleanup EXIT
 
+require_positive_integer() {
+  local name=$1
+  local value=$2
+
+  if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s must be a positive integer, got: %s\n' "${name}" "${value}" >&2
+    exit 2
+  fi
+}
+
+run_bounded() {
+  local timeout_seconds=$1
+  local label=$2
+  shift 2
+
+  python3 "${BOUNDED_COMMAND}" \
+    --timeout "${timeout_seconds}" \
+    --termination-grace "${TERMINATION_GRACE_SECONDS}" \
+    --label "${label}" \
+    -- "$@"
+}
+
+prepare_remote_image() {
+  local image_label=$1
+  local image=$2
+  local pull_log=$3
+  local inspect_exit=0
+  local pull_exit=0
+
+  : >"${pull_log}"
+  if run_bounded \
+    "${INFRASTRUCTURE_TIMEOUT_SECONDS}" \
+    "inspect cached pinned ${image_label} image" \
+    docker image inspect "${image}" >/dev/null 2>>"${pull_log}"; then
+    printf 'using cached pinned %s image: %s\n' \
+      "${image_label}" "${image}" >>"${pull_log}"
+    return 0
+  else
+    inspect_exit=$?
+  fi
+  if ((inspect_exit == 124 || inspect_exit == 130 || inspect_exit == 143)); then
+    return "${inspect_exit}"
+  fi
+
+  printf 'pinned %s image is not cached; pulling: %s\n' \
+    "${image_label}" "${image}" >>"${pull_log}"
+  if run_bounded \
+    "${IMAGE_PULL_TIMEOUT_SECONDS}" \
+    "pull pinned ${image_label} image" \
+    docker pull "${image}" >>"${pull_log}" 2>&1; then
+    return 0
+  else
+    pull_exit=$?
+  fi
+  printf 'failed to pull pinned %s image within %ss; retained log: %s\n' \
+    "${image_label}" "${IMAGE_PULL_TIMEOUT_SECONDS}" "${pull_log}" >&2
+  return "${pull_exit}"
+}
+
 assert_seed_running() {
   local checkpoint=$1
 
@@ -66,10 +130,19 @@ assert_seed_running() {
   fi
 }
 
-docker image inspect "${KAFKA_IMAGE}" >/dev/null
-docker image inspect "${PROXY_IMAGE}" >/dev/null
-docker image inspect "${KAFBAT_IMAGE}" >/dev/null
-docker image inspect "${SEED_IMAGE}" >/dev/null
+require_positive_integer MEMKAFKA_API_VERSION_IMAGE_PULL_TIMEOUT_SECONDS \
+  "${IMAGE_PULL_TIMEOUT_SECONDS}"
+require_positive_integer MEMKAFKA_API_VERSION_INFRASTRUCTURE_TIMEOUT_SECONDS \
+  "${INFRASTRUCTURE_TIMEOUT_SECONDS}"
+require_positive_integer MEMKAFKA_API_VERSION_TERMINATION_GRACE_SECONDS \
+  "${TERMINATION_GRACE_SECONDS}"
+
+prepare_remote_image Kafka "${KAFKA_IMAGE}" "${LOG_DIR}/kafka-image-pull.log"
+prepare_remote_image Kafbat "${KAFBAT_IMAGE}" "${LOG_DIR}/kafbat-image-pull.log"
+run_bounded "${INFRASTRUCTURE_TIMEOUT_SECONDS}" "inspect local recorder image" \
+  docker image inspect "${PROXY_IMAGE}" >/dev/null
+run_bounded "${INFRASTRUCTURE_TIMEOUT_SECONDS}" "inspect local Kafbat seed image" \
+  docker image inspect "${SEED_IMAGE}" >/dev/null
 docker network create "${NETWORK}" >/dev/null
 
 docker run --detach \

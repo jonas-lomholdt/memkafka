@@ -12,13 +12,19 @@ readonly BOUNDED_COMMAND_BEHAVIOR="${SCRIPT_DIRECTORY}/bounded-command-behavior.
 readonly REAL_PYTHON3="$(command -v python3)"
 readonly TEST_ROOT="$(mktemp -d)"
 readonly FAKE_BIN="${TEST_ROOT}/bin"
+readonly KAFKA_IMAGE="apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
+readonly KAFBAT_IMAGE="ghcr.io/kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1"
 
 RUNNER_PID=""
 RUN_OUTPUT=""
 FAKE_CHILD_PID_FILE=""
 FAKE_DESCENDANT_PID_FILE=""
 FAKE_SUPERVISOR_PID_FILE=""
+FAKE_PULL_PID_FILE=""
 FAKE_DOCKER_LOG=""
+FAKE_EVENT_LOG=""
+FAKE_SUPERVISOR_LOG=""
+FAKE_IMAGE_STATE_FILE=""
 SPAWN_SIGNAL_MARKER=""
 
 terminate_exact_pid() {
@@ -52,6 +58,9 @@ cleanup() {
   if [[ -n "${FAKE_SUPERVISOR_PID_FILE}" && -s "${FAKE_SUPERVISOR_PID_FILE}" ]]; then
     terminate_exact_pid "$(<"${FAKE_SUPERVISOR_PID_FILE}")"
   fi
+  if [[ -n "${FAKE_PULL_PID_FILE}" && -s "${FAKE_PULL_PID_FILE}" ]]; then
+    terminate_exact_pid "$(<"${FAKE_PULL_PID_FILE}")"
+  fi
   rm -rf "${TEST_ROOT}"
   return "${exit_code}"
 }
@@ -68,12 +77,19 @@ start_runner() {
   local working_directory=$3
   local build_timeout=${4:-1}
   local bash_environment=${5:-}
+  local missing_images=${6:-}
+  local pull_mode=${7:-success}
+  local pull_timeout=${8:-300}
 
   RUN_OUTPUT="${TEST_ROOT}/${name}.out"
   FAKE_CHILD_PID_FILE="${TEST_ROOT}/${name}-child.pid"
   FAKE_DESCENDANT_PID_FILE="${TEST_ROOT}/${name}-descendant.pid"
   FAKE_SUPERVISOR_PID_FILE="${TEST_ROOT}/${name}-supervisor.pid"
+  FAKE_PULL_PID_FILE="${TEST_ROOT}/${name}-pull.pid"
   FAKE_DOCKER_LOG="${TEST_ROOT}/${name}-docker.log"
+  FAKE_EVENT_LOG="${TEST_ROOT}/${name}-events.log"
+  FAKE_SUPERVISOR_LOG="${TEST_ROOT}/${name}-supervisors.log"
+  FAKE_IMAGE_STATE_FILE="${TEST_ROOT}/${name}-images.txt"
   SPAWN_SIGNAL_MARKER="${TEST_ROOT}/${name}-spawn-signal"
   (
     cd "${working_directory}"
@@ -84,12 +100,19 @@ start_runner() {
       FAKE_RUN_CHILD_PID_FILE="${FAKE_CHILD_PID_FILE}" \
       FAKE_RUN_DESCENDANT_PID_FILE="${FAKE_DESCENDANT_PID_FILE}" \
       FAKE_RUN_SUPERVISOR_PID_FILE="${FAKE_SUPERVISOR_PID_FILE}" \
+      FAKE_RUN_PULL_PID_FILE="${FAKE_PULL_PID_FILE}" \
       FAKE_RUN_DOCKER_LOG="${FAKE_DOCKER_LOG}" \
+      FAKE_RUN_EVENT_LOG="${FAKE_EVENT_LOG}" \
+      FAKE_RUN_SUPERVISOR_LOG="${FAKE_SUPERVISOR_LOG}" \
+      FAKE_RUN_IMAGE_STATE_FILE="${FAKE_IMAGE_STATE_FILE}" \
+      FAKE_RUN_MISSING_IMAGES="${missing_images}" \
+      FAKE_RUN_PULL_MODE="${pull_mode}" \
       FAKE_RUN_REAL_PYTHON3="${REAL_PYTHON3}" \
       FAKE_RUN_SPAWN_SIGNAL_MARKER="${SPAWN_SIGNAL_MARKER}" \
       BASH_ENV="${bash_environment}" \
       MEMKAFKA_API_VERSION_ARTIFACT_DIR="${TEST_ROOT}/${name}-artifacts" \
       MEMKAFKA_API_VERSION_RECORDER_BUILD_TIMEOUT_SECONDS="${build_timeout}" \
+      MEMKAFKA_API_VERSION_IMAGE_PULL_TIMEOUT_SECONDS="${pull_timeout}" \
       MEMKAFKA_API_VERSION_TERMINATION_GRACE_SECONDS=1 \
       "${RUN_SCRIPT}" --check
   ) >"${RUN_OUTPUT}" 2>&1 &
@@ -104,6 +127,134 @@ start_runner() {
     fi
     sleep 0.05
   done
+}
+
+image_log_path() {
+  local name=$1
+  local image_name=$2
+
+  find "${TEST_ROOT}/${name}-artifacts" \
+    -type f -name "${image_name}-image-pull.log" -print -quit
+}
+
+test_cold_remote_images_are_pulled_before_build_and_startup() {
+  local cargo_line
+  local kafka_log
+  local kafka_pull_line
+  local kafbat_log
+
+  start_runner cold-images fail "${REPOSITORY_ROOT}" 30 "" \
+    "${KAFKA_IMAGE} ${KAFBAT_IMAGE}" success 7
+  if ! wait_for_runner_with_deadline 8; then
+    printf 'cold-image runner did not reach the recorder build\n' >&2
+    return 1
+  fi
+  if ((RUN_EXIT != 79)); then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'cold-image runner exited %d, expected fake build exit 79\n' "${RUN_EXIT}" >&2
+    return 1
+  fi
+  if ! grep -Fx "pull ${KAFKA_IMAGE}" "${FAKE_DOCKER_LOG}" >/dev/null \
+    || ! grep -Fx "pull ${KAFBAT_IMAGE}" "${FAKE_DOCKER_LOG}" >/dev/null; then
+    cat "${FAKE_DOCKER_LOG}" >&2
+    printf 'runner did not explicitly pull both missing pinned images\n' >&2
+    return 1
+  fi
+  if grep -E '^pull (memkafka-api-version-proxy:test|memkafka-kafbat-seed:ci)$' \
+      "${FAKE_DOCKER_LOG}" >/dev/null; then
+    cat "${FAKE_DOCKER_LOG}" >&2
+    printf 'runner tried to pull a locally owned task image\n' >&2
+    return 1
+  fi
+  grep -F -- \
+    "--timeout 7 --termination-grace 1 --label pull pinned Kafka image -- docker pull ${KAFKA_IMAGE}" \
+    "${FAKE_SUPERVISOR_LOG}" >/dev/null
+  kafka_pull_line="$(grep -nF "docker pull ${KAFKA_IMAGE}" "${FAKE_EVENT_LOG}" | cut -d: -f1)"
+  cargo_line="$(grep -nF 'cargo build --locked --manifest-path tests/api-versions/proxy/Cargo.toml' \
+    "${FAKE_EVENT_LOG}" | cut -d: -f1)"
+  if ((kafka_pull_line >= cargo_line)); then
+    cat "${FAKE_EVENT_LOG}" >&2
+    printf 'Kafka pull did not complete before build/startup work\n' >&2
+    return 1
+  fi
+  kafka_log="$(image_log_path cold-images kafka)"
+  kafbat_log="$(image_log_path cold-images kafbat)"
+  grep -Fx "simulated pulled image: ${KAFKA_IMAGE}" "${kafka_log}" >/dev/null
+  grep -Fx "simulated pulled image: ${KAFBAT_IMAGE}" "${kafbat_log}" >/dev/null
+}
+
+test_warm_remote_images_are_inspected_without_pull() {
+  local kafka_log
+  local kafbat_log
+
+  start_runner warm-images fail "${REPOSITORY_ROOT}" 30
+  if ! wait_for_runner_with_deadline 8; then
+    printf 'warm-image runner did not reach the recorder build\n' >&2
+    return 1
+  fi
+  if ((RUN_EXIT != 79)); then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'warm-image runner exited %d, expected fake build exit 79\n' "${RUN_EXIT}" >&2
+    return 1
+  fi
+  if grep -E '^pull ' "${FAKE_DOCKER_LOG}" >/dev/null; then
+    cat "${FAKE_DOCKER_LOG}" >&2
+    printf 'warm-image runner performed an unnecessary pull\n' >&2
+    return 1
+  fi
+  grep -Fx "image inspect ${KAFKA_IMAGE}" "${FAKE_DOCKER_LOG}" >/dev/null
+  grep -Fx "image inspect ${KAFBAT_IMAGE}" "${FAKE_DOCKER_LOG}" >/dev/null
+  kafka_log="$(image_log_path warm-images kafka)"
+  kafbat_log="$(image_log_path warm-images kafbat)"
+  grep -Fx "using cached pinned Kafka image: ${KAFKA_IMAGE}" "${kafka_log}" >/dev/null
+  grep -Fx "using cached pinned Kafbat image: ${KAFBAT_IMAGE}" "${kafbat_log}" >/dev/null
+}
+
+test_image_pull_failure_stops_before_build_and_preserves_log() {
+  local kafka_log
+
+  start_runner pull-failure fail "${REPOSITORY_ROOT}" 30 "" \
+    "${KAFKA_IMAGE}" fail 7
+  if ! wait_for_runner_with_deadline 8; then
+    printf 'failed image pull did not stop the runner\n' >&2
+    return 1
+  fi
+  if ((RUN_EXIT != 93)); then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'failed image pull exited %d, expected 93\n' "${RUN_EXIT}" >&2
+    return 1
+  fi
+  if grep -F 'cargo build ' "${FAKE_EVENT_LOG}" >/dev/null; then
+    cat "${FAKE_EVENT_LOG}" >&2
+    printf 'runner continued to build after failed image pull\n' >&2
+    return 1
+  fi
+  kafka_log="$(image_log_path pull-failure kafka)"
+  grep -Fx "simulated pull failure: ${KAFKA_IMAGE}" "${kafka_log}" >/dev/null
+}
+
+test_image_pull_timeout_stops_and_reaps_the_pull() {
+  local kafka_log
+
+  start_runner pull-timeout fail "${REPOSITORY_ROOT}" 30 "" \
+    "${KAFKA_IMAGE}" hang 1
+  if ! wait_for_runner_with_deadline 8; then
+    printf 'timed-out image pull did not stop the runner\n' >&2
+    return 1
+  fi
+  if ((RUN_EXIT != 124)); then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'timed-out image pull exited %d, expected 124\n' "${RUN_EXIT}" >&2
+    return 1
+  fi
+  kafka_log="$(image_log_path pull-timeout kafka)"
+  grep -F 'timed out after 1s: pull pinned Kafka image' "${kafka_log}" >/dev/null
+  assert_pid_file_stopped "${FAKE_PULL_PID_FILE}" "timed-out image pull"
+  if grep -F 'cargo build ' "${FAKE_EVENT_LOG}" >/dev/null; then
+    cat "${FAKE_EVENT_LOG}" >&2
+    printf 'runner continued to build after image pull timeout\n' >&2
+    return 1
+  fi
 }
 
 wait_for_runner_with_deadline() {
@@ -313,7 +464,17 @@ case "${1:-all}" in
   outside)
     test_invocation_outside_repository_uses_repository_root
     ;;
+  images)
+    test_cold_remote_images_are_pulled_before_build_and_startup
+    test_warm_remote_images_are_inspected_without_pull
+    test_image_pull_failure_stops_before_build_and_preserves_log
+    test_image_pull_timeout_stops_and_reaps_the_pull
+    ;;
   all)
+    test_cold_remote_images_are_pulled_before_build_and_startup
+    test_warm_remote_images_are_inspected_without_pull
+    test_image_pull_failure_stops_before_build_and_preserves_log
+    test_image_pull_timeout_stops_and_reaps_the_pull
     test_build_timeout_is_bounded_and_reaps_child
     test_signal_exits_and_cleans_once TERM 143
     test_signal_exits_and_cleans_once INT 130
@@ -323,7 +484,7 @@ case "${1:-all}" in
     test_invocation_outside_repository_uses_repository_root
     ;;
   *)
-    printf 'usage: %s [timeout|term|int|immediate|descendant|outside|all]\n' "$0" >&2
+    printf 'usage: %s [timeout|term|int|immediate|descendant|outside|images|all]\n' "$0" >&2
     exit 2
     ;;
 esac

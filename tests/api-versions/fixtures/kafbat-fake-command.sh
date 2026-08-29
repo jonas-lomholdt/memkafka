@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+image_is_missing() {
+  local image=$1
+  local missing_image
+
+  if grep -Fx "${image}" "${FAKE_IMAGE_STATE_FILE}" >/dev/null 2>&1; then
+    return 1
+  fi
+  for missing_image in ${FAKE_MISSING_IMAGES:-}; do
+    if [[ "${missing_image}" == "${image}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 case "${0##*/}" in
   curl)
     printf '%s\n' "$*" >>"${FAKE_CURL_LOG}"
@@ -53,7 +68,36 @@ case "${0##*/}" in
     printf '%s %s\n' "${operation}" "$*" >>"${FAKE_DOCKER_LOG}"
     case "${operation}" in
       image)
+        if [[ "${1:-}" == inspect ]] && image_is_missing "${2:-}"; then
+          printf 'No such image: %s\n' "${2:-}" >&2
+          exit 1
+        fi
         exit 0
+        ;;
+      pull)
+        case "${FAKE_PULL_MODE:-success}" in
+          fail)
+            printf 'simulated pull failure: %s\n' "${1:-}" >&2
+            exit 93
+            ;;
+          hang)
+            printf '%s\n' "$$" >"${FAKE_PULL_PID_FILE}"
+            trap 'exit 143' TERM
+            trap 'exit 130' INT
+            while true; do
+              /bin/sleep 1
+            done
+            ;;
+          success)
+            printf '%s\n' "${1:-}" >>"${FAKE_IMAGE_STATE_FILE}"
+            printf 'simulated pulled image: %s\n' "${1:-}"
+            exit 0
+            ;;
+          *)
+            printf 'unexpected fake pull mode: %s\n' "${FAKE_PULL_MODE}" >&2
+            exit 94
+            ;;
+        esac
         ;;
       network)
         exit 0
