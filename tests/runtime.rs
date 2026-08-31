@@ -1,12 +1,18 @@
 use std::time::Duration;
 
+use bytes::{Bytes, BytesMut};
 use clap::Parser;
+use kafka_protocol::messages::{
+    ApiKey, ApiVersionsRequest, RequestHeader, RequestKind, ResponseHeader, ResponseKind,
+};
+use kafka_protocol::protocol::{Decodable, StrBytes, encode_request_header_into_buffer};
 use memkafka::{
     config::{AdvertisedAddress, Cli, Config},
+    kafka::frame::{read_frame, write_frame},
     server::{BoundEndpoints, readiness_message, serve},
 };
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::oneshot,
     time::{sleep, timeout},
@@ -123,4 +129,86 @@ async fn shutdown_bounds_an_incomplete_schema_registry_request() {
         .expect("server exceeded its HTTP shutdown grace period")
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn connection_failure_does_not_stop_the_kafka_listener() {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(serve(ephemeral_config(), ready_tx, async {
+        let _ = shutdown_rx.await;
+    }));
+    let endpoints = timeout(Duration::from_secs(1), ready_rx)
+        .await
+        .expect("server readiness timed out")
+        .expect("server readiness channel closed");
+    let mut offender = TcpStream::connect(endpoints.kafka)
+        .await
+        .expect("connect offending Kafka socket");
+    let mut survivor = TcpStream::connect(endpoints.kafka)
+        .await
+        .expect("connect surviving Kafka socket");
+
+    write_frame(
+        &mut offender,
+        &Bytes::from_static(&[0x7f, 0xff, 0x00, 0x00, 0x00, 0x00, 0x20, 0x01]),
+    )
+    .await
+    .expect("write unknown API request");
+    let mut byte = [0_u8; 1];
+    assert_eq!(
+        timeout(Duration::from_secs(1), offender.read(&mut byte))
+            .await
+            .expect("offending connection stayed open")
+            .expect("read offending connection"),
+        0
+    );
+
+    write_frame(&mut survivor, &api_versions_request(8_194))
+        .await
+        .expect("write supported request on surviving socket");
+    let mut response = timeout(Duration::from_secs(1), read_frame(&mut survivor))
+        .await
+        .expect("survivor response timed out")
+        .expect("read survivor response")
+        .expect("surviving socket was closed");
+    let header = ResponseHeader::decode(
+        &mut response,
+        ApiKey::ApiVersions.response_header_version(4),
+    )
+    .expect("decode survivor response header");
+    let body = ResponseKind::decode(ApiKey::ApiVersions, &mut response, 4)
+        .expect("decode survivor response body");
+    assert_eq!(header.correlation_id, 8_194);
+    let ResponseKind::ApiVersions(body) = body else {
+        panic!("expected ApiVersions response");
+    };
+    assert_eq!(body.error_code, 0);
+    assert!(!body.api_keys.is_empty());
+    assert!(response.is_empty());
+
+    shutdown_tx.send(()).expect("request server shutdown");
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server did not shut down")
+        .expect("server task panicked")
+        .expect("server returned an error");
+}
+
+fn api_versions_request(correlation_id: i32) -> Bytes {
+    let version = 4;
+    let header = RequestHeader::default()
+        .with_request_api_key(ApiKey::ApiVersions as i16)
+        .with_request_api_version(version)
+        .with_correlation_id(correlation_id)
+        .with_client_id(Some(StrBytes::from_static_str("runtime-test")));
+    let request = ApiVersionsRequest::default()
+        .with_client_software_name(StrBytes::from_static_str("runtime-test"))
+        .with_client_software_version(StrBytes::from_static_str("1"));
+    let mut encoded = BytesMut::new();
+    encode_request_header_into_buffer(&mut encoded, &header).expect("encode request header");
+    RequestKind::ApiVersions(request)
+        .encode(&mut encoded, version)
+        .expect("encode request body");
+    encoded.freeze()
 }

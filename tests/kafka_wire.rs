@@ -1,6 +1,6 @@
 use std::{num::NonZeroU32, time::Duration};
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use clap::Parser;
 use kafka_protocol::{
     ResponseError,
@@ -35,11 +35,9 @@ use kafka_protocol::{
     },
 };
 use memkafka::kafka::{
-    codec::{
-        DecodeStage, DecodedFrame, DecodedRequest, RequestDecodeError, RequestPrefix, decode_frame,
-        decode_request, encode_response,
-    },
-    dispatcher::{DispatchError, Dispatcher},
+    codec::{DecodeStage, DecodedFrame, RequestDecodeError, RequestPrefix, decode_frame},
+    connection,
+    dispatcher::Dispatcher,
     frame::{read_frame, write_frame},
 };
 use memkafka::{
@@ -48,8 +46,10 @@ use memkafka::{
     server::serve,
 };
 use tokio::{
-    net::TcpStream,
-    sync::oneshot,
+    io::AsyncReadExt,
+    net::{TcpListener, TcpStream},
+    sync::{oneshot, watch},
+    task::JoinHandle,
     time::{advance, timeout},
 };
 
@@ -244,125 +244,22 @@ fn codec_reports_malformed_stages_with_available_context() {
 }
 
 #[tokio::test]
-async fn dispatch_version_gate_runs_before_body_matching() {
-    let dispatcher = test_dispatcher();
-    let mismatched_body = RequestKind::ApiVersions(ApiVersionsRequest::default());
-    let request = |api_key, version| DecodedRequest {
-        header: RequestHeader::default()
-            .with_request_api_key(api_key as i16)
-            .with_request_api_version(version),
-        api_key,
-        body: mismatched_body.clone(),
-    };
-
-    assert_eq!(
-        dispatcher.dispatch(&request(ApiKey::Metadata, 3)).await,
-        Err(DispatchError::UnsupportedVersion {
-            api_key: ApiKey::Metadata,
-            version: 3,
-        })
-    );
-    assert_eq!(
-        dispatcher.dispatch(&request(ApiKey::Metadata, 4)).await,
-        Err(DispatchError::BodyMismatch(ApiKey::Metadata))
-    );
-    assert_eq!(
-        dispatcher.dispatch(&request(ApiKey::DeleteTopics, 0)).await,
-        Err(DispatchError::UnsupportedApi(ApiKey::DeleteTopics))
-    );
-}
-
-#[tokio::test]
-async fn unsupported_version_shape_stays_out_of_dispatch_until_routing() {
-    let request = DecodedRequest {
-        header: RequestHeader::default()
-            .with_request_api_key(ApiKey::Metadata as i16)
-            .with_request_api_version(3),
-        api_key: ApiKey::Metadata,
-        body: RequestKind::Metadata(MetadataRequest::default().with_topics(Some(vec![
-            MetadataRequestTopic::default().with_name(Some(TopicName::from(
-                StrBytes::from_static_str("unsupported-topic"),
-            ))),
-        ]))),
-    };
-
-    assert_eq!(
-        test_dispatcher().dispatch(&request).await,
-        Err(DispatchError::UnsupportedVersion {
-            api_key: ApiKey::Metadata,
-            version: 3,
-        })
-    );
-}
-
-#[tokio::test]
-async fn rejects_versions_below_current_client_floor_before_body_matching() {
-    let dispatcher = test_dispatcher();
-    let (mismatched_body_api_key, mismatched_body) = (
-        ApiKey::DescribeGroups,
-        RequestKind::DescribeGroups(DescribeGroupsRequest::default()),
-    );
-    let rejected_versions = [
-        (ApiKey::Produce, 6),
-        (ApiKey::ListOffsets, 2),
-        (ApiKey::Metadata, 3),
-        (ApiKey::OffsetCommit, 6),
-        (ApiKey::OffsetFetch, 4),
-        (ApiKey::FindCoordinator, 1),
-        (ApiKey::JoinGroup, 4),
-        (ApiKey::Heartbeat, 2),
-        (ApiKey::LeaveGroup, 0),
-        (ApiKey::SyncGroup, 2),
-        (ApiKey::ApiVersions, 2),
-        (ApiKey::CreateTopics, 3),
-    ];
-
-    assert!(
-        rejected_versions
-            .iter()
-            .all(|(api_key, _)| *api_key != mismatched_body_api_key),
-        "mismatched body API key must be absent from every raised-floor row"
-    );
-
-    for (api_key, rejected_version) in rejected_versions {
-        let request = DecodedRequest {
-            header: RequestHeader::default()
-                .with_request_api_key(api_key as i16)
-                .with_request_api_version(rejected_version),
-            api_key,
-            body: mismatched_body.clone(),
-        };
-
-        assert_eq!(
-            dispatcher.dispatch(&request).await,
-            Err(DispatchError::UnsupportedVersion {
-                api_key,
-                version: rejected_version,
-            }),
-            "{api_key:?} v{rejected_version} must be rejected before body matching"
-        );
-    }
-}
-
-#[tokio::test]
 async fn api_versions_v3_round_trips_with_correlation_id() {
-    let request = encode_api_versions_request(42);
-
-    let decoded = decode_request(request).expect("decode ApiVersions request");
-    let response = test_dispatcher()
-        .dispatch(&decoded)
-        .await
-        .expect("dispatch ApiVersions request");
-    let encoded = encode_response(
-        decoded.api_key,
-        decoded.header.request_api_version,
-        decoded.header.correlation_id,
-        &response,
+    let response = dispatch_kind(
+        &test_dispatcher(),
+        ApiKey::ApiVersions,
+        3,
+        RequestKind::ApiVersions(
+            ApiVersionsRequest::default()
+                .with_client_software_name(StrBytes::from_static_str("memkafka-test"))
+                .with_client_software_version(StrBytes::from_static_str("1.0")),
+        ),
     )
-    .expect("encode ApiVersions response");
-    let (header, response) = decode_api_versions_response(encoded);
+    .await;
+    let ResponseKind::ApiVersions(response) = response else {
+        panic!("expected ApiVersions response");
+    };
 
-    assert_eq!(header.correlation_id, 42);
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
     assert_eq!(response.api_keys.len(), 17);
@@ -474,6 +371,567 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         .expect("server shutdown timed out")
         .expect("server task panicked")
         .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn same_connection_survives_a_typed_unsupported_version_response() {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut server = tokio::spawn(serve(ephemeral_config(), ready_tx, async {
+        let _ = shutdown_rx.await;
+    }));
+    let endpoints = match timeout(Duration::from_secs(1), ready_rx).await {
+        Ok(Ok(endpoints)) => endpoints,
+        ready_result => {
+            let server_result = timeout(Duration::from_secs(1), &mut server).await;
+            panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
+        }
+    };
+    let mut connection = TcpStream::connect(endpoints.kafka)
+        .await
+        .expect("connect to Kafka endpoint");
+
+    let unsupported = encode_request_kind(
+        ApiKey::Metadata,
+        3,
+        7_301,
+        RequestKind::Metadata(MetadataRequest::default().with_topics(Some(vec![
+            MetadataRequestTopic::default().with_name(Some(topic_name("same-connection-topic"))),
+        ]))),
+    );
+    write_frame(&mut connection, &unsupported)
+        .await
+        .expect("write unsupported Metadata request");
+    let encoded = timeout(Duration::from_secs(1), read_frame(&mut connection))
+        .await
+        .expect("unsupported response timed out")
+        .expect("read unsupported response")
+        .expect("typed rejection closed the connection");
+    let (header, response) = decode_response_kind(ApiKey::Metadata, 3, encoded);
+    assert_eq!(header.correlation_id, 7_301);
+    let ResponseKind::Metadata(response) = response else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(response.topics.len(), 1);
+    assert_eq!(
+        response.topics[0].error_code,
+        ResponseError::UnsupportedVersion.code()
+    );
+    assert_eq!(
+        response.topics[0].name.as_ref().map(|name| name.0.as_str()),
+        Some("same-connection-topic")
+    );
+
+    write_frame(&mut connection, &encode_api_versions_request_for(7_302, 4))
+        .await
+        .expect("write supported ApiVersions request");
+    let encoded = timeout(Duration::from_secs(1), read_frame(&mut connection))
+        .await
+        .expect("ApiVersions response timed out")
+        .expect("read ApiVersions response")
+        .expect("server closed the surviving connection");
+    let (header, response) = decode_response_kind(ApiKey::ApiVersions, 4, encoded);
+    assert_eq!(header.correlation_id, 7_302);
+    let ResponseKind::ApiVersions(response) = response else {
+        panic!("expected ApiVersions response");
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.api_keys.len(), 17);
+
+    shutdown_tx.send(()).expect("request server shutdown");
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server shutdown timed out")
+        .expect("server task panicked")
+        .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn fatal_connection_inputs_close_only_the_offending_socket() {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(serve(ephemeral_config(), ready_tx, async {
+        let _ = shutdown_rx.await;
+    }));
+    let endpoints = timeout(Duration::from_secs(1), ready_rx)
+        .await
+        .expect("server readiness timed out")
+        .expect("server readiness channel closed");
+
+    let mut trailing = BytesMut::from(&encode_api_versions_request_for(7_405, 4)[..]);
+    trailing.put_u8(0xff);
+    let fatal_frames = [
+        (
+            "unknown raw API key",
+            Bytes::from_static(&[0x7f, 0xff, 0x00, 0x00, 0x00, 0x00, 0x1c, 0xe9]),
+        ),
+        (
+            "generated but unadvertised API",
+            encode_request_kind(
+                ApiKey::DeleteTopics,
+                ApiKey::DeleteTopics.valid_versions().min,
+                7_402,
+                RequestKind::DeleteTopics(Default::default()),
+            ),
+        ),
+        (
+            "out-of-generated-schema version",
+            raw_request_prefix(
+                ApiKey::Metadata as i16,
+                ApiKey::Metadata.valid_versions().max + 1,
+                7_403,
+            ),
+        ),
+        (
+            "malformed body",
+            encode_request_header_only(ApiKey::Metadata, 4, 7_404),
+        ),
+        ("trailing bytes", trailing.freeze()),
+    ];
+
+    for (case, frame) in fatal_frames {
+        let mut offender = TcpStream::connect(endpoints.kafka)
+            .await
+            .unwrap_or_else(|error| panic!("connect offender for {case}: {error}"));
+        let mut survivor = TcpStream::connect(endpoints.kafka)
+            .await
+            .unwrap_or_else(|error| panic!("connect survivor for {case}: {error}"));
+
+        write_frame(&mut offender, &frame)
+            .await
+            .unwrap_or_else(|error| panic!("write fatal frame for {case}: {error}"));
+        assert_socket_closed(&mut offender, case).await;
+
+        let correlation_id = 7_500 + i32::from(frame[0]);
+        write_frame(
+            &mut survivor,
+            &encode_api_versions_request_for(correlation_id, 4),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("write survivor request after {case}: {error}"));
+        let encoded = timeout(Duration::from_secs(1), read_frame(&mut survivor))
+            .await
+            .unwrap_or_else(|_| panic!("survivor timed out after {case}"))
+            .unwrap_or_else(|error| panic!("read survivor response after {case}: {error}"))
+            .unwrap_or_else(|| panic!("survivor closed after {case}"));
+        let (header, response) = decode_response_kind(ApiKey::ApiVersions, 4, encoded);
+        assert_eq!(header.correlation_id, correlation_id);
+        let ResponseKind::ApiVersions(response) = response else {
+            panic!("expected ApiVersions response after {case}");
+        };
+        assert_eq!(response.error_code, 0, "survivor failed after {case}");
+    }
+
+    shutdown_tx.send(()).expect("request server shutdown");
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server shutdown timed out")
+        .expect("server task panicked")
+        .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn rejected_produce_versions_do_not_append_and_acks_zero_writes_nothing() {
+    let server = SpawnedServer::start(ephemeral_config()).await;
+    let mut connection = server.connect().await;
+
+    write_frame(
+        &mut connection,
+        &encode_request_kind(
+            ApiKey::CreateTopics,
+            6,
+            7_601,
+            RequestKind::CreateTopics(
+                CreateTopicsRequest::default()
+                    .with_topics(vec![creatable_topic("rejected-produce", 1, 1)])
+                    .with_timeout_ms(1_000),
+            ),
+        ),
+    )
+    .await
+    .expect("create observation topic");
+    let (_, response) = decode_response_kind(
+        ApiKey::CreateTopics,
+        6,
+        read_response(&mut connection, "CreateTopics").await,
+    );
+    let ResponseKind::CreateTopics(response) = response else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(response.topics[0].error_code, 0);
+
+    for (correlation_id, acks) in [(7_602, 1), (7_604, 0)] {
+        write_frame(
+            &mut connection,
+            &encode_request_kind(
+                ApiKey::Produce,
+                6,
+                correlation_id,
+                RequestKind::Produce(
+                    ProduceRequest::default()
+                        .with_acks(acks)
+                        .with_timeout_ms(1_000)
+                        .with_topic_data(vec![produce_topic(
+                            "rejected-produce",
+                            vec![produce_partition(0, record_batch(&["must-not-append"]))],
+                        )]),
+                ),
+            ),
+        )
+        .await
+        .expect("write unsupported Produce");
+
+        if acks == 0 {
+            assert!(
+                timeout(Duration::from_millis(50), read_frame(&mut connection))
+                    .await
+                    .is_err(),
+                "unsupported acks=0 Produce wrote response bytes"
+            );
+            write_frame(
+                &mut connection,
+                &encode_api_versions_request_for(correlation_id + 1, 4),
+            )
+            .await
+            .expect("reuse connection after rejected acks=0 Produce");
+            let (header, response) = decode_response_kind(
+                ApiKey::ApiVersions,
+                4,
+                read_response(&mut connection, "ApiVersions after acks=0").await,
+            );
+            assert_eq!(header.correlation_id, correlation_id + 1);
+            let ResponseKind::ApiVersions(response) = response else {
+                panic!("expected ApiVersions response");
+            };
+            assert_eq!(response.error_code, 0);
+        } else {
+            let (header, response) = decode_response_kind(
+                ApiKey::Produce,
+                6,
+                read_response(&mut connection, "unsupported Produce").await,
+            );
+            assert_eq!(header.correlation_id, correlation_id);
+            let ResponseKind::Produce(response) = response else {
+                panic!("expected Produce response");
+            };
+            assert_eq!(response.responses.len(), 1);
+            assert_eq!(response.responses[0].name.0.as_str(), "rejected-produce");
+            assert_eq!(response.responses[0].partition_responses.len(), 1);
+            let partition = &response.responses[0].partition_responses[0];
+            assert_eq!(partition.index, 0);
+            assert_eq!(
+                partition.error_code,
+                ResponseError::UnsupportedVersion.code()
+            );
+            assert_eq!(partition.base_offset, -1);
+        }
+
+        write_frame(
+            &mut connection,
+            &encode_request_kind(
+                ApiKey::ListOffsets,
+                3,
+                correlation_id + 2,
+                RequestKind::ListOffsets(
+                    ListOffsetsRequest::default()
+                        .with_replica_id(BrokerId::from(-1))
+                        .with_isolation_level(0)
+                        .with_topics(vec![list_offsets_topic("rejected-produce", vec![(0, -1)])]),
+                ),
+            ),
+        )
+        .await
+        .expect("write ListOffsets observation");
+        let (_, response) = decode_response_kind(
+            ApiKey::ListOffsets,
+            3,
+            read_response(&mut connection, "ListOffsets after rejected Produce").await,
+        );
+        let ResponseKind::ListOffsets(response) = response else {
+            panic!("expected ListOffsets response");
+        };
+        let partition = &response.topics[0].partitions[0];
+        assert_eq!(partition.partition_index, 0);
+        assert_eq!(partition.error_code, 0);
+        assert_eq!(partition.offset, 0, "rejected Produce appended a record");
+    }
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejected_create_topics_does_not_create_the_named_topic() {
+    let mut config = ephemeral_config();
+    config.auto_create_topics = false;
+    let server = SpawnedServer::start(config).await;
+    let mut connection = server.connect().await;
+
+    write_frame(
+        &mut connection,
+        &encode_request_kind(
+            ApiKey::CreateTopics,
+            3,
+            7_701,
+            RequestKind::CreateTopics(
+                CreateTopicsRequest::default()
+                    .with_topics(vec![creatable_topic("must-stay-absent", 1, 1)])
+                    .with_timeout_ms(1_000),
+            ),
+        ),
+    )
+    .await
+    .expect("write unsupported CreateTopics");
+    let (header, response) = decode_response_kind(
+        ApiKey::CreateTopics,
+        3,
+        read_response(&mut connection, "unsupported CreateTopics").await,
+    );
+    assert_eq!(header.correlation_id, 7_701);
+    let ResponseKind::CreateTopics(response) = response else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(response.topics.len(), 1);
+    assert_eq!(response.topics[0].name.0.as_str(), "must-stay-absent");
+    assert_eq!(
+        response.topics[0].error_code,
+        ResponseError::UnsupportedVersion.code()
+    );
+
+    write_frame(
+        &mut connection,
+        &encode_metadata_request(7_702, "must-stay-absent", false),
+    )
+    .await
+    .expect("write Metadata observation");
+    let (_, response) = decode_response_kind(
+        ApiKey::Metadata,
+        9,
+        read_response(&mut connection, "Metadata after rejected CreateTopics").await,
+    );
+    let ResponseKind::Metadata(response) = response else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(response.topics.len(), 1);
+    assert_eq!(
+        response.topics[0].name.as_ref().map(|name| name.0.as_str()),
+        Some("must-stay-absent")
+    );
+    assert_eq!(
+        response.topics[0].error_code,
+        ResponseError::UnknownTopicOrPartition.code()
+    );
+    assert!(response.topics[0].partitions.is_empty());
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejected_offset_commit_does_not_store_the_requested_offset() {
+    let server = SpawnedServer::start(ephemeral_config()).await;
+    let mut connection = server.connect().await;
+    let group_id = GroupId::from(StrBytes::from_static_str("rejected-offset-group"));
+
+    write_frame(
+        &mut connection,
+        &encode_request_kind(
+            ApiKey::OffsetCommit,
+            6,
+            7_801,
+            RequestKind::OffsetCommit(
+                OffsetCommitRequest::default()
+                    .with_group_id(group_id.clone())
+                    .with_generation_id_or_member_epoch(1)
+                    .with_member_id(StrBytes::from_static_str("member-1"))
+                    .with_topics(vec![
+                        OffsetCommitRequestTopic::default()
+                            .with_name(topic_name("rejected-offset-topic"))
+                            .with_partitions(vec![
+                                OffsetCommitRequestPartition::default()
+                                    .with_partition_index(0)
+                                    .with_committed_offset(99),
+                            ]),
+                    ]),
+            ),
+        ),
+    )
+    .await
+    .expect("write unsupported OffsetCommit");
+    let (header, response) = decode_response_kind(
+        ApiKey::OffsetCommit,
+        6,
+        read_response(&mut connection, "unsupported OffsetCommit").await,
+    );
+    assert_eq!(header.correlation_id, 7_801);
+    let ResponseKind::OffsetCommit(response) = response else {
+        panic!("expected OffsetCommit response");
+    };
+    assert_eq!(response.topics[0].name.0.as_str(), "rejected-offset-topic");
+    assert_eq!(response.topics[0].partitions[0].partition_index, 0);
+    assert_eq!(
+        response.topics[0].partitions[0].error_code,
+        ResponseError::UnsupportedVersion.code()
+    );
+
+    write_frame(
+        &mut connection,
+        &encode_request_kind(
+            ApiKey::OffsetFetch,
+            5,
+            7_802,
+            RequestKind::OffsetFetch(
+                OffsetFetchRequest::default()
+                    .with_group_id(group_id)
+                    .with_topics(Some(vec![
+                        OffsetFetchRequestTopic::default()
+                            .with_name(topic_name("rejected-offset-topic"))
+                            .with_partition_indexes(vec![0]),
+                    ])),
+            ),
+        ),
+    )
+    .await
+    .expect("write OffsetFetch observation");
+    let (_, response) = decode_response_kind(
+        ApiKey::OffsetFetch,
+        5,
+        read_response(&mut connection, "OffsetFetch after rejected commit").await,
+    );
+    let ResponseKind::OffsetFetch(response) = response else {
+        panic!("expected OffsetFetch response");
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.topics[0].name.0.as_str(), "rejected-offset-topic");
+    let partition = &response.topics[0].partitions[0];
+    assert_eq!(partition.partition_index, 0);
+    assert_eq!(partition.error_code, 0);
+    assert_eq!(partition.committed_offset, -1);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejected_group_mutations_leave_the_group_catalog_unchanged() {
+    let server = SpawnedServer::start(ephemeral_config()).await;
+    let mut connection = server.connect().await;
+    let group_ids = ["rejected-join", "rejected-sync", "rejected-leave"];
+    let requests = [
+        (
+            ApiKey::JoinGroup,
+            4,
+            RequestKind::JoinGroup(
+                JoinGroupRequest::default()
+                    .with_group_id(GroupId::from(StrBytes::from_static_str(group_ids[0])))
+                    .with_session_timeout_ms(10_000)
+                    .with_rebalance_timeout_ms(30_000)
+                    .with_member_id(StrBytes::default())
+                    .with_protocol_type(StrBytes::from_static_str("consumer"))
+                    .with_protocols(vec![
+                        JoinGroupRequestProtocol::default()
+                            .with_name(StrBytes::from_static_str("cooperative-sticky"))
+                            .with_metadata(Bytes::from_static(b"subscription")),
+                    ]),
+            ),
+        ),
+        (
+            ApiKey::SyncGroup,
+            2,
+            RequestKind::SyncGroup(
+                SyncGroupRequest::default()
+                    .with_group_id(GroupId::from(StrBytes::from_static_str(group_ids[1])))
+                    .with_generation_id(1)
+                    .with_member_id(StrBytes::from_static_str("member-1")),
+            ),
+        ),
+        (
+            ApiKey::LeaveGroup,
+            0,
+            RequestKind::LeaveGroup(
+                LeaveGroupRequest::default()
+                    .with_group_id(GroupId::from(StrBytes::from_static_str(group_ids[2])))
+                    .with_member_id(StrBytes::from_static_str("member-1")),
+            ),
+        ),
+    ];
+
+    for (index, (api_key, version, request)) in requests.into_iter().enumerate() {
+        let correlation_id = 7_900 + i32::try_from(index).expect("small index");
+        write_frame(
+            &mut connection,
+            &encode_request_kind(api_key, version, correlation_id, request),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("write unsupported {api_key:?}: {error}"));
+        let (header, response) = decode_response_kind(
+            api_key,
+            version,
+            read_response(&mut connection, "unsupported group mutation").await,
+        );
+        assert_eq!(header.correlation_id, correlation_id);
+        let error_code = match response {
+            ResponseKind::JoinGroup(response) => response.error_code,
+            ResponseKind::SyncGroup(response) => response.error_code,
+            ResponseKind::LeaveGroup(response) => response.error_code,
+            _ => panic!("unexpected response for {api_key:?}"),
+        };
+        assert_eq!(error_code, ResponseError::UnsupportedVersion.code());
+    }
+
+    write_frame(
+        &mut connection,
+        &encode_request_kind(
+            ApiKey::ListGroups,
+            0,
+            7_904,
+            RequestKind::ListGroups(ListGroupsRequest::default()),
+        ),
+    )
+    .await
+    .expect("write ListGroups observation");
+    let (_, response) = decode_response_kind(
+        ApiKey::ListGroups,
+        0,
+        read_response(&mut connection, "ListGroups after rejected mutations").await,
+    );
+    let ResponseKind::ListGroups(response) = response else {
+        panic!("expected ListGroups response");
+    };
+    assert_eq!(response.error_code, 0);
+    assert!(response.groups.is_empty());
+
+    write_frame(
+        &mut connection,
+        &encode_request_kind(
+            ApiKey::DescribeGroups,
+            0,
+            7_905,
+            RequestKind::DescribeGroups(
+                DescribeGroupsRequest::default().with_groups(
+                    group_ids
+                        .into_iter()
+                        .map(|group| GroupId::from(StrBytes::from_static_str(group)))
+                        .collect(),
+                ),
+            ),
+        ),
+    )
+    .await
+    .expect("write DescribeGroups observation");
+    let (_, response) = decode_response_kind(
+        ApiKey::DescribeGroups,
+        0,
+        read_response(&mut connection, "DescribeGroups after rejected mutations").await,
+    );
+    let ResponseKind::DescribeGroups(response) = response else {
+        panic!("expected DescribeGroups response");
+    };
+    assert_eq!(response.groups.len(), 3);
+    for (group, expected_id) in response.groups.iter().zip(group_ids) {
+        assert_eq!(group.group_id.0.as_str(), expected_id);
+        assert_eq!(group.error_code, ResponseError::GroupIdNotFound.code());
+        assert!(group.members.is_empty());
+    }
+
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -1857,6 +2315,13 @@ async fn fetch_v4_returns_ordered_records_watermarks_and_partition_errors() {
 
 #[tokio::test(start_paused = true)]
 async fn fetch_v4_waits_for_min_bytes_and_wakes_after_appends() {
+    // Real socket scheduling can otherwise leave a paused Tokio runtime idle long enough to
+    // auto-advance to Fetch's max-wait deadline before this test makes its next assertion.
+    let clock_guard = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
     let broker = test_broker_state(false);
     broker
         .topics()
@@ -1915,10 +2380,16 @@ async fn fetch_v4_waits_for_min_bytes_and_wakes_after_appends() {
         .len(),
         2
     );
+    clock_guard.abort();
 }
 
 #[tokio::test(start_paused = true)]
 async fn fetch_v4_returns_empty_when_max_wait_expires() {
+    let clock_guard = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
     let broker = test_broker_state(false);
     broker
         .topics()
@@ -1937,7 +2408,9 @@ async fn fetch_v4_returns_empty_when_max_wait_expires() {
         )
         .await
     });
-    tokio::task::yield_now().await;
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
     assert!(!waiting.is_finished());
 
     advance(Duration::from_millis(99)).await;
@@ -1949,6 +2422,7 @@ async fn fetch_v4_returns_empty_when_max_wait_expires() {
     let partition = &response.responses[0].partitions[0];
     assert_eq!(partition.error_code, 0);
     assert!(partition.records.as_ref().is_none_or(Bytes::is_empty));
+    clock_guard.abort();
 }
 
 #[tokio::test]
@@ -2052,6 +2526,59 @@ fn ephemeral_config() -> Config {
     .expect("build test configuration")
 }
 
+struct SpawnedServer {
+    kafka: std::net::SocketAddr,
+    shutdown: oneshot::Sender<()>,
+    task: JoinHandle<anyhow::Result<()>>,
+}
+
+impl SpawnedServer {
+    async fn start(config: Config) -> Self {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut task = tokio::spawn(serve(config, ready_tx, async {
+            let _ = shutdown_rx.await;
+        }));
+        let endpoints = match timeout(Duration::from_secs(1), ready_rx).await {
+            Ok(Ok(endpoints)) => endpoints,
+            ready_result => {
+                let server_result = timeout(Duration::from_secs(1), &mut task).await;
+                panic!(
+                    "server did not become ready: ready={ready_result:?}, server={server_result:?}"
+                );
+            }
+        };
+        Self {
+            kafka: endpoints.kafka,
+            shutdown: shutdown_tx,
+            task,
+        }
+    }
+
+    async fn connect(&self) -> TcpStream {
+        TcpStream::connect(self.kafka)
+            .await
+            .expect("connect to Kafka endpoint")
+    }
+
+    async fn shutdown(self) {
+        self.shutdown.send(()).expect("request server shutdown");
+        timeout(Duration::from_secs(1), self.task)
+            .await
+            .expect("server shutdown timed out")
+            .expect("server task panicked")
+            .expect("server returned an error");
+    }
+}
+
+async fn read_response(connection: &mut TcpStream, context: &str) -> Bytes {
+    timeout(Duration::from_secs(1), read_frame(connection))
+        .await
+        .unwrap_or_else(|_| panic!("{context} response timed out"))
+        .unwrap_or_else(|error| panic!("read {context} response: {error}"))
+        .unwrap_or_else(|| panic!("connection closed before {context} response"))
+}
+
 fn test_dispatcher() -> Dispatcher {
     Dispatcher::new(test_broker_state(true))
 }
@@ -2072,13 +2599,7 @@ async fn dispatch_kind(
         .expect("encode request header");
     body.encode(&mut encoded_request, version)
         .expect("encode request body");
-    let decoded = decode_request(encoded_request.freeze()).expect("decode Kafka request");
-    let response = dispatcher
-        .dispatch(&decoded)
-        .await
-        .expect("dispatch Kafka request");
-    let mut encoded_response =
-        encode_response(api_key, version, 1, &response).expect("encode Kafka response");
+    let mut encoded_response = exchange_with_dispatcher(dispatcher, encoded_request.freeze()).await;
     let response_header = ResponseHeader::decode(
         &mut encoded_response,
         api_key.response_header_version(version),
@@ -2086,6 +2607,45 @@ async fn dispatch_kind(
     .expect("decode response header");
     assert_eq!(response_header.correlation_id, 1);
     ResponseKind::decode(api_key, &mut encoded_response, version).expect("decode response body")
+}
+
+async fn exchange_with_dispatcher(dispatcher: &Dispatcher, request: Bytes) -> Bytes {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback Kafka test listener");
+    let address = listener
+        .local_addr()
+        .expect("read loopback listener address");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let dispatcher = dispatcher.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener
+            .accept()
+            .await
+            .expect("accept loopback Kafka client");
+        connection::serve(socket, dispatcher, shutdown_rx).await
+    });
+    let mut client = TcpStream::connect(address)
+        .await
+        .expect("connect loopback Kafka test client");
+
+    write_frame(&mut client, &request)
+        .await
+        .expect("write loopback Kafka request");
+    let response = read_frame(&mut client)
+        .await
+        .expect("read loopback Kafka response")
+        .expect("loopback Kafka connection closed before its response");
+
+    shutdown_tx
+        .send(true)
+        .expect("stop loopback Kafka connection");
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("loopback Kafka task did not stop")
+        .expect("loopback Kafka task panicked")
+        .expect("loopback Kafka connection failed");
+    response
 }
 
 fn test_broker_state(auto_create_topics: bool) -> BrokerState {
@@ -2106,9 +2666,13 @@ fn test_broker_state_with_force(
 }
 
 fn encode_api_versions_request(correlation_id: i32) -> Bytes {
+    encode_api_versions_request_for(correlation_id, API_VERSIONS_VERSION)
+}
+
+fn encode_api_versions_request_for(correlation_id: i32, version: i16) -> Bytes {
     let header = RequestHeader::default()
         .with_request_api_key(ApiKey::ApiVersions as i16)
-        .with_request_api_version(API_VERSIONS_VERSION)
+        .with_request_api_version(version)
         .with_correlation_id(correlation_id)
         .with_client_id(Some(StrBytes::from_static_str("memkafka-wire-test")));
     let request = ApiVersionsRequest::default()
@@ -2118,10 +2682,77 @@ fn encode_api_versions_request(correlation_id: i32) -> Bytes {
 
     encode_request_header_into_buffer(&mut encoded, &header).expect("encode request header");
     RequestKind::ApiVersions(request)
-        .encode(&mut encoded, API_VERSIONS_VERSION)
+        .encode(&mut encoded, version)
         .expect("encode request body");
 
     encoded.freeze()
+}
+
+fn encode_request_kind(
+    api_key: ApiKey,
+    version: i16,
+    correlation_id: i32,
+    request: RequestKind,
+) -> Bytes {
+    let header = RequestHeader::default()
+        .with_request_api_key(api_key as i16)
+        .with_request_api_version(version)
+        .with_correlation_id(correlation_id)
+        .with_client_id(Some(StrBytes::from_static_str("memkafka-wire-test")));
+    let mut encoded = BytesMut::new();
+    encode_request_header_into_buffer(&mut encoded, &header).expect("encode request header");
+    request
+        .encode(&mut encoded, version)
+        .unwrap_or_else(|error| panic!("encode {api_key:?} v{version} request: {error}"));
+    encoded.freeze()
+}
+
+fn encode_request_header_only(api_key: ApiKey, version: i16, correlation_id: i32) -> Bytes {
+    let header = RequestHeader::default()
+        .with_request_api_key(api_key as i16)
+        .with_request_api_version(version)
+        .with_correlation_id(correlation_id)
+        .with_client_id(Some(StrBytes::from_static_str("memkafka-wire-test")));
+    let mut encoded = BytesMut::new();
+    encode_request_header_into_buffer(&mut encoded, &header).expect("encode request header");
+    encoded.freeze()
+}
+
+fn raw_request_prefix(raw_api_key: i16, version: i16, correlation_id: i32) -> Bytes {
+    let mut encoded = BytesMut::with_capacity(8);
+    encoded.put_i16(raw_api_key);
+    encoded.put_i16(version);
+    encoded.put_i32(correlation_id);
+    encoded.freeze()
+}
+
+fn decode_response_kind(
+    api_key: ApiKey,
+    version: i16,
+    mut encoded: Bytes,
+) -> (ResponseHeader, ResponseKind) {
+    let header = ResponseHeader::decode(&mut encoded, api_key.response_header_version(version))
+        .unwrap_or_else(|error| panic!("decode {api_key:?} v{version} response header: {error}"));
+    let response = ResponseKind::decode(api_key, &mut encoded, version)
+        .unwrap_or_else(|error| panic!("decode {api_key:?} v{version} response body: {error}"));
+    assert!(
+        encoded.is_empty(),
+        "{api_key:?} v{version} response has trailing bytes"
+    );
+    (header, response)
+}
+
+async fn assert_socket_closed(connection: &mut TcpStream, case: &str) {
+    let mut byte = [0_u8; 1];
+    let read = timeout(Duration::from_secs(1), connection.read(&mut byte))
+        .await
+        .unwrap_or_else(|_| panic!("offending connection stayed open for {case}"))
+        .unwrap_or_else(|error| panic!("read offending connection after {case}: {error}"));
+    assert_eq!(read, 0, "offending connection returned bytes for {case}");
+}
+
+fn topic_name(value: &'static str) -> TopicName {
+    TopicName::from(StrBytes::from_static_str(value))
 }
 
 fn encode_metadata_request(
@@ -2170,23 +2801,11 @@ async fn dispatch_metadata_request(
     topics: Option<Vec<&'static str>>,
     allow_auto_topic_creation: bool,
 ) -> MetadataResponse {
-    let decoded = decode_request(encode_metadata_topics(
-        correlation_id,
-        topics,
-        allow_auto_topic_creation,
-    ))
-    .expect("decode Metadata request");
-    let response = dispatcher
-        .dispatch(&decoded)
-        .await
-        .expect("dispatch Metadata request");
-    let encoded = encode_response(
-        decoded.api_key,
-        decoded.header.request_api_version,
-        decoded.header.correlation_id,
-        &response,
+    let encoded = exchange_with_dispatcher(
+        dispatcher,
+        encode_metadata_topics(correlation_id, topics, allow_auto_topic_creation),
     )
-    .expect("encode Metadata response");
+    .await;
     let (header, response) = decode_metadata_response(encoded);
     assert_eq!(header.correlation_id, correlation_id);
     response
@@ -2256,24 +2875,11 @@ async fn dispatch_produce_request(
     transactional_id: Option<TransactionalId>,
     topics: Vec<TopicProduceData>,
 ) -> ProduceResponse {
-    let decoded = decode_request(encode_produce_request(
-        correlation_id,
-        acks,
-        transactional_id,
-        topics,
-    ))
-    .expect("decode Produce request");
-    let response = dispatcher
-        .dispatch(&decoded)
-        .await
-        .expect("dispatch Produce request");
-    let encoded = encode_response(
-        decoded.api_key,
-        decoded.header.request_api_version,
-        decoded.header.correlation_id,
-        &response,
+    let encoded = exchange_with_dispatcher(
+        dispatcher,
+        encode_produce_request(correlation_id, acks, transactional_id, topics),
     )
-    .expect("encode Produce response");
+    .await;
     let (header, response) = decode_produce_response(encoded);
     assert_eq!(header.correlation_id, correlation_id);
     response
@@ -2355,19 +2961,11 @@ async fn dispatch_list_offsets_request(
     correlation_id: i32,
     topics: Vec<ListOffsetsTopic>,
 ) -> ListOffsetsResponse {
-    let decoded = decode_request(encode_list_offsets_request(correlation_id, topics))
-        .expect("decode ListOffsets request");
-    let response = dispatcher
-        .dispatch(&decoded)
-        .await
-        .expect("dispatch ListOffsets request");
-    let encoded = encode_response(
-        decoded.api_key,
-        decoded.header.request_api_version,
-        decoded.header.correlation_id,
-        &response,
+    let encoded = exchange_with_dispatcher(
+        dispatcher,
+        encode_list_offsets_request(correlation_id, topics),
     )
-    .expect("encode ListOffsets response");
+    .await;
     let (header, response) = decode_list_offsets_response(encoded);
     assert_eq!(header.correlation_id, correlation_id);
     response
@@ -2410,25 +3008,11 @@ async fn dispatch_fetch_request(
     max_bytes: i32,
     topics: Vec<FetchTopic>,
 ) -> FetchResponse {
-    let decoded = decode_request(encode_fetch_request(
-        correlation_id,
-        max_wait_ms,
-        min_bytes,
-        max_bytes,
-        topics,
-    ))
-    .expect("decode Fetch request");
-    let response = dispatcher
-        .dispatch(&decoded)
-        .await
-        .expect("dispatch Fetch request");
-    let encoded = encode_response(
-        decoded.api_key,
-        decoded.header.request_api_version,
-        decoded.header.correlation_id,
-        &response,
+    let encoded = exchange_with_dispatcher(
+        dispatcher,
+        encode_fetch_request(correlation_id, max_wait_ms, min_bytes, max_bytes, topics),
     )
-    .expect("encode Fetch response");
+    .await;
     let (header, response) = decode_fetch_response(encoded);
     assert_eq!(header.correlation_id, correlation_id);
     response
@@ -2539,23 +3123,11 @@ async fn dispatch_create_topics_request(
     topics: Vec<CreatableTopic>,
     validate_only: bool,
 ) -> CreateTopicsResponse {
-    let decoded = decode_request(encode_create_topics_request(
-        correlation_id,
-        topics,
-        validate_only,
-    ))
-    .expect("decode CreateTopics request");
-    let response = dispatcher
-        .dispatch(&decoded)
-        .await
-        .expect("dispatch CreateTopics request");
-    let encoded = encode_response(
-        decoded.api_key,
-        decoded.header.request_api_version,
-        decoded.header.correlation_id,
-        &response,
+    let encoded = exchange_with_dispatcher(
+        dispatcher,
+        encode_create_topics_request(correlation_id, topics, validate_only),
     )
-    .expect("encode CreateTopics response");
+    .await;
     let (header, response) = decode_create_topics_response(encoded);
     assert_eq!(header.correlation_id, correlation_id);
     response

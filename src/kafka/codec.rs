@@ -187,16 +187,6 @@ pub fn decode_frame(mut frame: Bytes) -> std::result::Result<DecodedFrame, Reque
     }))
 }
 
-/// Temporary compatibility boundary until connection routing handles every `DecodedFrame` case.
-pub fn decode_request(frame: Bytes) -> Result<DecodedRequest> {
-    match decode_frame(frame)? {
-        DecodedFrame::Request(request) => Ok(request),
-        DecodedFrame::UnsupportedApiVersions {
-            requested_version, ..
-        } => anyhow::bail!("unsupported Kafka ApiVersions version {requested_version}"),
-    }
-}
-
 pub fn encode_response(
     api_key: ApiKey,
     encoding_version: i16,

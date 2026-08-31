@@ -7,7 +7,7 @@ mod create_topics;
 mod describe_configs;
 mod describe_groups;
 pub mod dispatcher;
-#[allow(dead_code)] // Task 6 connects the pure rejection builders to request routing.
+#[allow(dead_code)] // ERROR_RESPONSE_API_KEYS is a test-enforced coverage declaration.
 mod error_response;
 mod fetch;
 mod find_coordinator;
@@ -23,4 +23,5 @@ mod metadata;
 mod offset_commit;
 mod offset_fetch;
 mod produce;
+mod request_router;
 mod sync_group;
