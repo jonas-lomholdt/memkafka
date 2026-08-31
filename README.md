@@ -118,6 +118,8 @@ The v0.1 target is an unmodified real `Confluent.Kafka` client plus Confluent's 
 
 `✅` means the capability is verified by a black-box CI test. `✅ forced subscriptions` requires starting MemKafka with `--force-auto-create-topics true`. `—` means it is not covered by that integration's suite, not that it is known to be incompatible. The Kafbat test browses string and Confluent-framed Avro records produced by an independent franz-go client.
 
+Wire schemas are generated from Kafka 4.3.1. Only versions in the compatibility table's Supported column are advertised and behaviorally implemented. Schema availability is not an API-support promise.
+
 The current black-box suite passes independently with Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, pure-Rust rskafka 0.6.0, and pure-Go franz-go 1.21.6 for:
 
 - `ApiVersions` negotiation;

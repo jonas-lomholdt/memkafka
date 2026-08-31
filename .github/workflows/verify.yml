@@ -52,6 +52,21 @@ jobs:
       - name: Test API version recorder
         run: cargo test --locked --manifest-path tests/api-versions/proxy/Cargo.toml
 
+      - name: Verify vendored Kafka protocol provenance
+        run: tests/protocol-vendor.sh
+
+      - name: Check Kafka protocol generation drift
+        run: scripts/protocol/regenerate.sh --check
+
+      - name: Check vendored Kafka protocol formatting
+        run: cargo fmt --manifest-path crates/kafka-protocol/Cargo.toml --all -- --check
+
+      - name: Test vendored Kafka protocol crate
+        run: >-
+          cargo test --locked
+          --manifest-path crates/kafka-protocol/Cargo.toml
+          --features broker,client,messages_enums
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

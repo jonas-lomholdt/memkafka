@@ -1,6 +1,6 @@
 # Kafka API parity roadmap
 
-> **Snapshot:** 2026-08-29, targeting Apache Kafka 4.3. This is a living compatibility map. Kafka will evolve, and reaching 77/77 API keys would still not prove behavioral parity.
+> **Snapshot:** 2026-08-31, targeting Apache Kafka 4.3. This is a living compatibility map. Kafka will evolve, and reaching 77/77 API keys would still not prove behavioral parity.
 
 ## Executive recommendation
 
@@ -115,7 +115,7 @@ The source of truth for advertised versions is the central runtime capability re
 | 14 | SyncGroup | 3 | 0-5 | Real cooperative-sticky clients prove leader-supplied opaque assignments and successive stable generations. | Static membership is rejected; protocol type/name response fields and newer schemas are absent. |
 | 15 | DescribeGroups | 0 | 0-6 | Kafbat black-box coverage proves an active group is discoverable; wire tests assert state, metadata, assignments, ordering, and unknown groups. | No authorized operations, newer group fields/types, or version coverage beyond v0. |
 | 16 | ListGroups | 0 | 0-5 | Kafbat black-box coverage proves group listing; wire tests assert group IDs and protocol types. | No state/type filters, group states, or newer versions. |
-| 18 | ApiVersions | 3-4 | 0-4 | All pinned clients negotiate successfully; wire tests cover v3 and connection reuse. | Unsupported-new-version fallback remains incomplete; advertised ranges and dispatch gates now share the central registry. |
+| 18 | ApiVersions | 3-4 | 0-4 | All pinned clients negotiate successfully; wire tests cover v3, v4, connection reuse, and Kafka-compatible unsupported-version fallback. | Advertised behavioral support remains intentionally limited to v3-v4. |
 | 19 | CreateTopics | 4-6 | 2-7 | Real Admin clients create topics, observe partition counts, and receive `INVALID_REPLICATION_FACTOR`; wire tests cover validation-only and errors. | Custom configs and manual replica assignments are rejected; v7 and topic-ID lifecycle are absent. |
 | 22 | InitProducerId | 0 | 0-6 | A real idempotent .NET producer obtains an ID and publishes; wire tests prove distinct IDs and transactional-ID rejection. | Non-transactional allocation only, epoch always `0`; no transactional IDs, fencing/recovery, or newer versions. |
 | 32 | DescribeConfigs | 1 | 1-4 | The Kafbat black-box path negotiates the read-only API; wire tests cover known and unknown topic/broker resources. | Successful resources return empty config lists; no synonyms, documentation, config source/sensitivity, or non-empty values. |
@@ -132,9 +132,9 @@ The source of truth for advertised versions is the central runtime capability re
 
 - the registry now aligns `ApiVersions` and dispatch version gates, but handler semantics remain uneven across each advertised window;
 - handlers are generally written to one shared generated request type rather than making version-specific semantics explicit;
-- decode happens before dispatch version rejection, so unsupported schemas can become connection failures rather than the closest Kafka response;
+- schema-known adjacent versions now receive typed rejection before dispatch, while unknown keys, out-of-schema versions, and malformed requests intentionally close only their connection;
 - topic identity is name-only, which blocks modern Metadata, Fetch, offsets, deletion/recreation safety, and KIP-848;
-- a pinned Kafka 4.3.1 request-capture oracle and machine-readable manifests now exist, but normalized semantic differentials remain future work.
+- pinned request-capture and unsupported-version oracles now exist, but normalized behavioral differentials for success and stateful error paths remain future work.
 
 ## Complete Kafka 4.3 stable API-key matrix
 
@@ -148,7 +148,7 @@ Status means:
 
 No API currently meets the strict `implemented` definition; the 17 advertised keys are `partial` and the other 60 are `missing`.
 
-`kafka-protocol = 0.18.0` is confirmed in `Cargo.toml`. Its installed generated sources omit Streams keys 88 and 89 entirely (`†`). Concrete top-level request/response `Message::VERSIONS` do not reach Kafka 4.3's latest stable version for ListOffsets, OffsetCommit, OffsetFetch, InitProducerId, WriteTxnMarkers, DescribeLogDirs, ShareFetch, ShareAcknowledge, AddRaftVoter, WriteShareGroupState, ReadShareGroupStateSummary, and DescribeShareGroupOffsets (`‡`). For OffsetCommit, OffsetFetch, and InitProducerId, only the request codec lags: it stops at v9, v9, and v5 respectively while each response codec reaches the official v10, v10, and v6 maximum. Those rows require a generated-protocol dependency update, a maintained fork, or an upstream contribution before the Kafka 4.3 ceiling can be decoded safely.
+The local `kafka-protocol 0.18.0-memkafka.1` fork is generated from pinned Kafka 4.3.1 schemas and reaches the release's stable request/response maxima, including Streams keys 88 and 89. This is codec availability only: every row remains `partial` or `missing` until its behavior and real-client acceptance are implemented. See [`UPSTREAM.md`](../crates/kafka-protocol/UPSTREAM.md) for provenance, regeneration, and upgrade instructions.
 
 ### Core data plane and discovery
 
@@ -156,9 +156,9 @@ No API currently meets the strict `implemented` definition; the 17 advertised ke
 | ---: | --- | --- | --- | --- | --- |
 | 0 | Produce | 3-13 | partial | P0 | Preserve raw batches; add versioned errors, epochs, flexible forms, transactions, and exact side effects. |
 | 1 | Fetch | 4-18 | partial | P0 | Add sessions, topic IDs, leader epochs, tier/isolation fields, and correct incremental behavior. |
-| 2 | ListOffsets | 1-11 | partial | P0 | Resolve earliest/latest and record timestamps with correct leader epochs and errors. Codec max gap. ‡ |
+| 2 | ListOffsets | 1-11 | partial | P0 | Resolve earliest/latest and record timestamps with correct leader epochs and errors. |
 | 3 | Metadata | 0-13 | partial | P0 | Add stable topic UUIDs, flexible versions, authorized operations, and consistent single-broker metadata. |
-| 18 | ApiVersions | 0-4 | partial | P0 | Generate from one capability registry and implement Kafka's unsupported-version negotiation path. |
+| 18 | ApiVersions | 0-4 | partial | P0 | Keep one capability registry and preserve the live-proven unsupported-version negotiation path while advertised support remains v3-v4. |
 | 23 | OffsetForLeaderEpoch | 2-4 | missing | P0 | Return deterministic partition end offsets for validated current/previous in-memory leader epochs. |
 | 75 | DescribeTopicPartitions | 0 | missing | P1 | Paginated, topic-ID-aware discovery for modern Admin clients. |
 
@@ -166,8 +166,8 @@ No API currently meets the strict `implemented` definition; the 17 advertised ke
 
 | Key | Name | Kafka 4.3 request range | Status | Priority | MemKafka target semantics / rationale |
 | ---: | --- | --- | --- | --- | --- |
-| 8 | OffsetCommit | 2-10 | partial | P0 | Complete current versions, static membership, leader epochs, topic IDs, and transactional fencing. Request codec stops at v9; v10 requires a generated-codec update. ‡ |
-| 9 | OffsetFetch | 1-10 | partial | P0 | Add multi-group/topic-ID forms and return correct group/transaction state. Request codec stops at v9; v10 requires a generated-codec update. ‡ |
+| 8 | OffsetCommit | 2-10 | partial | P0 | Complete current versions, static membership, leader epochs, topic IDs, and transactional fencing. |
+| 9 | OffsetFetch | 1-10 | partial | P0 | Add multi-group/topic-ID forms and return correct group/transaction state. |
 | 10 | FindCoordinator | 0-6 | partial | P0 | Resolve group, transaction, share, and Streams coordinator types to broker 1, including batched forms. |
 | 11 | JoinGroup | 0-9 | partial | P0 | Finish classic versions, static membership, reasons, skip-assignment semantics, and fencing. |
 | 12 | Heartbeat | 0-4 | partial | P0 | Finish static-member fencing and v4 behavior. |
@@ -196,11 +196,11 @@ No API currently meets the strict `implemented` definition; the 17 advertised ke
 
 | Key | Name | Kafka 4.3 request range | Status | Priority | MemKafka target semantics / rationale |
 | ---: | --- | --- | --- | --- | --- |
-| 22 | InitProducerId | 0-6 | partial | P2 | Add transactional-ID ownership, producer epochs, fencing, timeout, and recovery. Request codec stops at v5; v6 requires a generated-codec update. ‡ |
+| 22 | InitProducerId | 0-6 | partial | P2 | Add transactional-ID ownership, producer epochs, fencing, timeout, and recovery. |
 | 24 | AddPartitionsToTxn | 0-5 | missing | P2 | Enlist partitions atomically in the active transaction and validate producer identity/epoch. |
 | 25 | AddOffsetsToTxn | 0-4 | missing | P2 | Enlist the target consumer group in a transaction. |
 | 26 | EndTxn | 0-5 | missing | P2 | Commit or abort one active transaction, fence stale producers, and emit observable control batches. |
-| 27 | WriteTxnMarkers | 1-2 | missing | P2 | Apply commit/abort markers deterministically to local partitions; keep the broker-facing API coherent. Codec max gap. ‡ |
+| 27 | WriteTxnMarkers | 1-2 | missing | P2 | Apply commit/abort markers deterministically to local partitions; keep the broker-facing API coherent. |
 | 28 | TxnOffsetCommit | 0-5 | missing | P2 | Stage offsets and publish them only on transaction commit with group/member fencing. |
 | 61 | DescribeProducers | 0 | missing | P2 | Expose active producer IDs, epochs, sequences, and last timestamps per partition. |
 | 65 | DescribeTransactions | 0 | missing | P2 | Return transactional state, producer identity, timeout, and enlisted partitions/groups. |
@@ -248,16 +248,16 @@ The target should follow [KIP-714](https://cwiki.apache.org/confluence/spaces/KA
 | ---: | --- | --- | --- | --- | --- |
 | 76 | ShareGroupHeartbeat | 1 | missing | P5 | Maintain share membership, subscriptions, member epochs, and broker-side assignments. |
 | 77 | ShareGroupDescribe | 1 | missing | P5 | Report share group state, members, subscriptions, and assignments. |
-| 78 | ShareFetch | 1-2 | missing | P5 | Acquire records with per-group locks, delivery counts, sessions, and isolation behavior. Codec max gap. ‡ |
-| 79 | ShareAcknowledge | 1-2 | missing | P5 | Accept/release/reject acquired records exactly once per acquisition epoch. Codec max gap. ‡ |
+| 78 | ShareFetch | 1-2 | missing | P5 | Acquire records with per-group locks, delivery counts, sessions, and isolation behavior. |
+| 79 | ShareAcknowledge | 1-2 | missing | P5 | Accept/release/reject acquired records exactly once per acquisition epoch. |
 | 83 | InitializeShareGroupState | 0 | missing | P5 | Initialize partition share-state epochs and start offsets idempotently. |
 | 84 | ReadShareGroupState | 0 | missing | P5 | Return acquisition state and delivery counts for requested partitions. |
-| 85 | WriteShareGroupState | 0-1 | missing | P5 | Apply epoch-fenced share state updates atomically. Codec max gap. ‡ |
+| 85 | WriteShareGroupState | 0-1 | missing | P5 | Apply epoch-fenced share state updates atomically. |
 | 86 | DeleteShareGroupState | 0 | missing | P5 | Delete requested share partition state with per-partition errors. |
-| 87 | ReadShareGroupStateSummary | 0-1 | missing | P5 | Return state epoch/start-offset summaries without acquisition payloads. Codec max gap. ‡ |
-| 88 | StreamsGroupHeartbeat | 0 | missing | P5 | Implement Streams topology/member epochs and active/standby/warm-up task assignment. Generated types unavailable. † |
-| 89 | StreamsGroupDescribe | 0 | missing | P5 | Report topology, group state, members, and task assignments. Generated types unavailable. † |
-| 90 | DescribeShareGroupOffsets | 0-1 | missing | P5 | Return per-topic share start offsets with topic-ID validation. Codec max gap. ‡ |
+| 87 | ReadShareGroupStateSummary | 0-1 | missing | P5 | Return state epoch/start-offset summaries without acquisition payloads. |
+| 88 | StreamsGroupHeartbeat | 0 | missing | P5 | Implement Streams topology/member epochs and active/standby/warm-up task assignment. |
+| 89 | StreamsGroupDescribe | 0 | missing | P5 | Report topology, group state, members, and task assignments. |
+| 90 | DescribeShareGroupOffsets | 0-1 | missing | P5 | Return per-topic share start offsets with topic-ID validation. |
 | 91 | AlterShareGroupOffsets | 0 | missing | P5 | Reset share start offsets only when group state permits it. |
 | 92 | DeleteShareGroupOffsets | 0 | missing | P5 | Remove share offsets/state with active-group fencing. |
 
@@ -268,14 +268,14 @@ The target should follow [KIP-714](https://cwiki.apache.org/confluence/spaces/KA
 | Key | Name | Kafka 4.3 request range | Status | Priority | MemKafka target semantics / rationale |
 | ---: | --- | --- | --- | --- | --- |
 | 34 | AlterReplicaLogDirs | 1-2 | missing | P6 | Accept only the broker's synthetic in-memory directory; reject nonexistent brokers/dirs precisely. |
-| 35 | DescribeLogDirs | 1-5 | missing | P6 | Report one stable synthetic `mem://` directory, its partitions, offsets, and in-memory sizes. Codec max gap. ‡ |
+| 35 | DescribeLogDirs | 1-5 | missing | P6 | Report one stable synthetic `mem://` directory, its partitions, offsets, and in-memory sizes. |
 | 43 | ElectLeaders | 0-2 | missing | P6 | Validate topics/partitions and report election-not-needed for the sole eligible leader without fake topology changes. |
 | 45 | AlterPartitionReassignments | 0-1 | missing | P6 | Treat replica set `[1]` as an idempotent completed assignment; reject every impossible replica set. |
 | 46 | ListPartitionReassignments | 0 | missing | P6 | Return no active reassignments after validated single-broker operations. |
 | 55 | DescribeQuorum | 0-2 | missing | P6 | Return a deterministic one-node quorum view with coherent leader/voter IDs and epochs. |
 | 57 | UpdateFeatures | 0-2 | missing | P6 | Validate and expose a small feature-level store used by emulated APIs, including validate-only behavior. |
 | 64 | UnregisterBroker | 0 | missing | P6 | Reject removal of broker 1 and identify unknown brokers; never report destructive success with no effect. |
-| 80 | AddRaftVoter | 0-1 | missing | P6 | Validate voter identity/endpoints against the fixed one-node quorum and return meaningful duplicate/invalid errors. Codec max gap. ‡ |
+| 80 | AddRaftVoter | 0-1 | missing | P6 | Validate voter identity/endpoints against the fixed one-node quorum and return meaningful duplicate/invalid errors. |
 | 81 | RemoveRaftVoter | 0 | missing | P6 | Reject removal of the sole voter and report voter-not-found for unknown identities. |
 
 These APIs do not require a real replica manager or KRaft implementation. They require coherent answers. A synthetic directory, fixed leader, completed `[1]` reassignment, and one-voter quorum are useful to inspection tools because every related API agrees. Unsupported mutations must return errors instead of ceremonial success.
@@ -286,19 +286,23 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 
 **Ecosystem value:** makes current producer, consumer, and discovery support dependable across newer clients; prevents `ApiVersions`, decoding, dispatch, and docs from drifting.
 
-**Foundation status:** cut 1 is delivered. CI now captures pinned-client request versions against Kafka 4.3.1 and independently checks a generated compatibility manifest against the central runtime capability registry. This is version evidence plus two independent consistency checks, not completion of the 17 advertised APIs; versions through Kafka 4.3’s maxima and semantic gaps remain below.
+**Foundation status:** cuts 1 and 2 are delivered. This is a protocol and rejection foundation, not completion of the 17 advertised APIs; every API remains partial and its behavior/version gaps remain below.
 
 **Delivered foundation:**
 
 - capture the API key/version pairs used by every pinned black-box client scenario and check them into a machine-readable request-evidence artifact;
 - keep key, evidence-backed floor, current ceiling, Kafka 4.3 range, handler, maturity, and proof lanes in one runtime capability registry;
 - generate or validate `ApiVersions`, dispatcher coverage, per-version test cases, and the checked-in compatibility artifact from it.
+- vendor exact Kafka 4.3.1 schemas, generate the release's request/response maxima offline, and verify provenance and deterministic regeneration;
+- decode into structured outcomes and route schema-known unsupported versions before stateful dispatch;
+- return typed adjacent-version errors for all 17 advertised APIs without widening their supported windows;
+- exercise an exhaustive Rust matrix of every advertised floor, ceiling, adjacent typed rejection, and connection-survival path, plus focused flexible/tagged and rejected-mutation coverage;
+- compare all 28 adjacent rejection cases with Kafka 4.3.1's Java request classes and compare unsupported `ApiVersions` bytes with a live pinned Kafka broker.
 
 **Remaining state and semantic work:**
 
-- introduce version-aware handler patterns and response/error builders;
-- build the pinned Kafka 4.3 differential harness;
-- update generated protocol support for every P0 schema before advertising it;
+- extend version-specific handler semantics before widening any supported window;
+- extend the pinned Kafka 4.3 differential harness from unsupported-version shapes into success and stateful error behavior;
 - add stable topic IDs and propagate them through Metadata, Fetch, ListOffsets, commits, and topic recreation;
 - implement flexible versions/tagged fields as specified by [KIP-482](https://cwiki.apache.org/confluence/spaces/KAFKA/pages/120722234/KIP-482%2BThe%2BKafka%2BProtocol%2Bshould%2BSupport%2BOptional%2BTagged%2BFields);
 - implement Fetch sessions from [KIP-227](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=74687799), leader epochs, timestamp offsets, and complete current error paths;
@@ -306,7 +310,7 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 
 **Acceptance:** floor/ceiling and rejected-below/rejected-above probes for every advertised key; a future cross-artifact gate proves each advertised floor exactly matches current-client evidence; normalized Kafka 4.3 differentials for success and error paths; existing Java/.NET/Go/Rust/Kafbat lanes stay green; static-member restart and incremental Fetch scenarios pass through real clients.
 
-**Dependencies:** generated protocol upgrade/fork; Kafka 4.3 test image; capability artifact schema; stable topic-ID store.
+**Dependencies:** capability artifact schema; stable topic-ID store; behavior-specific state models.
 
 ### P1 — Daily AdminClient and tooling
 
@@ -390,7 +394,6 @@ Configuration-file parity remains out of scope. The setup surface should be inte
 - share partition state epochs plus offset describe/alter/delete;
 - Streams topology identity/epochs, subtopologies, internal topic requirements, and active/standby/warm-up task assignment;
 - Streams group inspection;
-- upgrade generated protocol support for keys 88/89 and newer share versions.
 
 **Acceptance:** a real KafkaShareConsumer distributes records across members, redelivers released/expired records, never redelivers accepted records, and exposes and resets offsets; a real Kafka Streams topology using the Streams protocol scales members while preserving disjoint active tasks and coherent standby/warm-up roles.
 
@@ -419,7 +422,7 @@ Each cut should be specified and reviewed independently. No dates or effort esti
 | Cut | Vertical slice | Real-client or tool acceptance scenario unlocked |
 | ---: | --- | --- |
 | 1 (delivered) | Capture negotiated versions from every pinned current-client scenario against Kafka 4.3.1, and create one central runtime capability registry that validates `ApiVersions`, dispatch, and the generated compatibility manifest. | CI independently rejects registry/manifest drift and live/checked-in request-evidence drift. The evidence informs floor review but is not cross-validated against the registry; it proves version demand, not semantic parity. |
-| 2 | Upgrade/fork generated protocol schemas and make unsupported key/version handling response-aware, including flexible headers and ApiVersions fallback. | Pinned clients negotiate within the floor-to-ceiling window; requests immediately below and above it receive Kafka-compatible rejection rather than a dropped connection. |
+| 2 (delivered) | Vendor pinned Kafka 4.3.1 schemas and make unsupported key/version handling response-aware, including flexible headers and ApiVersions fallback. | All advertised boundaries have typed Rust coverage; a Kafka Java/live-broker oracle checks adjacent rejection shapes without widening supported behavior. |
 | 3 | Introduce stable topic IDs and implement modern Metadata, DescribeCluster, and DescribeTopicPartitions together. | Java `Admin.describeCluster()` and paginated `describeTopics()` agree on one broker; delete/recreate preparation can distinguish topic incarnations. |
 | 4 | Add Fetch session state, incremental updates/forgotten topics, and session errors. | A Java or librdkafka consumer sustains an incremental Fetch session across partition additions and recovers from an invalid session epoch. |
 | 5 | Add partition leader epochs, OffsetForLeaderEpoch, and timestamp ListOffsets. | Java `offsetsForTimes()` returns the first eligible record and a consumer validates/truncates against a deterministic leader epoch. |
@@ -578,7 +581,7 @@ Repository evidence reviewed for this snapshot:
 - `README.md` and `docs/2026-08-26-memkafka-design.md`;
 - focused wire tests plus .NET, Java, Go, Rust, flow-profile, and Kafbat black-box tests under `tests/`;
 - the generated capability manifest and pinned-client Kafka 4.3.1 request evidence under `docs/compatibility/`;
-- `Cargo.toml` and the installed `kafka-protocol 0.18.0` generated sources;
+- the local `kafka-protocol 0.18.0-memkafka.1` fork, its pinned Kafka 4.3.1 schema inputs, and generated sources;
 - the [Apache Kafka 4.3 protocol](https://kafka.apache.org/43/design/protocol), Kafka 4.3 [Admin API](https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/admin/Admin.html), and linked Apache KIPs.
 
-When Kafka or the generated protocol crate changes, regenerate the stable table, diff names/keys/version ranges, rerun all capability checks, and date a new snapshot. Preserve older snapshots in version control rather than silently rewriting what the v0.1 implementation once supported.
+When Kafka or the generated protocol crate changes, follow the pinned regeneration and upgrade procedure in [`UPSTREAM.md`](../crates/kafka-protocol/UPSTREAM.md), regenerate the stable table, diff names/keys/version ranges, rerun all capability checks and behavior gates, and date a new snapshot. Preserve older snapshots in version control rather than silently rewriting what the v0.1 implementation once supported.
