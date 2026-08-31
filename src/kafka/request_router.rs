@@ -122,8 +122,11 @@ mod tests {
     use kafka_protocol::{
         ResponseError,
         messages::{
-            ApiKey, ApiVersionsRequest, MetadataRequest, ProduceRequest, RequestHeader,
-            RequestKind, ResponseKind, TopicName,
+            ApiKey, ApiVersionsRequest, CreateTopicsRequest, DescribeConfigsRequest,
+            DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest, HeartbeatRequest,
+            InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
+            ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
+            ProduceRequest, RequestHeader, RequestKind, ResponseKind, SyncGroupRequest, TopicName,
             metadata_request::MetadataRequestTopic,
             produce_request::{PartitionProduceData, TopicProduceData},
         },
@@ -131,7 +134,10 @@ mod tests {
     };
 
     use super::{Route, RouteError, route};
-    use crate::kafka::codec::{DecodedFrame, DecodedRequest};
+    use crate::kafka::{
+        capabilities::{ApiCapability, CAPABILITIES},
+        codec::{DecodedFrame, DecodedRequest},
+    };
 
     const CORRELATION_ID: i32 = 0x1020_3040;
 
@@ -214,6 +220,79 @@ mod tests {
     }
 
     #[test]
+    fn every_advertised_boundary_routes_to_its_explicit_outcome() {
+        assert_eq!(
+            CAPABILITIES.len(),
+            17,
+            "the advertised boundary matrix changed"
+        );
+
+        for capability in CAPABILITIES {
+            for version in supported_boundaries(capability) {
+                let frame = request_frame(
+                    capability.api_key,
+                    version,
+                    router_request(capability.api_key),
+                );
+
+                let Route::Dispatch(request) = route(&frame).unwrap_or_else(|error| {
+                    panic!(
+                        "route supported {:?} v{version} through dispatcher: {error}",
+                        capability.api_key
+                    )
+                }) else {
+                    panic!(
+                        "supported {:?} v{version} did not route to dispatch",
+                        capability.api_key
+                    );
+                };
+                assert_eq!(request.api_key(), capability.api_key);
+                assert_eq!(request.header().request_api_version, version);
+                assert_eq!(request.header().correlation_id, CORRELATION_ID);
+            }
+
+            for version in adjacent_unsupported(capability) {
+                let frame = request_frame(
+                    capability.api_key,
+                    version,
+                    router_request(capability.api_key),
+                );
+
+                let Route::Respond(response) = route(&frame).unwrap_or_else(|error| {
+                    panic!(
+                        "route unsupported {:?} v{version}: {error}",
+                        capability.api_key
+                    )
+                }) else {
+                    panic!(
+                        "unsupported {:?} v{version} did not route to a response",
+                        capability.api_key
+                    );
+                };
+                assert_eq!(response.api_key, capability.api_key);
+                assert_eq!(response.encoding_version, version);
+                assert_eq!(response.correlation_id, CORRELATION_ID);
+                assert_response_variant(capability.api_key, &response.body);
+            }
+        }
+
+        let capability = CAPABILITIES
+            .iter()
+            .find(|capability| capability.api_key == ApiKey::Produce)
+            .expect("Produce is advertised");
+        let version = adjacent_unsupported(capability)
+            .into_iter()
+            .next()
+            .expect("Produce has a schema-known unsupported neighbor");
+        let frame = request_frame(
+            ApiKey::Produce,
+            version,
+            RequestKind::Produce(ProduceRequest::default().with_acks(0)),
+        );
+        assert!(matches!(route(&frame), Ok(Route::NoResponse)));
+    }
+
+    #[test]
     fn request_router_uses_version_zero_for_unsupported_api_versions() {
         let frame = DecodedFrame::UnsupportedApiVersions {
             header: RequestHeader::default()
@@ -269,5 +348,77 @@ mod tests {
 
     fn topic_name(value: &'static str) -> TopicName {
         TopicName::from(StrBytes::from_static_str(value))
+    }
+
+    fn supported_boundaries(capability: &ApiCapability) -> Vec<i16> {
+        let mut versions = vec![capability.supported.min];
+        if capability.supported.max != capability.supported.min {
+            versions.push(capability.supported.max);
+        }
+        versions
+    }
+
+    fn adjacent_unsupported(capability: &ApiCapability) -> Vec<i16> {
+        [capability.supported.min - 1, capability.supported.max + 1]
+            .into_iter()
+            .filter(|version| {
+                capability.kafka_4_3.min <= *version
+                    && *version <= capability.kafka_4_3.max
+                    && !capability.supports(*version)
+            })
+            .collect()
+    }
+
+    fn router_request(api_key: ApiKey) -> RequestKind {
+        match api_key {
+            ApiKey::Produce => RequestKind::Produce(ProduceRequest::default().with_acks(1)),
+            ApiKey::Fetch => RequestKind::Fetch(FetchRequest::default()),
+            ApiKey::ListOffsets => RequestKind::ListOffsets(ListOffsetsRequest::default()),
+            ApiKey::Metadata => RequestKind::Metadata(MetadataRequest::default()),
+            ApiKey::OffsetCommit => RequestKind::OffsetCommit(OffsetCommitRequest::default()),
+            ApiKey::OffsetFetch => RequestKind::OffsetFetch(OffsetFetchRequest::default()),
+            ApiKey::FindCoordinator => {
+                RequestKind::FindCoordinator(FindCoordinatorRequest::default())
+            }
+            ApiKey::JoinGroup => RequestKind::JoinGroup(JoinGroupRequest::default()),
+            ApiKey::Heartbeat => RequestKind::Heartbeat(HeartbeatRequest::default()),
+            ApiKey::LeaveGroup => RequestKind::LeaveGroup(LeaveGroupRequest::default()),
+            ApiKey::SyncGroup => RequestKind::SyncGroup(SyncGroupRequest::default()),
+            ApiKey::DescribeGroups => RequestKind::DescribeGroups(DescribeGroupsRequest::default()),
+            ApiKey::ListGroups => RequestKind::ListGroups(ListGroupsRequest::default()),
+            ApiKey::ApiVersions => RequestKind::ApiVersions(ApiVersionsRequest::default()),
+            ApiKey::CreateTopics => RequestKind::CreateTopics(CreateTopicsRequest::default()),
+            ApiKey::InitProducerId => RequestKind::InitProducerId(InitProducerIdRequest::default()),
+            ApiKey::DescribeConfigs => {
+                RequestKind::DescribeConfigs(DescribeConfigsRequest::default())
+            }
+            _ => panic!("router boundary fixture is missing {api_key:?}"),
+        }
+    }
+
+    fn assert_response_variant(api_key: ApiKey, body: &ResponseKind) {
+        assert!(
+            matches!(
+                (api_key, body),
+                (ApiKey::Produce, ResponseKind::Produce(_))
+                    | (ApiKey::Fetch, ResponseKind::Fetch(_))
+                    | (ApiKey::ListOffsets, ResponseKind::ListOffsets(_))
+                    | (ApiKey::Metadata, ResponseKind::Metadata(_))
+                    | (ApiKey::OffsetCommit, ResponseKind::OffsetCommit(_))
+                    | (ApiKey::OffsetFetch, ResponseKind::OffsetFetch(_))
+                    | (ApiKey::FindCoordinator, ResponseKind::FindCoordinator(_))
+                    | (ApiKey::JoinGroup, ResponseKind::JoinGroup(_))
+                    | (ApiKey::Heartbeat, ResponseKind::Heartbeat(_))
+                    | (ApiKey::LeaveGroup, ResponseKind::LeaveGroup(_))
+                    | (ApiKey::SyncGroup, ResponseKind::SyncGroup(_))
+                    | (ApiKey::DescribeGroups, ResponseKind::DescribeGroups(_))
+                    | (ApiKey::ListGroups, ResponseKind::ListGroups(_))
+                    | (ApiKey::ApiVersions, ResponseKind::ApiVersions(_))
+                    | (ApiKey::CreateTopics, ResponseKind::CreateTopics(_))
+                    | (ApiKey::InitProducerId, ResponseKind::InitProducerId(_))
+                    | (ApiKey::DescribeConfigs, ResponseKind::DescribeConfigs(_))
+            ),
+            "expected {api_key:?} response variant, got {body:?}"
+        );
     }
 }
