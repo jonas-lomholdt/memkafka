@@ -31,7 +31,9 @@ Diagnostics contain broker/Maven logs, normalized response evidence, and the
 last command context. They contain no credentials, request payload bytes, record
 values, or raw response bodies. The Maven log records any byte-equivalent
 ApiVersions decoder candidates; normalized output uses their lowest canonical
-body version. On failure, inspect the artifact path printed by the runner.
-Cleanup targets only the runner's exact PID-suffixed containers, network, and
-validated temporary directory; the local MemKafka image is inspected but never
-pulled or overwritten.
+body version. Flexible typed responses retain every generated top-level and
+nested tagged-field map, including known tagged defaults, in deterministic
+evidence. On failure, inspect the artifact path printed by the runner. Cleanup
+targets only the runner's exact PID-suffixed containers, network, and validated
+temporary directory; every removal command is bounded. The local MemKafka image
+is inspected but never pulled or overwritten.

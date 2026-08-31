@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -535,7 +536,7 @@ public final class ProtocolCompatibilityProbe {
         return new ParsedResponse(header, response);
     }
 
-    private static ObjectNode normalizeTypedResponse(
+    static ObjectNode normalizeTypedResponse(
             TypedErrorCase testCase, AbstractResponse response, ResponseHeader header) {
         var normalized = JSON.createObjectNode();
         normalized.put("apiKey", testCase.apiKey().id);
@@ -549,7 +550,170 @@ public final class ProtocolCompatibilityProbe {
         var taggedFields = normalized.putObject("taggedFields");
         taggedFields.set("responseHeader", rawTags(header.data().unknownTaggedFields()));
         taggedFields.set("response", rawTags(response.data().unknownTaggedFields()));
+        taggedFields.set(
+                "nestedResponse",
+                canonicalizeGeneratedJson(nestedResponseTags(response, testCase.version())));
         return normalized;
+    }
+
+    private static ObjectNode nestedResponseTags(AbstractResponse response, short version) {
+        return switch (response.apiKey()) {
+            case METADATA -> version >= 9
+                    ? metadataResponseTags((MetadataResponseData) response.data())
+                    : JSON.createObjectNode();
+            case OFFSET_COMMIT -> version >= 8
+                    ? offsetCommitResponseTags((OffsetCommitResponseData) response.data())
+                    : JSON.createObjectNode();
+            case OFFSET_FETCH -> version >= 6
+                    ? offsetFetchResponseTags((OffsetFetchResponseData) response.data(), version)
+                    : JSON.createObjectNode();
+            case JOIN_GROUP -> version >= 6
+                    ? joinGroupResponseTags((JoinGroupResponseData) response.data())
+                    : JSON.createObjectNode();
+            case LEAVE_GROUP -> version >= 4
+                    ? leaveGroupResponseTags((LeaveGroupResponseData) response.data())
+                    : JSON.createObjectNode();
+            case CREATE_TOPICS -> version >= 5
+                    ? createTopicsResponseTags((CreateTopicsResponseData) response.data())
+                    : JSON.createObjectNode();
+            default -> JSON.createObjectNode();
+        };
+    }
+
+    private static ObjectNode metadataResponseTags(MetadataResponseData data) {
+        var result = JSON.createObjectNode();
+        var brokers = result.putArray("brokers");
+        for (var broker : data.brokers()) {
+            var entry = tagNode("nodeId", broker.nodeId(), broker.unknownTaggedFields());
+            brokers.add(entry);
+        }
+        var topics = result.putArray("topics");
+        for (var topic : data.topics()) {
+            var entry = tagNode("name", topic.name(), topic.unknownTaggedFields());
+            var partitions = entry.putArray("partitions");
+            for (var partition : topic.partitions()) {
+                var partitionEntry = tagNode(
+                        "partitionIndex",
+                        partition.partitionIndex(),
+                        partition.unknownTaggedFields());
+                partitions.add(partitionEntry);
+            }
+            topics.add(entry);
+        }
+        return result;
+    }
+
+    private static ObjectNode offsetCommitResponseTags(OffsetCommitResponseData data) {
+        var result = JSON.createObjectNode();
+        var topics = result.putArray("topics");
+        for (var topic : data.topics()) {
+            var entry = tagNode("name", topic.name(), topic.unknownTaggedFields());
+            var partitions = entry.putArray("partitions");
+            for (var partition : topic.partitions()) {
+                var partitionEntry = tagNode(
+                        "partitionIndex",
+                        partition.partitionIndex(),
+                        partition.unknownTaggedFields());
+                partitions.add(partitionEntry);
+            }
+            topics.add(entry);
+        }
+        return result;
+    }
+
+    private static ObjectNode offsetFetchResponseTags(
+            OffsetFetchResponseData data, short version) {
+        var result = JSON.createObjectNode();
+        if (version < 8) {
+            var topics = result.putArray("topics");
+            for (var topic : data.topics()) {
+                var entry = tagNode("name", topic.name(), topic.unknownTaggedFields());
+                var partitions = entry.putArray("partitions");
+                for (var partition : topic.partitions()) {
+                    var partitionEntry = tagNode(
+                            "partitionIndex",
+                            partition.partitionIndex(),
+                            partition.unknownTaggedFields());
+                    partitions.add(partitionEntry);
+                }
+                topics.add(entry);
+            }
+        } else {
+            var groups = result.putArray("groups");
+            for (var group : data.groups()) {
+                var entry = tagNode("groupId", group.groupId(), group.unknownTaggedFields());
+                var topics = entry.putArray("topics");
+                for (var topic : group.topics()) {
+                    var topicEntry = tagNode("name", topic.name(), topic.unknownTaggedFields());
+                    var partitions = topicEntry.putArray("partitions");
+                    for (var partition : topic.partitions()) {
+                        var partitionEntry = tagNode(
+                                "partitionIndex",
+                                partition.partitionIndex(),
+                                partition.unknownTaggedFields());
+                        partitions.add(partitionEntry);
+                    }
+                    topics.add(topicEntry);
+                }
+                groups.add(entry);
+            }
+        }
+        return result;
+    }
+
+    private static ObjectNode joinGroupResponseTags(JoinGroupResponseData data) {
+        var result = JSON.createObjectNode();
+        var members = result.putArray("members");
+        for (var member : data.members()) {
+            var entry = tagNode("memberId", member.memberId(), member.unknownTaggedFields());
+            members.add(entry);
+        }
+        return result;
+    }
+
+    private static ObjectNode leaveGroupResponseTags(LeaveGroupResponseData data) {
+        var result = JSON.createObjectNode();
+        var members = result.putArray("members");
+        for (var member : data.members()) {
+            var entry = tagNode("memberId", member.memberId(), member.unknownTaggedFields());
+            members.add(entry);
+        }
+        return result;
+    }
+
+    private static ObjectNode createTopicsResponseTags(CreateTopicsResponseData data) {
+        var result = JSON.createObjectNode();
+        var topics = result.putArray("topics");
+        for (var topic : data.topics()) {
+            var entry = tagNode("name", topic.name(), topic.unknownTaggedFields());
+            var topicConfigError = entry.putObject("knownTaggedFields")
+                    .putObject("topicConfigErrorCode");
+            topicConfigError.put("tag", 0);
+            topicConfigError.put("value", topic.topicConfigErrorCode());
+            var configs = entry.putArray("configs");
+            for (var config : topic.configs()) {
+                var configEntry = tagNode("name", config.name(), config.unknownTaggedFields());
+                configs.add(configEntry);
+            }
+            topics.add(entry);
+        }
+        return result;
+    }
+
+    private static ObjectNode tagNode(
+            String identityName, String identity, List<RawTaggedField> fields) {
+        var node = JSON.createObjectNode();
+        node.put(identityName, identity);
+        node.set("unknownTaggedFields", rawTags(fields));
+        return node;
+    }
+
+    private static ObjectNode tagNode(
+            String identityName, int identity, List<RawTaggedField> fields) {
+        var node = JSON.createObjectNode();
+        node.put(identityName, identity);
+        node.set("unknownTaggedFields", rawTags(fields));
+        return node;
     }
 
     static JsonNode canonicalizeGeneratedJson(JsonNode node) {
@@ -617,10 +781,14 @@ public final class ProtocolCompatibilityProbe {
 
     private static ArrayNode rawTags(List<RawTaggedField> fields) {
         var result = JSON.createArrayNode();
-        for (var field : fields) {
+        var ordered = fields.stream()
+                .sorted(Comparator.comparingInt(RawTaggedField::tag))
+                .toList();
+        for (var field : ordered) {
             var entry = result.addObject();
             entry.put("tag", field.tag());
             entry.put("size", field.size());
+            entry.put("data", HexFormat.of().formatHex(field.data()));
         }
         return result;
     }

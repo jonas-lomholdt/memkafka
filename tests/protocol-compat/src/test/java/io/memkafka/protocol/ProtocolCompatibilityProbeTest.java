@@ -17,11 +17,14 @@ import java.util.ArrayList;
 import java.util.List;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.ApiVersionsResponseData;
+import org.apache.kafka.common.message.MetadataResponseData;
 import org.apache.kafka.common.message.ResponseHeaderData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.protocol.MessageUtil;
+import org.apache.kafka.common.protocol.types.RawTaggedField;
 import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.requests.ResponseHeader;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -205,6 +208,48 @@ final class ProtocolCompatibilityProbeTest {
     }
 
     @Test
+    void unexpectedNestedTaggedFieldProducesANormalizedMismatch() {
+        var testCase = typedCase(ApiKeys.METADATA, (short) 10);
+        var response = testCase.request().getErrorResponse(
+                0, new UnsupportedVersionException("test"));
+        var header = responseHeader(testCase);
+        var expected = ProtocolCompatibilityProbe.normalizeTypedResponse(
+                testCase, response, header);
+
+        var data = (MetadataResponseData) response.data();
+        data.topics().iterator().next().unknownTaggedFields()
+                .add(new RawTaggedField(777, new byte[] {1, 2, 3}));
+        var actual = ProtocolCompatibilityProbe.normalizeTypedResponse(
+                testCase, response, header);
+
+        var failure = assertThrows(
+                IllegalStateException.class,
+                () -> ProtocolCompatibilityProbe.requireNormalizedMatch(
+                        testCase.apiKey(), testCase.version(), expected, actual));
+        assertTrue(
+                failure.getMessage().contains(
+                        "$.taggedFields.nestedResponse.topics[0].unknownTaggedFields.length"),
+                failure.getMessage());
+    }
+
+    @Test
+    void defaultValuedKnownTaggedFieldIsPresentInNormalizedEvidence() {
+        var testCase = typedCase(ApiKeys.CREATE_TOPICS, (short) 7);
+        var response = testCase.request().getErrorResponse(
+                0, new UnsupportedVersionException("test"));
+
+        var normalized = ProtocolCompatibilityProbe.normalizeTypedResponse(
+                testCase, response, responseHeader(testCase));
+
+        var firstTopicConfigError = normalized.at(
+                "/taggedFields/nestedResponse/topics/0/knownTaggedFields/"
+                        + "topicConfigErrorCode");
+        assertTrue(!firstTopicConfigError.isMissingNode());
+        assertEquals(0, firstTopicConfigError.at("/tag").intValue());
+        assertEquals(0, firstTopicConfigError.at("/value").intValue());
+    }
+
+    @Test
     void everyTypedCaseSerializesAndProducesAVersionEncodableError() {
         for (var testCase : ProtocolCompatibilityProbe.typedErrorCases()) {
             assertDoesNotThrow(() -> {
@@ -220,5 +265,20 @@ final class ProtocolCompatibilityProbeTest {
                 MessageUtil.toByteBufferAccessor(response.data(), testCase.version());
             }, testCase.apiKey() + " v" + testCase.version());
         }
+    }
+
+    private static ProtocolCompatibilityProbe.TypedErrorCase typedCase(
+            ApiKeys apiKey, short version) {
+        return ProtocolCompatibilityProbe.typedErrorCases().stream()
+                .filter(testCase -> testCase.apiKey() == apiKey && testCase.version() == version)
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static ResponseHeader responseHeader(
+            ProtocolCompatibilityProbe.TypedErrorCase testCase) {
+        return new ResponseHeader(
+                testCase.correlationId(),
+                testCase.apiKey().responseHeaderVersion(testCase.version()));
     }
 }

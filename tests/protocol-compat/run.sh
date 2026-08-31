@@ -282,7 +282,8 @@ cleanup() {
   if [[ -n "${TEMP_DIRECTORY}" \
       && "${TEMP_DIRECTORY}" == "${TMPDIR:-/tmp}/memkafka-protocol-compat."* \
       && -d "${TEMP_DIRECTORY}" ]]; then
-    rm -rf "${TEMP_DIRECTORY}"
+    run_cleanup_command "remove protocol compatibility temp directory" \
+      rm -rf "${TEMP_DIRECTORY}" >&3 2>&3 || true
   fi
   return "${exit_code}"
 }
