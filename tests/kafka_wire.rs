@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, time::Duration};
+use std::{num::NonZeroU32, panic, time::Duration};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use clap::Parser;
@@ -11,6 +11,7 @@ use kafka_protocol::{
         ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
         ProduceRequest, ProducerId, RequestHeader, RequestKind, ResponseHeader, ResponseKind,
         SyncGroupRequest, TopicName, TransactionalId,
+        api_versions_response::{ApiVersion, ApiVersionsResponse},
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
         describe_configs_request::DescribeConfigsResource,
@@ -32,7 +33,7 @@ use kafka_protocol::{
         produce_response::ProduceResponse,
         sync_group_request::SyncGroupRequestAssignment,
     },
-    protocol::{Decodable, StrBytes, encode_request_header_into_buffer},
+    protocol::{Decodable, Encodable, StrBytes, encode_request_header_into_buffer},
     records::{
         Compression, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, Record,
         RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
@@ -133,6 +134,49 @@ fn supported_list_groups_callback_rejects_truncated_group_results() {
         ]));
 
     assert_list_groups_supported(&request, &response, 0);
+}
+
+#[test]
+fn flexible_api_versions_body_tags_are_rejected_with_classic_headers() {
+    for version in [3, 4] {
+        assert_eq!(
+            ApiKey::ApiVersions.response_header_version(version),
+            0,
+            "ApiVersions v{version} response header is classic"
+        );
+        let mut response =
+            ApiVersionsResponse::default().with_api_keys(vec![ApiVersion::default()]);
+        response.api_keys[0]
+            .unknown_tagged_fields
+            .insert(701, Bytes::from_static(b"api-version-body-tag"));
+        let mut encoded = BytesMut::new();
+        ResponseHeader::default()
+            .with_correlation_id(91_000 + i32::from(version))
+            .encode(&mut encoded, 0)
+            .expect("encode classic ApiVersions response header");
+        response
+            .encode(&mut encoded, version)
+            .expect("encode flexible ApiVersions response body");
+
+        let panic = match panic::catch_unwind(|| {
+            decode_response_kind(ApiKey::ApiVersions, version, encoded.freeze())
+        }) {
+            Ok(_) => panic!("ApiVersions v{version} body tags must not be silently skipped"),
+            Err(panic) => panic,
+        };
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("unknown-tag assertion must panic with a message");
+        let expected = format!(
+            "ApiVersions v{version} api_version unexpectedly contains unknown tagged fields"
+        );
+        assert!(
+            message.contains(&expected),
+            "unexpected ApiVersions v{version} body-tag panic: {message}"
+        );
+    }
 }
 
 #[test]
@@ -3445,13 +3489,19 @@ fn assert_encoded_request_tags(
     assert_eq!(unknown_tagged_fields.get(&tags.body.0), Some(&tags.body.1));
 }
 
-/// Flexible responses are decoded by the shared matrix decoder.  The protocol carries no
-/// response tags for these fixtures, so audit every generated tagged-field map recursively.
+/// ApiVersions v3/v4 has a classic response header with a flexible tagged body.  Other task
+/// APIs use a flexible body exactly when their response header is flexible.
+fn response_body_is_flexible(api_key: ApiKey, version: i16) -> bool {
+    (api_key == ApiKey::ApiVersions && version >= 3)
+        || api_key.response_header_version(version) == 1
+}
+
+/// Flexible response bodies are decoded by the shared matrix decoder. The protocol carries no
+/// response body tags for these fixtures, so audit every encoded generated tagged-field map.
 fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: &ResponseKind) {
-    assert_eq!(
-        api_key.response_header_version(version),
-        1,
-        "{api_key:?} v{version} is not a flexible response"
+    assert!(
+        response_body_is_flexible(api_key, version),
+        "{api_key:?} v{version} does not have a flexible response body"
     );
 
     macro_rules! assert_no_tags {
@@ -3471,14 +3521,18 @@ fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: 
                 assert_no_tags!(topic);
                 for partition in &topic.partition_responses {
                     assert_no_tags!(partition);
-                    assert_no_tags!(partition.current_leader);
+                    if version >= 10 {
+                        assert_no_tags!(partition.current_leader);
+                    }
                     for record_error in &partition.record_errors {
                         assert_no_tags!(record_error);
                     }
                 }
             }
-            for endpoint in &response.node_endpoints {
-                assert_no_tags!(endpoint);
+            if version >= 10 {
+                for endpoint in &response.node_endpoints {
+                    assert_no_tags!(endpoint);
+                }
             }
         }
         ResponseKind::Fetch(response) if api_key == ApiKey::Fetch => {
@@ -3487,9 +3541,15 @@ fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: 
                 assert_no_tags!(topic);
                 for partition in &topic.partitions {
                     assert_no_tags!(partition);
-                    assert_no_tags!(partition.diverging_epoch);
-                    assert_no_tags!(partition.current_leader);
-                    assert_no_tags!(partition.snapshot_id);
+                    if partition.diverging_epoch != Default::default() {
+                        assert_no_tags!(partition.diverging_epoch);
+                    }
+                    if partition.current_leader != Default::default() {
+                        assert_no_tags!(partition.current_leader);
+                    }
+                    if partition.snapshot_id != Default::default() {
+                        assert_no_tags!(partition.snapshot_id);
+                    }
                     for transaction in partition
                         .aborted_transactions
                         .as_deref()
@@ -3499,8 +3559,10 @@ fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: 
                     }
                 }
             }
-            for endpoint in &response.node_endpoints {
-                assert_no_tags!(endpoint);
+            if version >= 16 {
+                for endpoint in &response.node_endpoints {
+                    assert_no_tags!(endpoint);
+                }
             }
         }
         ResponseKind::ListOffsets(response) if api_key == ApiKey::ListOffsets => {
@@ -3535,18 +3597,22 @@ fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: 
         }
         ResponseKind::OffsetFetch(response) if api_key == ApiKey::OffsetFetch => {
             assert_no_tags!(response);
-            for topic in &response.topics {
-                assert_no_tags!(topic);
-                for partition in &topic.partitions {
-                    assert_no_tags!(partition);
-                }
-            }
-            for group in &response.groups {
-                assert_no_tags!(group);
-                for topic in &group.topics {
+            if version <= 7 {
+                for topic in &response.topics {
                     assert_no_tags!(topic);
                     for partition in &topic.partitions {
                         assert_no_tags!(partition);
+                    }
+                }
+            }
+            if version >= 8 {
+                for group in &response.groups {
+                    assert_no_tags!(group);
+                    for topic in &group.topics {
+                        assert_no_tags!(topic);
+                        for partition in &topic.partitions {
+                            assert_no_tags!(partition);
+                        }
                     }
                 }
             }
@@ -4963,19 +5029,22 @@ fn decode_response_kind(
     version: i16,
     mut encoded: Bytes,
 ) -> (ResponseHeader, ResponseKind) {
-    let header = ResponseHeader::decode(&mut encoded, api_key.response_header_version(version))
+    let response_header_version = api_key.response_header_version(version);
+    let header = ResponseHeader::decode(&mut encoded, response_header_version)
         .unwrap_or_else(|error| panic!("decode {api_key:?} v{version} response header: {error}"));
-    assert!(
-        header.unknown_tagged_fields.is_empty(),
-        "{api_key:?} v{version} response header unexpectedly contains unknown tags"
-    );
+    if response_header_version == 1 {
+        assert!(
+            header.unknown_tagged_fields.is_empty(),
+            "{api_key:?} v{version} response header unexpectedly contains unknown tags"
+        );
+    }
     let response = ResponseKind::decode(api_key, &mut encoded, version)
         .unwrap_or_else(|error| panic!("decode {api_key:?} v{version} response body: {error}"));
     assert!(
         encoded.is_empty(),
         "{api_key:?} v{version} response has trailing bytes"
     );
-    if api_key.response_header_version(version) == 1 {
+    if response_body_is_flexible(api_key, version) {
         assert_flexible_response_tags_empty(api_key, version, &response);
     }
     (header, response)
