@@ -13,7 +13,7 @@ apache-avro = { version = "0.22", default-features = false }
 axum = "0.8"
 bytes = "1"
 clap = { version = "4.5", features = ["derive"] }
-kafka-protocol = { version = "0.18.0", default-features = false, features = ["broker", "client", "messages_enums"] }
+kafka-protocol = { path = "crates/kafka-protocol", version = "0.18.0-memkafka.1", default-features = false, features = ["broker", "client", "messages_enums"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = { version = "0.5", features = ["util"] }
 
 [workspace]
+exclude = ["crates/kafka-protocol"]
 resolver = "3"
 
 [workspace.lints.rust]
