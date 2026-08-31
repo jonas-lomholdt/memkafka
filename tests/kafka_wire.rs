@@ -4303,7 +4303,17 @@ fn assert_produce_unsupported(request: &RequestKind, response: &ResponseKind, ve
             assert_eq!(response_partition.log_append_time_ms, -1);
             assert_eq!(response_partition.log_start_offset, -1);
             assert!(response_partition.record_errors.is_empty());
-            assert_eq!(response_partition.error_message, None);
+            if version >= 8 {
+                assert_eq!(
+                    response_partition
+                        .error_message
+                        .as_ref()
+                        .map(StrBytes::as_str),
+                    Some("The version of API is not supported.")
+                );
+            } else {
+                assert_eq!(response_partition.error_message, None);
+            }
             assert_eq!(
                 response_partition.current_leader.leader_id,
                 BrokerId::from(-1)
@@ -4478,6 +4488,9 @@ fn assert_offset_fetch_unsupported(request: &RequestKind, response: &ResponseKin
     if version <= 7 {
         if version >= 2 {
             assert_unsupported(response.error_code);
+            assert!(response.topics.is_empty());
+            assert!(response.groups.is_empty());
+            return;
         }
         assert!(response.groups.is_empty());
         let requested_topics = request.topics.as_deref().unwrap_or_default();
@@ -4552,7 +4565,10 @@ fn assert_find_coordinator_unsupported(
         if version == 0 {
             assert_eq!(response.error_message, Some(StrBytes::new()));
         } else {
-            assert_eq!(response.error_message, None);
+            assert_eq!(
+                response.error_message.as_ref().map(StrBytes::as_str),
+                Some("The version of API is not supported.")
+            );
         }
         assert_eq!(response.node_id, BrokerId::from(-1));
         assert!(response.host.is_empty());
@@ -4568,7 +4584,13 @@ fn assert_find_coordinator_unsupported(
             assert!(response_coordinator.host.is_empty());
             assert_eq!(response_coordinator.port, -1);
             assert_unsupported(response_coordinator.error_code);
-            assert_eq!(response_coordinator.error_message, None);
+            assert_eq!(
+                response_coordinator
+                    .error_message
+                    .as_ref()
+                    .map(StrBytes::as_str),
+                Some("The version of API is not supported.")
+            );
         }
     }
 }
@@ -4602,8 +4624,8 @@ fn assert_heartbeat_unsupported(request: &RequestKind, response: &ResponseKind, 
     assert_unsupported(response.error_code);
 }
 
-fn assert_leave_group_unsupported(request: &RequestKind, response: &ResponseKind, version: i16) {
-    let RequestKind::LeaveGroup(request) = request else {
+fn assert_leave_group_unsupported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::LeaveGroup(_) = request else {
         panic!("expected LeaveGroup request fixture");
     };
     let ResponseKind::LeaveGroup(response) = response else {
@@ -4611,19 +4633,7 @@ fn assert_leave_group_unsupported(request: &RequestKind, response: &ResponseKind
     };
     assert_eq!(response.throttle_time_ms, 0);
     assert_unsupported(response.error_code);
-    if version >= 3 {
-        assert_eq!(response.members.len(), request.members.len());
-        for (response_member, request_member) in response.members.iter().zip(&request.members) {
-            assert_eq!(response_member.member_id, request_member.member_id);
-            assert_eq!(
-                response_member.group_instance_id,
-                request_member.group_instance_id
-            );
-            assert_unsupported(response_member.error_code);
-        }
-    } else {
-        assert!(response.members.is_empty());
-    }
+    assert!(response.members.is_empty());
 }
 
 fn assert_sync_group_unsupported(request: &RequestKind, response: &ResponseKind, _: i16) {
@@ -4723,7 +4733,10 @@ fn assert_api_versions_unsupported(request: &RequestKind, response: &ResponseKin
         panic!("expected ApiVersions response");
     };
     assert_unsupported(response.error_code);
-    assert!(response.api_keys.is_empty());
+    assert_eq!(response.api_keys.len(), 1);
+    assert_eq!(response.api_keys[0].api_key, ApiKey::ApiVersions as i16);
+    assert_eq!(response.api_keys[0].min_version, 0);
+    assert_eq!(response.api_keys[0].max_version, 4);
     assert_eq!(response.throttle_time_ms, 0);
     assert!(response.supported_features.is_empty());
     assert_eq!(response.finalized_features_epoch, -1);
@@ -4731,7 +4744,7 @@ fn assert_api_versions_unsupported(request: &RequestKind, response: &ResponseKin
     assert!(!response.zk_migration_ready);
 }
 
-fn assert_create_topics_unsupported(request: &RequestKind, response: &ResponseKind, _: i16) {
+fn assert_create_topics_unsupported(request: &RequestKind, response: &ResponseKind, version: i16) {
     let RequestKind::CreateTopics(request) = request else {
         panic!("expected CreateTopics request fixture");
     };
@@ -4744,7 +4757,14 @@ fn assert_create_topics_unsupported(request: &RequestKind, response: &ResponseKi
         assert_eq!(response_topic.name, request_topic.name);
         assert!(response_topic.topic_id.is_nil());
         assert_unsupported(response_topic.error_code);
-        assert_eq!(response_topic.error_message, None);
+        if version >= 1 {
+            assert_eq!(
+                response_topic.error_message.as_ref().map(StrBytes::as_str),
+                Some("The version of API is not supported.")
+            );
+        } else {
+            assert_eq!(response_topic.error_message, None);
+        }
         assert_eq!(response_topic.topic_config_error_code, 0);
         assert_eq!(response_topic.num_partitions, -1);
         assert_eq!(response_topic.replication_factor, -1);
@@ -4778,7 +4798,10 @@ fn assert_describe_configs_unsupported(request: &RequestKind, response: &Respons
     assert_eq!(response.results.len(), request.resources.len());
     for (response_result, request_resource) in response.results.iter().zip(&request.resources) {
         assert_unsupported(response_result.error_code);
-        assert_eq!(response_result.error_message, None);
+        assert_eq!(
+            response_result.error_message.as_ref().map(StrBytes::as_str),
+            Some("The version of API is not supported.")
+        );
         assert_eq!(
             response_result.resource_type,
             request_resource.resource_type

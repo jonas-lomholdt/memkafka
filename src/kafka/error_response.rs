@@ -9,12 +9,12 @@ use kafka_protocol::{
         InitProducerIdResponse, JoinGroupResponse, LeaveGroupResponse, ListGroupsResponse,
         ListOffsetsResponse, MetadataResponse, OffsetCommitResponse, OffsetFetchResponse,
         ProduceResponse, ProducerId, RequestKind, ResponseKind, SyncGroupResponse,
+        api_versions_response::ApiVersion,
         create_topics_response::CreatableTopicResult,
         describe_configs_response::DescribeConfigsResult,
         describe_groups_response::DescribedGroup,
         fetch_response::{FetchableTopicResponse, PartitionData},
         find_coordinator_response::Coordinator,
-        leave_group_response::MemberResponse,
         list_offsets_response::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse},
         metadata_response::MetadataResponseTopic,
         offset_commit_response::{OffsetCommitResponsePartition, OffsetCommitResponseTopic},
@@ -49,12 +49,16 @@ pub(crate) const ERROR_RESPONSE_API_KEYS: &[ApiKey] = &[
     ApiKey::DescribeConfigs,
 ];
 
+const UNSUPPORTED_VERSION_MESSAGE: &str = "The version of API is not supported.";
+
 pub(crate) fn unsupported_version(
     request: &DecodedRequest,
 ) -> Result<ResponseKind, ErrorResponseError> {
     let version = request.header.request_api_version;
     match (request.api_key, &request.body) {
-        (ApiKey::Produce, RequestKind::Produce(body)) => Ok(unsupported_produce(body).into()),
+        (ApiKey::Produce, RequestKind::Produce(body)) => {
+            Ok(unsupported_produce(body, version).into())
+        }
         (ApiKey::Fetch, RequestKind::Fetch(body)) => Ok(unsupported_fetch(body).into()),
         (ApiKey::ListOffsets, RequestKind::ListOffsets(body)) => {
             Ok(unsupported_list_offsets(body).into())
@@ -71,9 +75,7 @@ pub(crate) fn unsupported_version(
         }
         (ApiKey::JoinGroup, RequestKind::JoinGroup(_)) => Ok(unsupported_join_group().into()),
         (ApiKey::Heartbeat, RequestKind::Heartbeat(_)) => Ok(unsupported_heartbeat().into()),
-        (ApiKey::LeaveGroup, RequestKind::LeaveGroup(body)) => {
-            Ok(unsupported_leave_group(body, version).into())
-        }
+        (ApiKey::LeaveGroup, RequestKind::LeaveGroup(_)) => Ok(unsupported_leave_group().into()),
         (ApiKey::SyncGroup, RequestKind::SyncGroup(_)) => Ok(unsupported_sync_group().into()),
         (ApiKey::DescribeGroups, RequestKind::DescribeGroups(body)) => {
             Ok(unsupported_describe_groups(body).into())
@@ -96,7 +98,12 @@ pub(crate) fn unsupported_version(
 pub(crate) fn unsupported_api_versions() -> ResponseKind {
     ApiVersionsResponse::default()
         .with_error_code(unsupported_code())
-        .with_api_keys(Vec::new())
+        .with_api_keys(vec![
+            ApiVersion::default()
+                .with_api_key(ApiKey::ApiVersions as i16)
+                .with_min_version(0)
+                .with_max_version(4),
+        ])
         .with_throttle_time_ms(0)
         .with_supported_features(Vec::new())
         .with_finalized_features_epoch(-1)
@@ -127,7 +134,10 @@ fn unsupported_code() -> i16 {
     ResponseError::UnsupportedVersion.code()
 }
 
-fn unsupported_produce(request: &kafka_protocol::messages::ProduceRequest) -> ProduceResponse {
+fn unsupported_produce(
+    request: &kafka_protocol::messages::ProduceRequest,
+    version: i16,
+) -> ProduceResponse {
     ProduceResponse::default()
         .with_responses(
             request
@@ -149,7 +159,9 @@ fn unsupported_produce(request: &kafka_protocol::messages::ProduceRequest) -> Pr
                                         .with_log_append_time_ms(-1)
                                         .with_log_start_offset(-1)
                                         .with_record_errors(Vec::new())
-                                        .with_error_message(None)
+                                        .with_error_message((version >= 8).then(|| {
+                                            StrBytes::from_static_str(UNSUPPORTED_VERSION_MESSAGE)
+                                        }))
                                 })
                                 .collect(),
                         )
@@ -284,8 +296,7 @@ fn unsupported_offset_fetch(
     request: &kafka_protocol::messages::OffsetFetchRequest,
     version: i16,
 ) -> OffsetFetchResponse {
-    if version <= 7 {
-        let error_code = if version >= 2 { unsupported_code() } else { 0 };
+    if version < 2 {
         return OffsetFetchResponse::default()
             .with_throttle_time_ms(0)
             .with_topics(
@@ -314,7 +325,15 @@ fn unsupported_offset_fetch(
                     })
                     .collect(),
             )
-            .with_error_code(error_code)
+            .with_error_code(0)
+            .with_groups(Vec::new());
+    }
+
+    if version <= 7 {
+        return OffsetFetchResponse::default()
+            .with_throttle_time_ms(0)
+            .with_topics(Vec::new())
+            .with_error_code(unsupported_code())
             .with_groups(Vec::new());
     }
 
@@ -369,7 +388,11 @@ fn unsupported_find_coordinator(
         return FindCoordinatorResponse::default()
             .with_throttle_time_ms(0)
             .with_error_code(unsupported_code())
-            .with_error_message(None)
+            .with_error_message(Some(if version == 0 {
+                StrBytes::new()
+            } else {
+                StrBytes::from_static_str(UNSUPPORTED_VERSION_MESSAGE)
+            }))
             .with_node_id(BrokerId::from(-1))
             .with_host(StrBytes::new())
             .with_port(-1)
@@ -389,7 +412,9 @@ fn unsupported_find_coordinator(
                         .with_host(StrBytes::new())
                         .with_port(-1)
                         .with_error_code(unsupported_code())
-                        .with_error_message(None)
+                        .with_error_message(Some(StrBytes::from_static_str(
+                            UNSUPPORTED_VERSION_MESSAGE,
+                        )))
                 })
                 .collect(),
         )
@@ -414,28 +439,11 @@ fn unsupported_heartbeat() -> HeartbeatResponse {
         .with_error_code(unsupported_code())
 }
 
-fn unsupported_leave_group(
-    request: &kafka_protocol::messages::LeaveGroupRequest,
-    version: i16,
-) -> LeaveGroupResponse {
-    let members = if version >= 3 {
-        request
-            .members
-            .iter()
-            .map(|member| {
-                MemberResponse::default()
-                    .with_member_id(member.member_id.clone())
-                    .with_group_instance_id(member.group_instance_id.clone())
-                    .with_error_code(unsupported_code())
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+fn unsupported_leave_group() -> LeaveGroupResponse {
     LeaveGroupResponse::default()
         .with_throttle_time_ms(0)
         .with_error_code(unsupported_code())
-        .with_members(members)
+        .with_members(Vec::new())
 }
 
 fn unsupported_sync_group() -> SyncGroupResponse {
@@ -490,7 +498,9 @@ fn unsupported_create_topics(
                     CreatableTopicResult::default()
                         .with_name(topic.name.clone())
                         .with_error_code(unsupported_code())
-                        .with_error_message(None)
+                        .with_error_message(Some(StrBytes::from_static_str(
+                            UNSUPPORTED_VERSION_MESSAGE,
+                        )))
                         .with_topic_config_error_code(0)
                         .with_num_partitions(-1)
                         .with_replication_factor(-1)
@@ -522,7 +532,9 @@ fn unsupported_describe_configs(
                 .map(|resource| {
                     DescribeConfigsResult::default()
                         .with_error_code(unsupported_code())
-                        .with_error_message(None)
+                        .with_error_message(Some(StrBytes::from_static_str(
+                            UNSUPPORTED_VERSION_MESSAGE,
+                        )))
                         .with_resource_type(resource.resource_type)
                         .with_resource_name(resource.resource_name.clone())
                         .with_configs(Vec::new())
@@ -559,7 +571,8 @@ mod tests {
     };
 
     use super::{
-        ERROR_RESPONSE_API_KEYS, ErrorResponseError, unsupported_api_versions, unsupported_version,
+        ERROR_RESPONSE_API_KEYS, ErrorResponseError, UNSUPPORTED_VERSION_MESSAGE,
+        unsupported_api_versions, unsupported_version,
     };
     use crate::kafka::{
         capabilities::{ApiCapability, CAPABILITIES, capability},
@@ -615,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_api_versions_uses_neutral_typed_fallback() {
+    fn unsupported_api_versions_reports_kafka_4_3_api_versions_range() {
         let response = unsupported_api_versions();
         assert_api_versions(&response, 0);
         let decoded = round_trip_response(ApiKey::ApiVersions, 0, &response);
@@ -1172,7 +1185,14 @@ mod tests {
                 assert_eq!(partition.log_append_time_ms, -1);
                 assert_eq!(partition.log_start_offset, -1);
                 assert!(partition.record_errors.is_empty());
-                assert_eq!(partition.error_message, None);
+                if version >= 8 {
+                    assert_eq!(
+                        partition.error_message.as_ref().map(StrBytes::as_str),
+                        Some(UNSUPPORTED_VERSION_MESSAGE)
+                    );
+                } else {
+                    assert_eq!(partition.error_message, None);
+                }
                 assert_eq!(partition.current_leader.leader_id, BrokerId::from(-1));
                 assert_eq!(partition.current_leader.leader_epoch, -1);
             }
@@ -1303,10 +1323,7 @@ mod tests {
             panic!("expected OffsetFetch response, got {response:?}");
         };
         assert_eq!(response.throttle_time_ms, 0);
-        if version <= 7 {
-            if version >= 2 {
-                assert_unsupported(response.error_code);
-            }
+        if version < 2 {
             assert!(response.groups.is_empty());
             assert_eq!(response.topics.len(), 2);
             for (topic, (expected_name, expected_partitions)) in response.topics.iter().zip([
@@ -1324,6 +1341,10 @@ mod tests {
                     assert_unsupported(partition.error_code);
                 }
             }
+        } else if version <= 7 {
+            assert_unsupported(response.error_code);
+            assert!(response.topics.is_empty());
+            assert!(response.groups.is_empty());
         } else {
             assert!(response.topics.is_empty());
             assert_eq!(response.groups.len(), 2);
@@ -1379,7 +1400,10 @@ mod tests {
             if version == 0 {
                 assert_eq!(response.error_message, Some(StrBytes::new()));
             } else {
-                assert_eq!(response.error_message, None);
+                assert_eq!(
+                    response.error_message.as_ref().map(StrBytes::as_str),
+                    Some(UNSUPPORTED_VERSION_MESSAGE)
+                );
             }
             assert_eq!(response.node_id, BrokerId::from(-1));
             assert!(response.host.is_empty());
@@ -1397,7 +1421,10 @@ mod tests {
                 assert!(coordinator.host.is_empty());
                 assert_eq!(coordinator.port, -1);
                 assert_unsupported(coordinator.error_code);
-                assert_eq!(coordinator.error_message, None);
+                assert_eq!(
+                    coordinator.error_message.as_ref().map(StrBytes::as_str),
+                    Some(UNSUPPORTED_VERSION_MESSAGE)
+                );
             }
         }
     }
@@ -1425,33 +1452,13 @@ mod tests {
         assert_unsupported(response.error_code);
     }
 
-    fn assert_leave_group(response: &ResponseKind, version: i16) {
+    fn assert_leave_group(response: &ResponseKind, _: i16) {
         let ResponseKind::LeaveGroup(response) = response else {
             panic!("expected LeaveGroup response, got {response:?}");
         };
         assert_eq!(response.throttle_time_ms, 0);
         assert_unsupported(response.error_code);
-        if version >= 3 {
-            assert_eq!(response.members.len(), 2);
-            for (member, (expected_member_id, expected_instance_id)) in
-                response.members.iter().zip([
-                    ("leave-member-v3", "leave-instance-v3"),
-                    ("leave-member-v3-2", "leave-instance-v3-2"),
-                ])
-            {
-                assert_eq!(member.member_id.as_str(), expected_member_id);
-                assert_eq!(
-                    member
-                        .group_instance_id
-                        .as_ref()
-                        .map(|value| value.as_str()),
-                    Some(expected_instance_id)
-                );
-                assert_unsupported(member.error_code);
-            }
-        } else {
-            assert!(response.members.is_empty());
-        }
+        assert!(response.members.is_empty());
     }
 
     fn assert_sync_group(response: &ResponseKind, _: i16) {
@@ -1499,7 +1506,10 @@ mod tests {
             panic!("expected ApiVersions response, got {response:?}");
         };
         assert_unsupported(response.error_code);
-        assert!(response.api_keys.is_empty());
+        assert_eq!(response.api_keys.len(), 1);
+        assert_eq!(response.api_keys[0].api_key, ApiKey::ApiVersions as i16);
+        assert_eq!(response.api_keys[0].min_version, 0);
+        assert_eq!(response.api_keys[0].max_version, 4);
         assert_eq!(response.throttle_time_ms, 0);
         assert!(response.supported_features.is_empty());
         assert_eq!(response.finalized_features_epoch, -1);
@@ -1507,7 +1517,7 @@ mod tests {
         assert!(!response.zk_migration_ready);
     }
 
-    fn assert_create_topics(response: &ResponseKind, _: i16) {
+    fn assert_create_topics(response: &ResponseKind, version: i16) {
         let ResponseKind::CreateTopics(response) = response else {
             panic!("expected CreateTopics response, got {response:?}");
         };
@@ -1521,7 +1531,14 @@ mod tests {
             assert_eq!(topic.name.as_str(), expected_name);
             assert!(topic.topic_id.is_nil());
             assert_unsupported(topic.error_code);
-            assert_eq!(topic.error_message, None);
+            if version >= 1 {
+                assert_eq!(
+                    topic.error_message.as_ref().map(StrBytes::as_str),
+                    Some(UNSUPPORTED_VERSION_MESSAGE)
+                );
+            } else {
+                assert_eq!(topic.error_message, None);
+            }
             assert_eq!(topic.topic_config_error_code, 0);
             assert_eq!(topic.num_partitions, -1);
             assert_eq!(topic.replication_factor, -1);
@@ -1553,7 +1570,10 @@ mod tests {
             .zip([(2, "configured-topic"), (4, "configured-broker")])
         {
             assert_unsupported(result.error_code);
-            assert_eq!(result.error_message, None);
+            assert_eq!(
+                result.error_message.as_ref().map(StrBytes::as_str),
+                Some(UNSUPPORTED_VERSION_MESSAGE)
+            );
             assert_eq!(result.resource_type, expected_type);
             assert_eq!(result.resource_name.as_str(), expected_name);
             assert!(result.configs.is_empty());

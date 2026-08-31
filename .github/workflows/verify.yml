@@ -108,6 +108,20 @@ jobs:
           cache: maven
           cache-dependency-path: tests/java/pom.xml
 
+      - name: Verify Kafka 4.3 protocol error compatibility
+        env:
+          MEMKAFKA_PROTOCOL_IMAGE: memkafka:ci
+          MEMKAFKA_PROTOCOL_ARTIFACT_DIR: artifacts/protocol-compat
+        run: tests/protocol-compat/run.sh
+
+      - name: Upload Kafka protocol compatibility diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kafka-protocol-compat-diagnostics
+          path: artifacts/protocol-compat
+          if-no-files-found: warn
+
       - name: Install Go 1.27
         uses: actions/setup-go@v7
         with:

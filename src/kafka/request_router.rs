@@ -313,7 +313,10 @@ mod tests {
             panic!("expected ApiVersions response");
         };
         assert_eq!(body.error_code, ResponseError::UnsupportedVersion.code());
-        assert!(body.api_keys.is_empty());
+        assert_eq!(body.api_keys.len(), 1);
+        assert_eq!(body.api_keys[0].api_key, ApiKey::ApiVersions as i16);
+        assert_eq!(body.api_keys[0].min_version, 0);
+        assert_eq!(body.api_keys[0].max_version, 4);
     }
 
     #[test]
