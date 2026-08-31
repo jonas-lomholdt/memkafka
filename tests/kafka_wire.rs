@@ -273,6 +273,29 @@ async fn dispatch_version_gate_runs_before_body_matching() {
 }
 
 #[tokio::test]
+async fn unsupported_version_shape_stays_out_of_dispatch_until_routing() {
+    let request = DecodedRequest {
+        header: RequestHeader::default()
+            .with_request_api_key(ApiKey::Metadata as i16)
+            .with_request_api_version(3),
+        api_key: ApiKey::Metadata,
+        body: RequestKind::Metadata(MetadataRequest::default().with_topics(Some(vec![
+            MetadataRequestTopic::default().with_name(Some(TopicName::from(
+                StrBytes::from_static_str("unsupported-topic"),
+            ))),
+        ]))),
+    };
+
+    assert_eq!(
+        test_dispatcher().dispatch(&request).await,
+        Err(DispatchError::UnsupportedVersion {
+            api_key: ApiKey::Metadata,
+            version: 3,
+        })
+    );
+}
+
+#[tokio::test]
 async fn rejects_versions_below_current_client_floor_before_body_matching() {
     let dispatcher = test_dispatcher();
     let (mismatched_body_api_key, mismatched_body) = (

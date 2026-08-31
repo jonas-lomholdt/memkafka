@@ -7,6 +7,8 @@ mod create_topics;
 mod describe_configs;
 mod describe_groups;
 pub mod dispatcher;
+#[allow(dead_code)] // Task 6 connects the pure rejection builders to request routing.
+mod error_response;
 mod fetch;
 mod find_coordinator;
 pub mod frame;

@@ -10,6 +10,27 @@ use super::{
     list_groups, list_offsets, metadata, offset_commit, offset_fetch, produce, sync_group,
 };
 
+#[allow(dead_code)] // Enforced by Task 5's coverage test before Task 6 consumes the declaration.
+pub(crate) const DISPATCHED_API_KEYS: &[ApiKey] = &[
+    ApiKey::Produce,
+    ApiKey::Fetch,
+    ApiKey::ListOffsets,
+    ApiKey::Metadata,
+    ApiKey::OffsetCommit,
+    ApiKey::OffsetFetch,
+    ApiKey::FindCoordinator,
+    ApiKey::JoinGroup,
+    ApiKey::Heartbeat,
+    ApiKey::LeaveGroup,
+    ApiKey::SyncGroup,
+    ApiKey::DescribeGroups,
+    ApiKey::ListGroups,
+    ApiKey::ApiVersions,
+    ApiKey::CreateTopics,
+    ApiKey::InitProducerId,
+    ApiKey::DescribeConfigs,
+];
+
 #[derive(Clone, Debug)]
 pub struct Dispatcher {
     broker: BrokerState,
