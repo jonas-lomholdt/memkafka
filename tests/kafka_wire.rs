@@ -18,6 +18,8 @@ use kafka_protocol::{
         fetch_response::FetchResponse,
         join_group_request::JoinGroupRequestProtocol,
         leave_group_request::MemberIdentity,
+        leave_group_response::{LeaveGroupResponse, MemberResponse},
+        list_groups_response::{ListGroupsResponse, ListedGroup},
         list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
         list_offsets_response::ListOffsetsResponse,
         metadata_request::MetadataRequestTopic,
@@ -91,7 +93,7 @@ struct BoundaryVersion {
 }
 
 #[test]
-#[should_panic(expected = "assertion `left == right` failed")]
+#[should_panic(expected = "exact capability advertisement mismatch")]
 fn supported_api_versions_callback_rejects_a_default_response_stub() {
     // Mutation evidence: a dispatcher that returns the generated default response does not
     // satisfy the precise supported-response contract below.
@@ -100,6 +102,37 @@ fn supported_api_versions_callback_rejects_a_default_response_stub() {
         &ResponseKind::ApiVersions(Default::default()),
         4,
     );
+}
+
+#[test]
+#[should_panic(expected = "supported LeaveGroup v3 results")]
+fn supported_leave_group_callback_rejects_truncated_member_results() {
+    let request = RequestKind::LeaveGroup(LeaveGroupRequest::default().with_members(vec![
+        MemberIdentity::default()
+            .with_member_id(StrBytes::from_static_str("boundary-supported-member")),
+        MemberIdentity::default()
+            .with_member_id(StrBytes::from_static_str("boundary-supported-member-b")),
+    ]));
+    let response = ResponseKind::LeaveGroup(LeaveGroupResponse::default().with_members(vec![
+            MemberResponse::default()
+                .with_member_id(StrBytes::from_static_str("boundary-supported-member"))
+                .with_error_code(ResponseError::UnknownMemberId.code()),
+        ]));
+
+    assert_leave_group_supported(&request, &response, 3);
+}
+
+#[test]
+#[should_panic(expected = "supported ListGroups results")]
+fn supported_list_groups_callback_rejects_truncated_group_results() {
+    let request = RequestKind::ListGroups(ListGroupsRequest::default());
+    let response = ResponseKind::ListGroups(ListGroupsResponse::default().with_groups(vec![
+            ListedGroup::default()
+                .with_group_id(GroupId::from(StrBytes::from_static_str("boundary-list-group")))
+                .with_protocol_type(StrBytes::from_static_str("consumer")),
+        ]));
+
+    assert_list_groups_supported(&request, &response, 0);
 }
 
 #[test]
@@ -511,7 +544,7 @@ async fn advertised_api_boundary_matrix() {
             if case.api_key == ApiKey::ListGroups && version == capability.supported.min {
                 correlation_id += 1;
                 seed_list_groups_fixture(&mut connection, correlation_id).await;
-                correlation_id += 1;
+                correlation_id += 3;
             }
             correlation_id += 1;
             write_frame(
@@ -745,7 +778,6 @@ async fn tagged_field_boundary_rejections_remain_decodable() {
         let (header, response) = decode_response_kind(api_key, version, encoded);
         assert_eq!(header.correlation_id, correlation_id);
         (case.assert_error)(&request, &response, version);
-        assert_flexible_rejection_tags_empty(api_key, &response);
     }
 
     server.shutdown().await;
@@ -3291,11 +3323,14 @@ fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
                     request.with_member_id(StrBytes::from_static_str("boundary-supported-member")),
                 )
             } else {
-                RequestKind::LeaveGroup(request.with_members(
-                    vec![MemberIdentity::default().with_member_id(
+                RequestKind::LeaveGroup(request.with_members(vec![
+                    MemberIdentity::default().with_member_id(
                             StrBytes::from_static_str("boundary-supported-member"),
-                        )],
-                ))
+                        ),
+                    MemberIdentity::default().with_member_id(
+                        StrBytes::from_static_str("boundary-supported-member-b"),
+                    ),
+                ]))
             }
         }
         ApiKey::SyncGroup => RequestKind::SyncGroup(
@@ -3410,90 +3445,230 @@ fn assert_encoded_request_tags(
     assert_eq!(unknown_tagged_fields.get(&tags.body.0), Some(&tags.body.1));
 }
 
-fn assert_flexible_rejection_tags_empty(api_key: ApiKey, response: &ResponseKind) {
+/// Flexible responses are decoded by the shared matrix decoder.  The protocol carries no
+/// response tags for these fixtures, so audit every generated tagged-field map recursively.
+fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: &ResponseKind) {
+    assert_eq!(
+        api_key.response_header_version(version),
+        1,
+        "{api_key:?} v{version} is not a flexible response"
+    );
+
+    macro_rules! assert_no_tags {
+        ($value:expr) => {
+            assert!(
+                $value.unknown_tagged_fields.is_empty(),
+                "{api_key:?} v{version} {} unexpectedly contains unknown tagged fields",
+                stringify!($value)
+            )
+        };
+    }
+
     match response {
         ResponseKind::Produce(response) if api_key == ApiKey::Produce => {
-            assert!(response.unknown_tagged_fields.is_empty());
+            assert_no_tags!(response);
             for topic in &response.responses {
-                assert!(topic.unknown_tagged_fields.is_empty());
+                assert_no_tags!(topic);
                 for partition in &topic.partition_responses {
-                    assert!(partition.unknown_tagged_fields.is_empty());
-                    assert!(partition.current_leader.unknown_tagged_fields.is_empty());
+                    assert_no_tags!(partition);
+                    assert_no_tags!(partition.current_leader);
                     for record_error in &partition.record_errors {
-                        assert!(record_error.unknown_tagged_fields.is_empty());
+                        assert_no_tags!(record_error);
                     }
                 }
             }
             for endpoint in &response.node_endpoints {
-                assert!(endpoint.unknown_tagged_fields.is_empty());
+                assert_no_tags!(endpoint);
             }
         }
         ResponseKind::Fetch(response) if api_key == ApiKey::Fetch => {
-            assert!(response.unknown_tagged_fields.is_empty());
+            assert_no_tags!(response);
             for topic in &response.responses {
-                assert!(topic.unknown_tagged_fields.is_empty());
+                assert_no_tags!(topic);
                 for partition in &topic.partitions {
-                    assert!(partition.unknown_tagged_fields.is_empty());
-                    assert!(partition.diverging_epoch.unknown_tagged_fields.is_empty());
-                    assert!(partition.current_leader.unknown_tagged_fields.is_empty());
-                    assert!(partition.snapshot_id.unknown_tagged_fields.is_empty());
+                    assert_no_tags!(partition);
+                    assert_no_tags!(partition.diverging_epoch);
+                    assert_no_tags!(partition.current_leader);
+                    assert_no_tags!(partition.snapshot_id);
                     for transaction in partition
                         .aborted_transactions
                         .as_deref()
                         .unwrap_or_default()
                     {
-                        assert!(transaction.unknown_tagged_fields.is_empty());
+                        assert_no_tags!(transaction);
                     }
                 }
             }
             for endpoint in &response.node_endpoints {
-                assert!(endpoint.unknown_tagged_fields.is_empty());
+                assert_no_tags!(endpoint);
+            }
+        }
+        ResponseKind::ListOffsets(response) if api_key == ApiKey::ListOffsets => {
+            assert_no_tags!(response);
+            for topic in &response.topics {
+                assert_no_tags!(topic);
+                for partition in &topic.partitions {
+                    assert_no_tags!(partition);
+                }
+            }
+        }
+        ResponseKind::Metadata(response) if api_key == ApiKey::Metadata => {
+            assert_no_tags!(response);
+            for broker in &response.brokers {
+                assert_no_tags!(broker);
+            }
+            for topic in &response.topics {
+                assert_no_tags!(topic);
+                for partition in &topic.partitions {
+                    assert_no_tags!(partition);
+                }
+            }
+        }
+        ResponseKind::OffsetCommit(response) if api_key == ApiKey::OffsetCommit => {
+            assert_no_tags!(response);
+            for topic in &response.topics {
+                assert_no_tags!(topic);
+                for partition in &topic.partitions {
+                    assert_no_tags!(partition);
+                }
             }
         }
         ResponseKind::OffsetFetch(response) if api_key == ApiKey::OffsetFetch => {
-            assert!(response.unknown_tagged_fields.is_empty());
+            assert_no_tags!(response);
             for topic in &response.topics {
-                assert!(topic.unknown_tagged_fields.is_empty());
+                assert_no_tags!(topic);
                 for partition in &topic.partitions {
-                    assert!(partition.unknown_tagged_fields.is_empty());
+                    assert_no_tags!(partition);
                 }
             }
             for group in &response.groups {
-                assert!(group.unknown_tagged_fields.is_empty());
+                assert_no_tags!(group);
                 for topic in &group.topics {
-                    assert!(topic.unknown_tagged_fields.is_empty());
+                    assert_no_tags!(topic);
                     for partition in &topic.partitions {
-                        assert!(partition.unknown_tagged_fields.is_empty());
+                        assert_no_tags!(partition);
                     }
                 }
             }
         }
-        ResponseKind::CreateTopics(response) if api_key == ApiKey::CreateTopics => {
-            assert!(response.unknown_tagged_fields.is_empty());
-            for topic in &response.topics {
-                assert!(topic.unknown_tagged_fields.is_empty());
-                for config in topic.configs.as_deref().unwrap_or_default() {
-                    assert!(config.unknown_tagged_fields.is_empty());
+        ResponseKind::FindCoordinator(response) if api_key == ApiKey::FindCoordinator => {
+            assert_no_tags!(response);
+            for coordinator in &response.coordinators {
+                assert_no_tags!(coordinator);
+            }
+        }
+        ResponseKind::JoinGroup(response) if api_key == ApiKey::JoinGroup => {
+            assert_no_tags!(response);
+            for member in &response.members {
+                assert_no_tags!(member);
+            }
+        }
+        ResponseKind::Heartbeat(response) if api_key == ApiKey::Heartbeat => {
+            assert_no_tags!(response);
+        }
+        ResponseKind::LeaveGroup(response) if api_key == ApiKey::LeaveGroup => {
+            assert_no_tags!(response);
+            for member in &response.members {
+                assert_no_tags!(member);
+            }
+        }
+        ResponseKind::SyncGroup(response) if api_key == ApiKey::SyncGroup => {
+            assert_no_tags!(response);
+        }
+        ResponseKind::DescribeGroups(response) if api_key == ApiKey::DescribeGroups => {
+            assert_no_tags!(response);
+            for group in &response.groups {
+                assert_no_tags!(group);
+                for member in &group.members {
+                    assert_no_tags!(member);
                 }
             }
         }
-        _ => panic!("missing flexible response tag audit for {api_key:?}"),
+        ResponseKind::ListGroups(response) if api_key == ApiKey::ListGroups => {
+            assert_no_tags!(response);
+            for group in &response.groups {
+                assert_no_tags!(group);
+            }
+        }
+        ResponseKind::ApiVersions(response) if api_key == ApiKey::ApiVersions => {
+            assert_no_tags!(response);
+            for api_version in &response.api_keys {
+                assert_no_tags!(api_version);
+            }
+            for feature in &response.supported_features {
+                assert_no_tags!(feature);
+            }
+            for feature in &response.finalized_features {
+                assert_no_tags!(feature);
+            }
+        }
+        ResponseKind::CreateTopics(response) if api_key == ApiKey::CreateTopics => {
+            assert_no_tags!(response);
+            for topic in &response.topics {
+                assert_no_tags!(topic);
+                for config in topic.configs.as_deref().unwrap_or_default() {
+                    assert_no_tags!(config);
+                }
+            }
+        }
+        ResponseKind::InitProducerId(response) if api_key == ApiKey::InitProducerId => {
+            assert_no_tags!(response);
+        }
+        ResponseKind::DescribeConfigs(response) if api_key == ApiKey::DescribeConfigs => {
+            assert_no_tags!(response);
+            for result in &response.results {
+                assert_no_tags!(result);
+                for config in &result.configs {
+                    assert_no_tags!(config);
+                    for synonym in &config.synonyms {
+                        assert_no_tags!(synonym);
+                    }
+                }
+            }
+        }
+        _ => panic!("missing flexible response tag audit for {api_key:?} v{version}"),
     }
 }
 
 async fn seed_list_groups_fixture(connection: &mut TcpStream, correlation_id: i32) {
+    seed_list_group_fixture(
+        connection,
+        correlation_id,
+        "boundary-list-group",
+        "consumer",
+        "range",
+        "boundary-matrix-1",
+    )
+    .await;
+    seed_list_group_fixture(
+        connection,
+        correlation_id + 2,
+        "boundary-list-group-b",
+        "connect",
+        "roundrobin",
+        "boundary-matrix-2",
+    )
+    .await;
+}
+
+async fn seed_list_group_fixture(
+    connection: &mut TcpStream,
+    correlation_id: i32,
+    group_id: &'static str,
+    protocol_type: &'static str,
+    protocol_name: &'static str,
+    member_id: &'static str,
+) {
     let initial = RequestKind::JoinGroup(
         JoinGroupRequest::default()
-            .with_group_id(GroupId::from(StrBytes::from_static_str(
-                "boundary-list-group",
-            )))
+            .with_group_id(GroupId::from(StrBytes::from_static_str(group_id)))
             .with_session_timeout_ms(10_000)
             .with_rebalance_timeout_ms(10_000)
             .with_member_id(StrBytes::new())
-            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocol_type(StrBytes::from_static_str(protocol_type))
             .with_protocols(vec![
                 JoinGroupRequestProtocol::default()
-                    .with_name(StrBytes::from_static_str("range"))
+                    .with_name(StrBytes::from_static_str(protocol_name))
                     .with_metadata(Bytes::new()),
             ]),
     );
@@ -3513,20 +3688,18 @@ async fn seed_list_groups_fixture(connection: &mut TcpStream, correlation_id: i3
         panic!("expected ListGroups fixture JoinGroup response");
     };
     assert_eq!(response.error_code, ResponseError::MemberIdRequired.code());
-    assert_eq!(response.member_id.as_str(), "boundary-matrix-1");
+    assert_eq!(response.member_id.as_str(), member_id);
 
     let joined = RequestKind::JoinGroup(
         JoinGroupRequest::default()
-            .with_group_id(GroupId::from(StrBytes::from_static_str(
-                "boundary-list-group",
-            )))
+            .with_group_id(GroupId::from(StrBytes::from_static_str(group_id)))
             .with_session_timeout_ms(10_000)
             .with_rebalance_timeout_ms(10_000)
             .with_member_id(response.member_id.clone())
-            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocol_type(StrBytes::from_static_str(protocol_type))
             .with_protocols(vec![
                 JoinGroupRequestProtocol::default()
-                    .with_name(StrBytes::from_static_str("range"))
+                    .with_name(StrBytes::from_static_str(protocol_name))
                     .with_metadata(Bytes::new()),
             ]),
     );
@@ -3549,12 +3722,12 @@ async fn seed_list_groups_fixture(connection: &mut TcpStream, correlation_id: i3
     assert_eq!(response.generation_id, 1);
     assert_eq!(
         response.protocol_name,
-        Some(StrBytes::from_static_str("range"))
+        Some(StrBytes::from_static_str(protocol_name))
     );
-    assert_eq!(response.leader.as_str(), "boundary-matrix-1");
-    assert_eq!(response.member_id.as_str(), "boundary-matrix-1");
+    assert_eq!(response.leader.as_str(), member_id);
+    assert_eq!(response.member_id.as_str(), member_id);
     assert_eq!(response.members.len(), 1);
-    assert_eq!(response.members[0].member_id.as_str(), "boundary-matrix-1");
+    assert_eq!(response.members[0].member_id.as_str(), member_id);
     assert_eq!(response.members[0].metadata, Bytes::new());
 }
 
@@ -3873,6 +4046,8 @@ fn assert_leave_group_supported(request: &RequestKind, response: &ResponseKind, 
         assert!(response.members.is_empty());
     } else {
         assert_eq!(response.error_code, 0);
+        assert_eq!(request.members.len(), 2, "supported LeaveGroup v3 fixture");
+        assert_eq!(response.members.len(), 2, "supported LeaveGroup v3 results");
         assert_eq!(response.members.len(), request.members.len());
         for (actual_member, expected_member) in response.members.iter().zip(&request.members) {
             assert_eq!(actual_member.member_id, expected_member.member_id);
@@ -3932,12 +4107,17 @@ fn assert_list_groups_supported(request: &RequestKind, response: &ResponseKind, 
     };
     assert_eq!(response.throttle_time_ms, 0);
     assert_eq!(response.error_code, 0);
-    assert_eq!(response.groups.len(), 1);
+    assert_eq!(response.groups.len(), 2, "supported ListGroups results");
     assert_eq!(
         response.groups[0].group_id.0.as_str(),
         "boundary-list-group"
     );
     assert_eq!(response.groups[0].protocol_type.as_str(), "consumer");
+    assert_eq!(
+        response.groups[1].group_id.0.as_str(),
+        "boundary-list-group-b"
+    );
+    assert_eq!(response.groups[1].protocol_type.as_str(), "connect");
 }
 
 fn assert_create_topics_supported(request: &RequestKind, response: &ResponseKind, version: i16) {
@@ -4464,7 +4644,8 @@ fn assert_api_versions_supported(request: &RequestKind, response: &ResponseKind,
             (ApiKey::CreateTopics as i16, 4, 6),
             (ApiKey::InitProducerId as i16, 0, 0),
             (ApiKey::DescribeConfigs as i16, 1, 1),
-        ]
+        ],
+        "exact capability advertisement mismatch"
     );
 }
 
@@ -4794,6 +4975,9 @@ fn decode_response_kind(
         encoded.is_empty(),
         "{api_key:?} v{version} response has trailing bytes"
     );
+    if api_key.response_header_version(version) == 1 {
+        assert_flexible_response_tags_empty(api_key, version, &response);
+    }
     (header, response)
 }
 
