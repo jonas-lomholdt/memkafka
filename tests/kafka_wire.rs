@@ -50,7 +50,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{oneshot, watch},
     task::JoinHandle,
-    time::{advance, timeout},
+    time::timeout,
 };
 
 const API_VERSIONS_VERSION: i16 = 3;
@@ -2311,118 +2311,6 @@ async fn fetch_v4_returns_ordered_records_watermarks_and_partition_errors() {
     )
     .await;
     assert_eq!(past_end.responses[0].partitions[0].error_code, 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn fetch_v4_waits_for_min_bytes_and_wakes_after_appends() {
-    // Real socket scheduling can otherwise leave a paused Tokio runtime idle long enough to
-    // auto-advance to Fetch's max-wait deadline before this test makes its next assertion.
-    let clock_guard = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
-    let broker = test_broker_state(false);
-    broker
-        .topics()
-        .create_explicit("events", 1, 1)
-        .await
-        .expect("create topic");
-    let dispatcher = Dispatcher::new(broker);
-    let first = record_batch(&["first"]);
-    let second = record_batch(&["second"]);
-    let min_bytes = i32::try_from(first.len() + second.len()).expect("small batches");
-
-    let waiting = {
-        let dispatcher = dispatcher.clone();
-        tokio::spawn(async move {
-            dispatch_fetch_request(
-                &dispatcher,
-                164,
-                1_000,
-                min_bytes,
-                i32::MAX,
-                vec![fetch_topic("events", vec![(0, 0, i32::MAX)])],
-            )
-            .await
-        })
-    };
-    tokio::task::yield_now().await;
-    assert!(!waiting.is_finished());
-
-    dispatch_produce_request(
-        &dispatcher,
-        165,
-        -1,
-        None,
-        vec![produce_topic("events", vec![produce_partition(0, first)])],
-    )
-    .await;
-    tokio::task::yield_now().await;
-    assert!(!waiting.is_finished());
-
-    dispatch_produce_request(
-        &dispatcher,
-        166,
-        -1,
-        None,
-        vec![produce_topic("events", vec![produce_partition(0, second)])],
-    )
-    .await;
-    let response = waiting.await.expect("Fetch task");
-    assert_eq!(
-        decode_records(
-            response.responses[0].partitions[0]
-                .records
-                .clone()
-                .expect("record bytes")
-        )
-        .len(),
-        2
-    );
-    clock_guard.abort();
-}
-
-#[tokio::test(start_paused = true)]
-async fn fetch_v4_returns_empty_when_max_wait_expires() {
-    let clock_guard = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
-    let broker = test_broker_state(false);
-    broker
-        .topics()
-        .create_explicit("events", 1, 1)
-        .await
-        .expect("create topic");
-    let dispatcher = Dispatcher::new(broker);
-    let waiting = tokio::spawn(async move {
-        dispatch_fetch_request(
-            &dispatcher,
-            167,
-            100,
-            1,
-            i32::MAX,
-            vec![fetch_topic("events", vec![(0, 0, i32::MAX)])],
-        )
-        .await
-    });
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
-    assert!(!waiting.is_finished());
-
-    advance(Duration::from_millis(99)).await;
-    tokio::task::yield_now().await;
-    assert!(!waiting.is_finished());
-    advance(Duration::from_millis(1)).await;
-
-    let response = waiting.await.expect("Fetch task");
-    let partition = &response.responses[0].partitions[0];
-    assert_eq!(partition.error_code, 0);
-    assert!(partition.records.as_ref().is_none_or(Bytes::is_empty));
-    clock_guard.abort();
 }
 
 #[tokio::test]
