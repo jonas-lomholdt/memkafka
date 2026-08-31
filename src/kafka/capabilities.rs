@@ -434,6 +434,53 @@ mod tests {
     }
 
     #[test]
+    fn kafka_4_3_ranges_match_generated_schema_and_supported_windows_are_frozen() {
+        for capability in CAPABILITIES {
+            let generated = capability.api_key.valid_versions();
+            assert_eq!(
+                (generated.min, generated.max),
+                (capability.kafka_4_3.min, capability.kafka_4_3.max),
+                "generated Kafka 4.3 range drifted for {:?}",
+                capability.api_key,
+            );
+        }
+
+        let actual_supported = CAPABILITIES
+            .iter()
+            .map(|capability| {
+                (
+                    capability.api_key,
+                    capability.supported.min,
+                    capability.supported.max,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual_supported,
+            vec![
+                (ApiKey::Produce, 7, 7),
+                (ApiKey::Fetch, 4, 4),
+                (ApiKey::ListOffsets, 3, 3),
+                (ApiKey::Metadata, 4, 9),
+                (ApiKey::OffsetCommit, 7, 7),
+                (ApiKey::OffsetFetch, 5, 5),
+                (ApiKey::FindCoordinator, 2, 2),
+                (ApiKey::JoinGroup, 5, 5),
+                (ApiKey::Heartbeat, 3, 3),
+                (ApiKey::LeaveGroup, 1, 3),
+                (ApiKey::SyncGroup, 3, 3),
+                (ApiKey::DescribeGroups, 0, 0),
+                (ApiKey::ListGroups, 0, 0),
+                (ApiKey::ApiVersions, 3, 4),
+                (ApiKey::CreateTopics, 4, 6),
+                (ApiKey::InitProducerId, 0, 0),
+                (ApiKey::DescribeConfigs, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
     fn api_versions_response_equals_registry_supported_ranges() {
         let actual = api_versions::response()
             .api_keys
