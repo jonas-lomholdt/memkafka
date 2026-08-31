@@ -35,7 +35,10 @@ use kafka_protocol::{
     },
 };
 use memkafka::kafka::{
-    codec::{DecodedRequest, decode_request, encode_response},
+    codec::{
+        DecodeStage, DecodedFrame, DecodedRequest, RequestDecodeError, RequestPrefix, decode_frame,
+        decode_request, encode_response,
+    },
     dispatcher::{DispatchError, Dispatcher},
     frame::{read_frame, write_frame},
 };
@@ -51,6 +54,194 @@ use tokio::{
 };
 
 const API_VERSIONS_VERSION: i16 = 3;
+
+#[test]
+fn codec_decodes_generated_advertised_request_and_flexible_header_tags() {
+    // This raw ApiVersions v3 frame has a flexible request header with one unknown tagged field.
+    // It catches decoding the header with the wrong version or discarding its tagged fields.
+    let frame = Bytes::from_static(&[
+        0x00, 0x12, 0x00, 0x03, 0x01, 0x02, 0x03, 0x04, 0x00, 0x01, b'x', 0x01, 0x07, 0x03, 0xaa,
+        0xbb, 0xcc, 0x07, b'c', b'l', b'i', b'e', b'n', b't', 0x02, b'1', 0x00,
+    ]);
+
+    let DecodedFrame::Request(request) = decode_frame(frame).expect("decode ApiVersions v3") else {
+        panic!("expected a decoded request");
+    };
+
+    assert_eq!(request.api_key, ApiKey::ApiVersions);
+    assert_eq!(request.header.request_api_version, 3);
+    assert_eq!(request.header.correlation_id, 0x0102_0304);
+    assert_eq!(request.header.client_id.as_deref(), Some("x"));
+    assert_eq!(
+        request.header.unknown_tagged_fields.get(&7),
+        Some(&Bytes::from_static(&[0xaa, 0xbb, 0xcc]))
+    );
+    let RequestKind::ApiVersions(body) = request.body else {
+        panic!("expected ApiVersions body");
+    };
+    assert_eq!(body.client_software_name.as_str(), "client");
+    assert_eq!(body.client_software_version.as_str(), "1");
+}
+
+#[test]
+fn codec_routes_unsupported_api_versions_after_decoding_only_its_header() {
+    // The final byte is an invalid body. This catches accidentally decoding an unsupported
+    // ApiVersions body instead of returning the special routeable outcome after its header.
+    let cases = [
+        (
+            Bytes::from_static(&[
+                0x00, 0x12, 0x00, 0x05, 0x11, 0x22, 0x33, 0x44, 0xff, 0xff, 0x00, 0xff,
+            ]),
+            5,
+            0x1122_3344,
+        ),
+        (
+            Bytes::from_static(&[
+                0x00, 0x12, 0x7f, 0xff, 0x55, 0x66, 0x77, 0x00, 0xff, 0xff, 0x00, 0xff,
+            ]),
+            i16::MAX,
+            0x5566_7700,
+        ),
+    ];
+
+    for (frame, requested_version, expected_correlation_id) in cases {
+        let DecodedFrame::UnsupportedApiVersions {
+            header,
+            requested_version: actual_version,
+        } = decode_frame(frame).expect("route unsupported ApiVersions")
+        else {
+            panic!("expected unsupported ApiVersions outcome");
+        };
+
+        assert_eq!(actual_version, requested_version);
+        assert_eq!(header.request_api_key, ApiKey::ApiVersions as i16);
+        assert_eq!(header.request_api_version, requested_version);
+        assert_eq!(header.correlation_id, expected_correlation_id);
+    }
+}
+
+#[test]
+fn codec_reports_unknown_raw_api_key_with_fixed_prefix_context() {
+    // This catches converting the API key only after a header decode has already failed.
+    let error = decode_frame(Bytes::from_static(&[
+        0x7f, 0xff, 0x00, 0x09, 0x01, 0x02, 0x03, 0x04,
+    ]))
+    .expect_err("unknown API key must be routeable");
+
+    let RequestDecodeError::UnknownApiKey { prefix } = error else {
+        panic!("expected unknown API key error");
+    };
+    assert_eq!(
+        prefix,
+        RequestPrefix {
+            raw_api_key: i16::MAX,
+            api_version: 9,
+            correlation_id: 0x0102_0304,
+        }
+    );
+}
+
+#[test]
+fn codec_reports_non_api_versions_schema_range_errors_before_headers() {
+    // These frames contain no header. They catch treating the generated schema range as support
+    // policy or attempting to decode an impossible header/body before returning a close outcome.
+    let cases = [
+        (
+            Bytes::from_static(&[0x00, 0x03, 0xff, 0xff, 0x01, 0x02, 0x03, 0x04]),
+            -1,
+            0x0102_0304,
+        ),
+        (
+            Bytes::from_static(&[0x00, 0x03, 0x00, 0x0e, 0x05, 0x06, 0x07, 0x08]),
+            14,
+            0x0506_0708,
+        ),
+    ];
+
+    for (frame, api_version, expected_correlation_id) in cases {
+        let error = decode_frame(frame).expect_err("out-of-schema version must be routeable");
+        let RequestDecodeError::VersionOutOfSchema { prefix, api_key } = error else {
+            panic!("expected schema-range error");
+        };
+        assert_eq!(api_key, ApiKey::Metadata);
+        assert_eq!(
+            prefix,
+            RequestPrefix {
+                raw_api_key: ApiKey::Metadata as i16,
+                api_version,
+                correlation_id: expected_correlation_id,
+            }
+        );
+    }
+}
+
+#[test]
+fn codec_reports_malformed_stages_with_available_context() {
+    // Each fixture exercises a separate branch: too little fixed prefix, truncated header,
+    // truncated body, and extra body bytes after a successful decode.
+    let cases = [
+        (
+            Bytes::from_static(&[0x00, 0x12, 0x00, 0x03, 0x01, 0x02, 0x03]),
+            None,
+            None,
+            None,
+        ),
+        (
+            Bytes::from_static(&[0x00, 0x03, 0x00, 0x09, 0x01, 0x02, 0x03, 0x04]),
+            Some(RequestPrefix {
+                raw_api_key: ApiKey::Metadata as i16,
+                api_version: 9,
+                correlation_id: 0x0102_0304,
+            }),
+            Some(ApiKey::Metadata),
+            Some(DecodeStage::Header),
+        ),
+        (
+            Bytes::from_static(&[0x00, 0x03, 0x00, 0x04, 0x11, 0x22, 0x33, 0x44, 0xff, 0xff]),
+            Some(RequestPrefix {
+                raw_api_key: ApiKey::Metadata as i16,
+                api_version: 4,
+                correlation_id: 0x1122_3344,
+            }),
+            Some(ApiKey::Metadata),
+            Some(DecodeStage::Body),
+        ),
+        (
+            Bytes::from_static(&[
+                0x00, 0x12, 0x00, 0x03, 0x55, 0x66, 0x77, 0x00, 0xff, 0xff, 0x00, 0x01, 0x01, 0x00,
+                0x99,
+            ]),
+            Some(RequestPrefix {
+                raw_api_key: ApiKey::ApiVersions as i16,
+                api_version: 3,
+                correlation_id: 0x5566_7700,
+            }),
+            Some(ApiKey::ApiVersions),
+            Some(DecodeStage::TrailingBytes),
+        ),
+    ];
+
+    for (frame, expected_prefix, expected_api_key, expected_stage) in cases {
+        let error = decode_frame(frame).expect_err("malformed frame must fail");
+        match (error, expected_stage) {
+            (RequestDecodeError::TruncatedPrefix, None) => {}
+            (
+                RequestDecodeError::Malformed {
+                    prefix,
+                    api_key,
+                    stage,
+                    ..
+                },
+                Some(expected_stage),
+            ) => {
+                assert_eq!(prefix, expected_prefix);
+                assert_eq!(api_key, expected_api_key);
+                assert_eq!(stage, expected_stage);
+            }
+            (error, _) => panic!("unexpected decode error: {error}"),
+        }
+    }
+}
 
 #[tokio::test]
 async fn dispatch_version_gate_runs_before_body_matching() {
