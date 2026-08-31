@@ -20,7 +20,7 @@ Do not build a KRaft cluster, replica manager, disk log, or multi-process archit
 
 ### Snapshot scorecard
 
-| Measure | 2026-08-29 result |
+| Measure | Historical 2026-08-29 assessment |
 | --- | ---: |
 | Stable API keys in the [Kafka 4.3 protocol table](https://kafka.apache.org/43/design/protocol#api-keys) | 77 |
 | API keys advertised by MemKafka | 17 |
@@ -297,7 +297,7 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 - decode into structured outcomes and route schema-known unsupported versions before stateful dispatch;
 - return typed adjacent-version errors for all 17 advertised APIs without widening their supported windows;
 - exercise an exhaustive Rust matrix of every advertised floor, ceiling, adjacent typed rejection, and connection-survival path, plus focused flexible/tagged and rejected-mutation coverage;
-- compare all 28 adjacent rejection cases with Kafka 4.3.1's Java request classes and compare unsupported `ApiVersions` bytes with a live pinned Kafka broker.
+- compare all 28 adjacent rejection cases with Kafka 4.3.1's Java request classes and compare normalized unsupported `ApiVersions` header/body observations with a live pinned Kafka broker.
 
 **Remaining state and semantic work:**
 
@@ -397,7 +397,7 @@ Configuration-file parity remains out of scope. The setup surface should be inte
 
 **Acceptance:** a real KafkaShareConsumer distributes records across members, redelivers released/expired records, never redelivers accepted records, and exposes and resets offsets; a real Kafka Streams topology using the Streams protocol scales members while preserving disjoint active tasks and coherent standby/warm-up roles.
 
-**Dependencies:** P2 isolation/transactions for realistic Streams; P3 broker-side assignment patterns; generated types for 88/89; deterministic timers.
+**Dependencies:** P2 isolation/transactions for realistic Streams; P3 broker-side assignment patterns; deterministic timers.
 
 ### P6 — Operator/controller surface
 
