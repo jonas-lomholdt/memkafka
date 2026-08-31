@@ -17,33 +17,38 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionData {
     /// The partition index.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub partition: i32,
 
     /// The state epoch of the share-partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub state_epoch: i32,
 
     /// The leader epoch of the share-partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub leader_epoch: i32,
 
     /// The share-partition start offset, or -1 if the start offset is not being written.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub start_offset: i64,
+
+    /// The number of offsets greater than or equal to share-partition start offset for which delivery has been completed.
+    ///
+    /// Supported API versions: 1
+    pub delivery_complete_count: i32,
 
     /// The state batches for the share-partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub state_batches: Vec<StateBatch>,
 
     /// Other tagged fields
@@ -55,7 +60,7 @@ impl PartitionData {
     ///
     /// The partition index.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_partition(mut self, value: i32) -> Self {
         self.partition = value;
         self
@@ -64,7 +69,7 @@ impl PartitionData {
     ///
     /// The state epoch of the share-partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_state_epoch(mut self, value: i32) -> Self {
         self.state_epoch = value;
         self
@@ -73,7 +78,7 @@ impl PartitionData {
     ///
     /// The leader epoch of the share-partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_leader_epoch(mut self, value: i32) -> Self {
         self.leader_epoch = value;
         self
@@ -82,16 +87,25 @@ impl PartitionData {
     ///
     /// The share-partition start offset, or -1 if the start offset is not being written.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_start_offset(mut self, value: i64) -> Self {
         self.start_offset = value;
+        self
+    }
+    /// Sets `delivery_complete_count` to the passed value.
+    ///
+    /// The number of offsets greater than or equal to share-partition start offset for which delivery has been completed.
+    ///
+    /// Supported API versions: 1
+    pub fn with_delivery_complete_count(mut self, value: i32) -> Self {
+        self.delivery_complete_count = value;
         self
     }
     /// Sets `state_batches` to the passed value.
     ///
     /// The state batches for the share-partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_state_batches(mut self, value: Vec<StateBatch>) -> Self {
         self.state_batches = value;
         self
@@ -111,13 +125,16 @@ impl PartitionData {
 #[cfg(feature = "client")]
 impl Encodable for PartitionData {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.partition)?;
         types::Int32.encode(buf, &self.state_epoch)?;
         types::Int32.encode(buf, &self.leader_epoch)?;
         types::Int64.encode(buf, &self.start_offset)?;
+        if version >= 1 {
+            types::Int32.encode(buf, &self.delivery_complete_count)?;
+        }
         types::CompactArray(types::Struct { version }).encode(buf, &self.state_batches)?;
         let num_tagged_fields = self.unknown_tagged_fields.len();
         if num_tagged_fields > std::u32::MAX as usize {
@@ -137,6 +154,9 @@ impl Encodable for PartitionData {
         total_size += types::Int32.compute_size(&self.state_epoch)?;
         total_size += types::Int32.compute_size(&self.leader_epoch)?;
         total_size += types::Int64.compute_size(&self.start_offset)?;
+        if version >= 1 {
+            total_size += types::Int32.compute_size(&self.delivery_complete_count)?;
+        }
         total_size +=
             types::CompactArray(types::Struct { version }).compute_size(&self.state_batches)?;
         let num_tagged_fields = self.unknown_tagged_fields.len();
@@ -156,13 +176,18 @@ impl Encodable for PartitionData {
 #[cfg(feature = "broker")]
 impl Decodable for PartitionData {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let partition = types::Int32.decode(buf)?;
         let state_epoch = types::Int32.decode(buf)?;
         let leader_epoch = types::Int32.decode(buf)?;
         let start_offset = types::Int64.decode(buf)?;
+        let delivery_complete_count = if version >= 1 {
+            types::Int32.decode(buf)?
+        } else {
+            -1
+        };
         let state_batches = types::CompactArray(types::Struct { version }).decode(buf)?;
         let mut unknown_tagged_fields = BTreeMap::new();
         let num_tagged_fields = types::UnsignedVarInt.decode(buf)?;
@@ -177,6 +202,7 @@ impl Decodable for PartitionData {
             state_epoch,
             leader_epoch,
             start_offset,
+            delivery_complete_count,
             state_batches,
             unknown_tagged_fields,
         })
@@ -190,6 +216,7 @@ impl Default for PartitionData {
             state_epoch: 0,
             leader_epoch: 0,
             start_offset: 0,
+            delivery_complete_count: -1,
             state_batches: Default::default(),
             unknown_tagged_fields: BTreeMap::new(),
         }
@@ -197,32 +224,32 @@ impl Default for PartitionData {
 }
 
 impl Message for PartitionData {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateBatch {
     /// The first offset of this state batch.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub first_offset: i64,
 
     /// The last offset of this state batch.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub last_offset: i64,
 
     /// The delivery state - 0:Available,2:Acked,4:Archived.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub delivery_state: i8,
 
     /// The delivery count.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub delivery_count: i16,
 
     /// Other tagged fields
@@ -234,7 +261,7 @@ impl StateBatch {
     ///
     /// The first offset of this state batch.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_first_offset(mut self, value: i64) -> Self {
         self.first_offset = value;
         self
@@ -243,7 +270,7 @@ impl StateBatch {
     ///
     /// The last offset of this state batch.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_last_offset(mut self, value: i64) -> Self {
         self.last_offset = value;
         self
@@ -252,7 +279,7 @@ impl StateBatch {
     ///
     /// The delivery state - 0:Available,2:Acked,4:Archived.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_delivery_state(mut self, value: i8) -> Self {
         self.delivery_state = value;
         self
@@ -261,7 +288,7 @@ impl StateBatch {
     ///
     /// The delivery count.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_delivery_count(mut self, value: i16) -> Self {
         self.delivery_count = value;
         self
@@ -281,7 +308,7 @@ impl StateBatch {
 #[cfg(feature = "client")]
 impl Encodable for StateBatch {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::Int64.encode(buf, &self.first_offset)?;
@@ -323,7 +350,7 @@ impl Encodable for StateBatch {
 #[cfg(feature = "broker")]
 impl Decodable for StateBatch {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let first_offset = types::Int64.decode(buf)?;
@@ -361,22 +388,22 @@ impl Default for StateBatch {
 }
 
 impl Message for StateBatch {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteShareGroupStateRequest {
     /// The group identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub group_id: StrBytes,
 
     /// The data for the topics.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub topics: Vec<WriteStateData>,
 
     /// Other tagged fields
@@ -388,7 +415,7 @@ impl WriteShareGroupStateRequest {
     ///
     /// The group identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_group_id(mut self, value: StrBytes) -> Self {
         self.group_id = value;
         self
@@ -397,7 +424,7 @@ impl WriteShareGroupStateRequest {
     ///
     /// The data for the topics.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_topics(mut self, value: Vec<WriteStateData>) -> Self {
         self.topics = value;
         self
@@ -417,7 +444,7 @@ impl WriteShareGroupStateRequest {
 #[cfg(feature = "client")]
 impl Encodable for WriteShareGroupStateRequest {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::CompactString.encode(buf, &self.group_id)?;
@@ -455,7 +482,7 @@ impl Encodable for WriteShareGroupStateRequest {
 #[cfg(feature = "broker")]
 impl Decodable for WriteShareGroupStateRequest {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let group_id = types::CompactString.decode(buf)?;
@@ -487,22 +514,22 @@ impl Default for WriteShareGroupStateRequest {
 }
 
 impl Message for WriteShareGroupStateRequest {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteStateData {
     /// The topic identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub topic_id: Uuid,
 
     /// The data for the partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub partitions: Vec<PartitionData>,
 
     /// Other tagged fields
@@ -514,7 +541,7 @@ impl WriteStateData {
     ///
     /// The topic identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_topic_id(mut self, value: Uuid) -> Self {
         self.topic_id = value;
         self
@@ -523,7 +550,7 @@ impl WriteStateData {
     ///
     /// The data for the partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_partitions(mut self, value: Vec<PartitionData>) -> Self {
         self.partitions = value;
         self
@@ -543,7 +570,7 @@ impl WriteStateData {
 #[cfg(feature = "client")]
 impl Encodable for WriteStateData {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::Uuid.encode(buf, &self.topic_id)?;
@@ -582,7 +609,7 @@ impl Encodable for WriteStateData {
 #[cfg(feature = "broker")]
 impl Decodable for WriteStateData {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let topic_id = types::Uuid.decode(buf)?;
@@ -614,7 +641,7 @@ impl Default for WriteStateData {
 }
 
 impl Message for WriteStateData {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

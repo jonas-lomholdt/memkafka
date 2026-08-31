@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-use failure::Error;
+use anyhow::Error;
 use inflector::Inflector;
 
 use super::code_writer::CodeWriter;
@@ -1425,12 +1425,11 @@ pub fn generate(output_path: &str, spec: Spec) -> Result<Option<GenerationOutput
     let deprecated_versions = spec.deprecated_versions;
     let mut entity_types: BTreeSet<EntityType> = BTreeSet::new();
 
-    let valid_versions = if spec.latest_version_unstable {
-        // skip unstable versions
-        spec.valid_versions.without_last()
-    } else {
-        spec.valid_versions
-    };
+    // The checked-in schema directory pins one released Kafka version, so every version
+    // declared by that release is part of the generated protocol surface.  In particular,
+    // do not silently drop `latestVersionUnstable`: it is metadata for Kafka trunk, not an
+    // instruction to change the version range of a pinned release schema.
+    let valid_versions = spec.valid_versions;
 
     // most likely, the spec has only one unstable version
     if valid_versions.is_none() {

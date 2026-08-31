@@ -17,28 +17,28 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 1-4
+/// Valid versions: 1-5
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeLogDirsPartition {
     /// The partition index.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub partition_index: i32,
 
     /// The size of the log segments in this partition in bytes.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub partition_size: i64,
 
     /// The lag of the log's LEO w.r.t. partition's HW (if it is the current log for the partition) or current replica's LEO (if it is the future log for the partition).
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub offset_lag: i64,
 
     /// True if this log is created by AlterReplicaLogDirsRequest and will replace the current log of the replica in the future.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub is_future_key: bool,
 
     /// Other tagged fields
@@ -50,7 +50,7 @@ impl DescribeLogDirsPartition {
     ///
     /// The partition index.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_partition_index(mut self, value: i32) -> Self {
         self.partition_index = value;
         self
@@ -59,7 +59,7 @@ impl DescribeLogDirsPartition {
     ///
     /// The size of the log segments in this partition in bytes.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_partition_size(mut self, value: i64) -> Self {
         self.partition_size = value;
         self
@@ -68,7 +68,7 @@ impl DescribeLogDirsPartition {
     ///
     /// The lag of the log's LEO w.r.t. partition's HW (if it is the current log for the partition) or current replica's LEO (if it is the future log for the partition).
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_offset_lag(mut self, value: i64) -> Self {
         self.offset_lag = value;
         self
@@ -77,7 +77,7 @@ impl DescribeLogDirsPartition {
     ///
     /// True if this log is created by AlterReplicaLogDirsRequest and will replace the current log of the replica in the future.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_is_future_key(mut self, value: bool) -> Self {
         self.is_future_key = value;
         self
@@ -97,7 +97,7 @@ impl DescribeLogDirsPartition {
 #[cfg(feature = "broker")]
 impl Encodable for DescribeLogDirsPartition {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.partition_index)?;
@@ -143,7 +143,7 @@ impl Encodable for DescribeLogDirsPartition {
 #[cfg(feature = "client")]
 impl Decodable for DescribeLogDirsPartition {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         let partition_index = types::Int32.decode(buf)?;
@@ -183,27 +183,27 @@ impl Default for DescribeLogDirsPartition {
 }
 
 impl Message for DescribeLogDirsPartition {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 4 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 5 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1-4
+/// Valid versions: 1-5
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeLogDirsResponse {
     /// The duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub throttle_time_ms: i32,
 
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 3-4
+    /// Supported API versions: 3-5
     pub error_code: i16,
 
     /// The log directories.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub results: Vec<DescribeLogDirsResult>,
 
     /// Other tagged fields
@@ -215,7 +215,7 @@ impl DescribeLogDirsResponse {
     ///
     /// The duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
         self.throttle_time_ms = value;
         self
@@ -224,7 +224,7 @@ impl DescribeLogDirsResponse {
     ///
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 3-4
+    /// Supported API versions: 3-5
     pub fn with_error_code(mut self, value: i16) -> Self {
         self.error_code = value;
         self
@@ -233,7 +233,7 @@ impl DescribeLogDirsResponse {
     ///
     /// The log directories.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_results(mut self, value: Vec<DescribeLogDirsResult>) -> Self {
         self.results = value;
         self
@@ -253,7 +253,7 @@ impl DescribeLogDirsResponse {
 #[cfg(feature = "broker")]
 impl Encodable for DescribeLogDirsResponse {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.throttle_time_ms)?;
@@ -310,7 +310,7 @@ impl Encodable for DescribeLogDirsResponse {
 #[cfg(feature = "client")]
 impl Decodable for DescribeLogDirsResponse {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         let throttle_time_ms = types::Int32.decode(buf)?;
@@ -355,38 +355,43 @@ impl Default for DescribeLogDirsResponse {
 }
 
 impl Message for DescribeLogDirsResponse {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 4 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 5 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1-4
+/// Valid versions: 1-5
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeLogDirsResult {
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub error_code: i16,
 
     /// The absolute log directory path.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub log_dir: StrBytes,
 
     /// The topics.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub topics: Vec<DescribeLogDirsTopic>,
 
-    /// The total size in bytes of the volume the log directory is in.
+    /// The total size in bytes of the volume the log directory is in. This value does not include the size of data stored in remote storage.
     ///
-    /// Supported API versions: 4
+    /// Supported API versions: 4-5
     pub total_bytes: i64,
 
-    /// The usable size in bytes of the volume the log directory is in.
+    /// The usable size in bytes of the volume the log directory is in. This value does not include the size of data stored in remote storage.
     ///
-    /// Supported API versions: 4
+    /// Supported API versions: 4-5
     pub usable_bytes: i64,
+
+    /// True if this log directory is cordoned.
+    ///
+    /// Supported API versions: 5
+    pub is_cordoned: bool,
 
     /// Other tagged fields
     pub unknown_tagged_fields: BTreeMap<i32, Bytes>,
@@ -397,7 +402,7 @@ impl DescribeLogDirsResult {
     ///
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_error_code(mut self, value: i16) -> Self {
         self.error_code = value;
         self
@@ -406,7 +411,7 @@ impl DescribeLogDirsResult {
     ///
     /// The absolute log directory path.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_log_dir(mut self, value: StrBytes) -> Self {
         self.log_dir = value;
         self
@@ -415,27 +420,36 @@ impl DescribeLogDirsResult {
     ///
     /// The topics.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_topics(mut self, value: Vec<DescribeLogDirsTopic>) -> Self {
         self.topics = value;
         self
     }
     /// Sets `total_bytes` to the passed value.
     ///
-    /// The total size in bytes of the volume the log directory is in.
+    /// The total size in bytes of the volume the log directory is in. This value does not include the size of data stored in remote storage.
     ///
-    /// Supported API versions: 4
+    /// Supported API versions: 4-5
     pub fn with_total_bytes(mut self, value: i64) -> Self {
         self.total_bytes = value;
         self
     }
     /// Sets `usable_bytes` to the passed value.
     ///
-    /// The usable size in bytes of the volume the log directory is in.
+    /// The usable size in bytes of the volume the log directory is in. This value does not include the size of data stored in remote storage.
     ///
-    /// Supported API versions: 4
+    /// Supported API versions: 4-5
     pub fn with_usable_bytes(mut self, value: i64) -> Self {
         self.usable_bytes = value;
+        self
+    }
+    /// Sets `is_cordoned` to the passed value.
+    ///
+    /// True if this log directory is cordoned.
+    ///
+    /// Supported API versions: 5
+    pub fn with_is_cordoned(mut self, value: bool) -> Self {
+        self.is_cordoned = value;
         self
     }
     /// Sets unknown_tagged_fields to the passed value.
@@ -453,7 +467,7 @@ impl DescribeLogDirsResult {
 #[cfg(feature = "broker")]
 impl Encodable for DescribeLogDirsResult {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         types::Int16.encode(buf, &self.error_code)?;
@@ -472,6 +486,9 @@ impl Encodable for DescribeLogDirsResult {
         }
         if version >= 4 {
             types::Int64.encode(buf, &self.usable_bytes)?;
+        }
+        if version >= 5 {
+            types::Boolean.encode(buf, &self.is_cordoned)?;
         }
         if version >= 2 {
             let num_tagged_fields = self.unknown_tagged_fields.len();
@@ -507,6 +524,9 @@ impl Encodable for DescribeLogDirsResult {
         if version >= 4 {
             total_size += types::Int64.compute_size(&self.usable_bytes)?;
         }
+        if version >= 5 {
+            total_size += types::Boolean.compute_size(&self.is_cordoned)?;
+        }
         if version >= 2 {
             let num_tagged_fields = self.unknown_tagged_fields.len();
             if num_tagged_fields > std::u32::MAX as usize {
@@ -526,7 +546,7 @@ impl Encodable for DescribeLogDirsResult {
 #[cfg(feature = "client")]
 impl Decodable for DescribeLogDirsResult {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         let error_code = types::Int16.decode(buf)?;
@@ -550,6 +570,11 @@ impl Decodable for DescribeLogDirsResult {
         } else {
             -1
         };
+        let is_cordoned = if version >= 5 {
+            types::Boolean.decode(buf)?
+        } else {
+            false
+        };
         let mut unknown_tagged_fields = BTreeMap::new();
         if version >= 2 {
             let num_tagged_fields = types::UnsignedVarInt.decode(buf)?;
@@ -566,6 +591,7 @@ impl Decodable for DescribeLogDirsResult {
             topics,
             total_bytes,
             usable_bytes,
+            is_cordoned,
             unknown_tagged_fields,
         })
     }
@@ -579,28 +605,29 @@ impl Default for DescribeLogDirsResult {
             topics: Default::default(),
             total_bytes: -1,
             usable_bytes: -1,
+            is_cordoned: false,
             unknown_tagged_fields: BTreeMap::new(),
         }
     }
 }
 
 impl Message for DescribeLogDirsResult {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 4 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 5 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1-4
+/// Valid versions: 1-5
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeLogDirsTopic {
     /// The topic name.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub name: super::TopicName,
 
     /// The partitions.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub partitions: Vec<DescribeLogDirsPartition>,
 
     /// Other tagged fields
@@ -612,7 +639,7 @@ impl DescribeLogDirsTopic {
     ///
     /// The topic name.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_name(mut self, value: super::TopicName) -> Self {
         self.name = value;
         self
@@ -621,7 +648,7 @@ impl DescribeLogDirsTopic {
     ///
     /// The partitions.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_partitions(mut self, value: Vec<DescribeLogDirsPartition>) -> Self {
         self.partitions = value;
         self
@@ -641,7 +668,7 @@ impl DescribeLogDirsTopic {
 #[cfg(feature = "broker")]
 impl Encodable for DescribeLogDirsTopic {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         if version >= 2 {
@@ -700,7 +727,7 @@ impl Encodable for DescribeLogDirsTopic {
 #[cfg(feature = "client")]
 impl Decodable for DescribeLogDirsTopic {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         let name = if version >= 2 {
@@ -742,7 +769,7 @@ impl Default for DescribeLogDirsTopic {
 }
 
 impl Message for DescribeLogDirsTopic {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 4 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 5 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

@@ -17,18 +17,18 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 1
+/// Valid versions: 1-2
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WritableTxnMarkerPartitionResult {
     /// The partition index.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub partition_index: i32,
 
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub error_code: i16,
 
     /// Other tagged fields
@@ -40,7 +40,7 @@ impl WritableTxnMarkerPartitionResult {
     ///
     /// The partition index.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub fn with_partition_index(mut self, value: i32) -> Self {
         self.partition_index = value;
         self
@@ -49,7 +49,7 @@ impl WritableTxnMarkerPartitionResult {
     ///
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub fn with_error_code(mut self, value: i16) -> Self {
         self.error_code = value;
         self
@@ -69,7 +69,7 @@ impl WritableTxnMarkerPartitionResult {
 #[cfg(feature = "broker")]
 impl Encodable for WritableTxnMarkerPartitionResult {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 1 {
+        if version < 1 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.partition_index)?;
@@ -107,7 +107,7 @@ impl Encodable for WritableTxnMarkerPartitionResult {
 #[cfg(feature = "client")]
 impl Decodable for WritableTxnMarkerPartitionResult {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 1 {
+        if version < 1 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         let partition_index = types::Int32.decode(buf)?;
@@ -139,22 +139,22 @@ impl Default for WritableTxnMarkerPartitionResult {
 }
 
 impl Message for WritableTxnMarkerPartitionResult {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 1 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 2 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1
+/// Valid versions: 1-2
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WritableTxnMarkerResult {
     /// The current producer ID in use by the transactional ID.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub producer_id: super::ProducerId,
 
     /// The results by topic.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub topics: Vec<WritableTxnMarkerTopicResult>,
 
     /// Other tagged fields
@@ -166,7 +166,7 @@ impl WritableTxnMarkerResult {
     ///
     /// The current producer ID in use by the transactional ID.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub fn with_producer_id(mut self, value: super::ProducerId) -> Self {
         self.producer_id = value;
         self
@@ -175,7 +175,7 @@ impl WritableTxnMarkerResult {
     ///
     /// The results by topic.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub fn with_topics(mut self, value: Vec<WritableTxnMarkerTopicResult>) -> Self {
         self.topics = value;
         self
@@ -195,7 +195,7 @@ impl WritableTxnMarkerResult {
 #[cfg(feature = "broker")]
 impl Encodable for WritableTxnMarkerResult {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 1 {
+        if version < 1 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         types::Int64.encode(buf, &self.producer_id)?;
@@ -233,7 +233,7 @@ impl Encodable for WritableTxnMarkerResult {
 #[cfg(feature = "client")]
 impl Decodable for WritableTxnMarkerResult {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 1 {
+        if version < 1 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         let producer_id = types::Int64.decode(buf)?;
@@ -265,22 +265,22 @@ impl Default for WritableTxnMarkerResult {
 }
 
 impl Message for WritableTxnMarkerResult {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 1 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 2 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1
+/// Valid versions: 1-2
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WritableTxnMarkerTopicResult {
     /// The topic name.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub name: super::TopicName,
 
     /// The results by partition.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub partitions: Vec<WritableTxnMarkerPartitionResult>,
 
     /// Other tagged fields
@@ -292,7 +292,7 @@ impl WritableTxnMarkerTopicResult {
     ///
     /// The topic name.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub fn with_name(mut self, value: super::TopicName) -> Self {
         self.name = value;
         self
@@ -301,7 +301,7 @@ impl WritableTxnMarkerTopicResult {
     ///
     /// The results by partition.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub fn with_partitions(mut self, value: Vec<WritableTxnMarkerPartitionResult>) -> Self {
         self.partitions = value;
         self
@@ -321,7 +321,7 @@ impl WritableTxnMarkerTopicResult {
 #[cfg(feature = "broker")]
 impl Encodable for WritableTxnMarkerTopicResult {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 1 {
+        if version < 1 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         types::CompactString.encode(buf, &self.name)?;
@@ -360,7 +360,7 @@ impl Encodable for WritableTxnMarkerTopicResult {
 #[cfg(feature = "client")]
 impl Decodable for WritableTxnMarkerTopicResult {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 1 {
+        if version < 1 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         let name = types::CompactString.decode(buf)?;
@@ -392,17 +392,17 @@ impl Default for WritableTxnMarkerTopicResult {
 }
 
 impl Message for WritableTxnMarkerTopicResult {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 1 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 2 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1
+/// Valid versions: 1-2
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteTxnMarkersResponse {
     /// The results for writing makers.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub markers: Vec<WritableTxnMarkerResult>,
 
     /// Other tagged fields
@@ -414,7 +414,7 @@ impl WriteTxnMarkersResponse {
     ///
     /// The results for writing makers.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub fn with_markers(mut self, value: Vec<WritableTxnMarkerResult>) -> Self {
         self.markers = value;
         self
@@ -434,7 +434,7 @@ impl WriteTxnMarkersResponse {
 #[cfg(feature = "broker")]
 impl Encodable for WriteTxnMarkersResponse {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 1 {
+        if version < 1 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         types::CompactArray(types::Struct { version }).encode(buf, &self.markers)?;
@@ -470,7 +470,7 @@ impl Encodable for WriteTxnMarkersResponse {
 #[cfg(feature = "client")]
 impl Decodable for WriteTxnMarkersResponse {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 1 {
+        if version < 1 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         let markers = types::CompactArray(types::Struct { version }).decode(buf)?;
@@ -499,7 +499,7 @@ impl Default for WriteTxnMarkersResponse {
 }
 
 impl Message for WriteTxnMarkersResponse {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 1 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 2 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

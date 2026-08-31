@@ -245,7 +245,7 @@ pub struct DescribeClusterResponse {
     /// Supported API versions: 0-2
     pub cluster_id: StrBytes,
 
-    /// The ID of the controller broker.
+    /// The ID of the controller. When handled by a controller, returns the current voter leader ID. When handled by a broker, returns a random alive broker ID as a fallback.
     ///
     /// Supported API versions: 0-2
     pub controller_id: super::BrokerId,
@@ -312,7 +312,7 @@ impl DescribeClusterResponse {
     }
     /// Sets `controller_id` to the passed value.
     ///
-    /// The ID of the controller broker.
+    /// The ID of the controller. When handled by a controller, returns the current voter leader ID. When handled by a broker, returns a random alive broker ID as a fallback.
     ///
     /// Supported API versions: 0-2
     pub fn with_controller_id(mut self, value: super::BrokerId) -> Self {

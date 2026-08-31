@@ -17,23 +17,23 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionResult {
     /// The partition index.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub partition: i32,
 
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub error_code: i16,
 
     /// The error message, or null if there was no error.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub error_message: Option<StrBytes>,
 
     /// Other tagged fields
@@ -45,7 +45,7 @@ impl PartitionResult {
     ///
     /// The partition index.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_partition(mut self, value: i32) -> Self {
         self.partition = value;
         self
@@ -54,7 +54,7 @@ impl PartitionResult {
     ///
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_error_code(mut self, value: i16) -> Self {
         self.error_code = value;
         self
@@ -63,7 +63,7 @@ impl PartitionResult {
     ///
     /// The error message, or null if there was no error.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_error_message(mut self, value: Option<StrBytes>) -> Self {
         self.error_message = value;
         self
@@ -83,7 +83,7 @@ impl PartitionResult {
 #[cfg(feature = "broker")]
 impl Encodable for PartitionResult {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.partition)?;
@@ -123,7 +123,7 @@ impl Encodable for PartitionResult {
 #[cfg(feature = "client")]
 impl Decodable for PartitionResult {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let partition = types::Int32.decode(buf)?;
@@ -158,17 +158,17 @@ impl Default for PartitionResult {
 }
 
 impl Message for PartitionResult {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteShareGroupStateResponse {
     /// The write results.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub results: Vec<WriteStateResult>,
 
     /// Other tagged fields
@@ -180,7 +180,7 @@ impl WriteShareGroupStateResponse {
     ///
     /// The write results.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_results(mut self, value: Vec<WriteStateResult>) -> Self {
         self.results = value;
         self
@@ -200,7 +200,7 @@ impl WriteShareGroupStateResponse {
 #[cfg(feature = "broker")]
 impl Encodable for WriteShareGroupStateResponse {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::CompactArray(types::Struct { version }).encode(buf, &self.results)?;
@@ -236,7 +236,7 @@ impl Encodable for WriteShareGroupStateResponse {
 #[cfg(feature = "client")]
 impl Decodable for WriteShareGroupStateResponse {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let results = types::CompactArray(types::Struct { version }).decode(buf)?;
@@ -265,22 +265,22 @@ impl Default for WriteShareGroupStateResponse {
 }
 
 impl Message for WriteShareGroupStateResponse {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteStateResult {
     /// The topic identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub topic_id: Uuid,
 
     /// The results for the partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub partitions: Vec<PartitionResult>,
 
     /// Other tagged fields
@@ -292,7 +292,7 @@ impl WriteStateResult {
     ///
     /// The topic identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_topic_id(mut self, value: Uuid) -> Self {
         self.topic_id = value;
         self
@@ -301,7 +301,7 @@ impl WriteStateResult {
     ///
     /// The results for the partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_partitions(mut self, value: Vec<PartitionResult>) -> Self {
         self.partitions = value;
         self
@@ -321,7 +321,7 @@ impl WriteStateResult {
 #[cfg(feature = "broker")]
 impl Encodable for WriteStateResult {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::Uuid.encode(buf, &self.topic_id)?;
@@ -360,7 +360,7 @@ impl Encodable for WriteStateResult {
 #[cfg(feature = "client")]
 impl Decodable for WriteStateResult {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let topic_id = types::Uuid.decode(buf)?;
@@ -392,7 +392,7 @@ impl Default for WriteStateResult {
 }
 
 impl Message for WriteStateResult {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

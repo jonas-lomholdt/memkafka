@@ -26,7 +26,7 @@ pub struct DeleteRecordsPartition {
     /// Supported API versions: 0-2
     pub partition_index: i32,
 
-    /// The deletion offset.
+    /// The deletion offset. -1 means that records should be truncated to the high watermark.
     ///
     /// Supported API versions: 0-2
     pub offset: i64,
@@ -47,7 +47,7 @@ impl DeleteRecordsPartition {
     }
     /// Sets `offset` to the passed value.
     ///
-    /// The deletion offset.
+    /// The deletion offset. -1 means that records should be truncated to the high watermark.
     ///
     /// Supported API versions: 0-2
     pub fn with_offset(mut self, value: i64) -> Self {

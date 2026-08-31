@@ -26,7 +26,7 @@ pub struct DeleteAclsFilter {
     /// Supported API versions: 1-3
     pub resource_type_filter: i8,
 
-    /// The resource name.
+    /// The resource name, or null to match any resource name.
     ///
     /// Supported API versions: 1-3
     pub resource_name_filter: Option<StrBytes>,
@@ -72,7 +72,7 @@ impl DeleteAclsFilter {
     }
     /// Sets `resource_name_filter` to the passed value.
     ///
-    /// The resource name.
+    /// The resource name, or null to match any resource name.
     ///
     /// Supported API versions: 1-3
     pub fn with_resource_name_filter(mut self, value: Option<StrBytes>) -> Self {

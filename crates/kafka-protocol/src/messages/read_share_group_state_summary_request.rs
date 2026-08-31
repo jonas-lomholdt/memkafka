@@ -17,18 +17,18 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionData {
     /// The partition index.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub partition: i32,
 
     /// The leader epoch of the share-partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub leader_epoch: i32,
 
     /// Other tagged fields
@@ -40,7 +40,7 @@ impl PartitionData {
     ///
     /// The partition index.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_partition(mut self, value: i32) -> Self {
         self.partition = value;
         self
@@ -49,7 +49,7 @@ impl PartitionData {
     ///
     /// The leader epoch of the share-partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_leader_epoch(mut self, value: i32) -> Self {
         self.leader_epoch = value;
         self
@@ -69,7 +69,7 @@ impl PartitionData {
 #[cfg(feature = "client")]
 impl Encodable for PartitionData {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.partition)?;
@@ -107,7 +107,7 @@ impl Encodable for PartitionData {
 #[cfg(feature = "broker")]
 impl Decodable for PartitionData {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let partition = types::Int32.decode(buf)?;
@@ -139,22 +139,22 @@ impl Default for PartitionData {
 }
 
 impl Message for PartitionData {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadShareGroupStateSummaryRequest {
     /// The group identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub group_id: StrBytes,
 
     /// The data for the topics.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub topics: Vec<ReadStateSummaryData>,
 
     /// Other tagged fields
@@ -166,7 +166,7 @@ impl ReadShareGroupStateSummaryRequest {
     ///
     /// The group identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_group_id(mut self, value: StrBytes) -> Self {
         self.group_id = value;
         self
@@ -175,7 +175,7 @@ impl ReadShareGroupStateSummaryRequest {
     ///
     /// The data for the topics.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_topics(mut self, value: Vec<ReadStateSummaryData>) -> Self {
         self.topics = value;
         self
@@ -195,7 +195,7 @@ impl ReadShareGroupStateSummaryRequest {
 #[cfg(feature = "client")]
 impl Encodable for ReadShareGroupStateSummaryRequest {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::CompactString.encode(buf, &self.group_id)?;
@@ -233,7 +233,7 @@ impl Encodable for ReadShareGroupStateSummaryRequest {
 #[cfg(feature = "broker")]
 impl Decodable for ReadShareGroupStateSummaryRequest {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let group_id = types::CompactString.decode(buf)?;
@@ -265,22 +265,22 @@ impl Default for ReadShareGroupStateSummaryRequest {
 }
 
 impl Message for ReadShareGroupStateSummaryRequest {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadStateSummaryData {
     /// The topic identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub topic_id: Uuid,
 
     /// The data for the partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub partitions: Vec<PartitionData>,
 
     /// Other tagged fields
@@ -292,7 +292,7 @@ impl ReadStateSummaryData {
     ///
     /// The topic identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_topic_id(mut self, value: Uuid) -> Self {
         self.topic_id = value;
         self
@@ -301,7 +301,7 @@ impl ReadStateSummaryData {
     ///
     /// The data for the partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_partitions(mut self, value: Vec<PartitionData>) -> Self {
         self.partitions = value;
         self
@@ -321,7 +321,7 @@ impl ReadStateSummaryData {
 #[cfg(feature = "client")]
 impl Encodable for ReadStateSummaryData {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::Uuid.encode(buf, &self.topic_id)?;
@@ -360,7 +360,7 @@ impl Encodable for ReadStateSummaryData {
 #[cfg(feature = "broker")]
 impl Decodable for ReadStateSummaryData {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let topic_id = types::Uuid.decode(buf)?;
@@ -392,7 +392,7 @@ impl Default for ReadStateSummaryData {
 }
 
 impl Message for ReadStateSummaryData {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

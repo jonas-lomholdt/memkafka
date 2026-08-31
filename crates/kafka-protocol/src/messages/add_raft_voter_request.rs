@@ -17,34 +17,39 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddRaftVoterRequest {
     /// The cluster id.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub cluster_id: Option<StrBytes>,
 
     /// The maximum time to wait for the request to complete before returning.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub timeout_ms: i32,
 
     /// The replica id of the voter getting added to the topic partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub voter_id: i32,
 
     /// The directory id of the voter getting added to the topic partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub voter_directory_id: Uuid,
 
     /// The endpoints that can be used to communicate with the voter.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub listeners: Vec<Listener>,
+
+    /// When true, return a response after the new voter set is committed. Otherwise, return after the leader writes the changes locally.
+    ///
+    /// Supported API versions: 1
+    pub ack_when_committed: bool,
 
     /// Other tagged fields
     pub unknown_tagged_fields: BTreeMap<i32, Bytes>,
@@ -55,7 +60,7 @@ impl AddRaftVoterRequest {
     ///
     /// The cluster id.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_cluster_id(mut self, value: Option<StrBytes>) -> Self {
         self.cluster_id = value;
         self
@@ -64,7 +69,7 @@ impl AddRaftVoterRequest {
     ///
     /// The maximum time to wait for the request to complete before returning.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_timeout_ms(mut self, value: i32) -> Self {
         self.timeout_ms = value;
         self
@@ -73,7 +78,7 @@ impl AddRaftVoterRequest {
     ///
     /// The replica id of the voter getting added to the topic partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_voter_id(mut self, value: i32) -> Self {
         self.voter_id = value;
         self
@@ -82,7 +87,7 @@ impl AddRaftVoterRequest {
     ///
     /// The directory id of the voter getting added to the topic partition.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_voter_directory_id(mut self, value: Uuid) -> Self {
         self.voter_directory_id = value;
         self
@@ -91,9 +96,18 @@ impl AddRaftVoterRequest {
     ///
     /// The endpoints that can be used to communicate with the voter.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_listeners(mut self, value: Vec<Listener>) -> Self {
         self.listeners = value;
+        self
+    }
+    /// Sets `ack_when_committed` to the passed value.
+    ///
+    /// When true, return a response after the new voter set is committed. Otherwise, return after the leader writes the changes locally.
+    ///
+    /// Supported API versions: 1
+    pub fn with_ack_when_committed(mut self, value: bool) -> Self {
+        self.ack_when_committed = value;
         self
     }
     /// Sets unknown_tagged_fields to the passed value.
@@ -111,7 +125,7 @@ impl AddRaftVoterRequest {
 #[cfg(feature = "client")]
 impl Encodable for AddRaftVoterRequest {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::CompactString.encode(buf, &self.cluster_id)?;
@@ -119,6 +133,13 @@ impl Encodable for AddRaftVoterRequest {
         types::Int32.encode(buf, &self.voter_id)?;
         types::Uuid.encode(buf, &self.voter_directory_id)?;
         types::CompactArray(types::Struct { version }).encode(buf, &self.listeners)?;
+        if version >= 1 {
+            types::Boolean.encode(buf, &self.ack_when_committed)?;
+        } else {
+            if !self.ack_when_committed {
+                bail!("A field is set that is not available on the selected protocol version");
+            }
+        }
         let num_tagged_fields = self.unknown_tagged_fields.len();
         if num_tagged_fields > std::u32::MAX as usize {
             bail!(
@@ -139,6 +160,13 @@ impl Encodable for AddRaftVoterRequest {
         total_size += types::Uuid.compute_size(&self.voter_directory_id)?;
         total_size +=
             types::CompactArray(types::Struct { version }).compute_size(&self.listeners)?;
+        if version >= 1 {
+            total_size += types::Boolean.compute_size(&self.ack_when_committed)?;
+        } else {
+            if !self.ack_when_committed {
+                bail!("A field is set that is not available on the selected protocol version");
+            }
+        }
         let num_tagged_fields = self.unknown_tagged_fields.len();
         if num_tagged_fields > std::u32::MAX as usize {
             bail!(
@@ -156,7 +184,7 @@ impl Encodable for AddRaftVoterRequest {
 #[cfg(feature = "broker")]
 impl Decodable for AddRaftVoterRequest {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let cluster_id = types::CompactString.decode(buf)?;
@@ -164,6 +192,11 @@ impl Decodable for AddRaftVoterRequest {
         let voter_id = types::Int32.decode(buf)?;
         let voter_directory_id = types::Uuid.decode(buf)?;
         let listeners = types::CompactArray(types::Struct { version }).decode(buf)?;
+        let ack_when_committed = if version >= 1 {
+            types::Boolean.decode(buf)?
+        } else {
+            true
+        };
         let mut unknown_tagged_fields = BTreeMap::new();
         let num_tagged_fields = types::UnsignedVarInt.decode(buf)?;
         for _ in 0..num_tagged_fields {
@@ -178,6 +211,7 @@ impl Decodable for AddRaftVoterRequest {
             voter_id,
             voter_directory_id,
             listeners,
+            ack_when_committed,
             unknown_tagged_fields,
         })
     }
@@ -191,33 +225,34 @@ impl Default for AddRaftVoterRequest {
             voter_id: 0,
             voter_directory_id: Uuid::nil(),
             listeners: Default::default(),
+            ack_when_committed: true,
             unknown_tagged_fields: BTreeMap::new(),
         }
     }
 }
 
 impl Message for AddRaftVoterRequest {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Listener {
     /// The name of the endpoint.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub name: StrBytes,
 
     /// The hostname.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub host: StrBytes,
 
     /// The port.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub port: u16,
 
     /// Other tagged fields
@@ -229,7 +264,7 @@ impl Listener {
     ///
     /// The name of the endpoint.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_name(mut self, value: StrBytes) -> Self {
         self.name = value;
         self
@@ -238,7 +273,7 @@ impl Listener {
     ///
     /// The hostname.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_host(mut self, value: StrBytes) -> Self {
         self.host = value;
         self
@@ -247,7 +282,7 @@ impl Listener {
     ///
     /// The port.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_port(mut self, value: u16) -> Self {
         self.port = value;
         self
@@ -267,7 +302,7 @@ impl Listener {
 #[cfg(feature = "client")]
 impl Encodable for Listener {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::CompactString.encode(buf, &self.name)?;
@@ -307,7 +342,7 @@ impl Encodable for Listener {
 #[cfg(feature = "broker")]
 impl Decodable for Listener {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let name = types::CompactString.decode(buf)?;
@@ -342,7 +377,7 @@ impl Default for Listener {
 }
 
 impl Message for Listener {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

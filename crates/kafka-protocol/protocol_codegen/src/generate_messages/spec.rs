@@ -132,25 +132,6 @@ impl VersionSpec {
             VersionSpec::Range(a, b) => Some(a..=b),
         }
     }
-
-    /// Returns the range `[VersionSpec]` without the last version.
-    /// Only works for ranges, every other kind will return `None`.
-    pub fn without_last(&self) -> Self {
-        match self {
-            VersionSpec::None => VersionSpec::None,
-            VersionSpec::Since(_) => VersionSpec::None,
-            VersionSpec::Exact(_) => VersionSpec::None,
-            VersionSpec::Range(a, b) => {
-                if a == b {
-                    VersionSpec::None
-                } else if *a == b - 1 {
-                    VersionSpec::Exact(*a)
-                } else {
-                    VersionSpec::Range(*a, b - 1)
-                }
-            }
-        }
-    }
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
@@ -256,26 +237,5 @@ derive_deserialize_from_fromstr!(TypeSpec, "valid type specification");
 impl VersionSpec {
     pub fn is_none(&self) -> bool {
         matches!(self, VersionSpec::None)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_spec_without_last() {
-        assert_eq!(VersionSpec::None.without_last(), VersionSpec::None);
-        assert_eq!(VersionSpec::Since(1).without_last(), VersionSpec::None);
-        assert_eq!(VersionSpec::Exact(1).without_last(), VersionSpec::None);
-        assert_eq!(VersionSpec::Range(0, 0).without_last(), VersionSpec::None);
-        assert_eq!(
-            VersionSpec::Range(0, 1).without_last(),
-            VersionSpec::Exact(0)
-        );
-        assert_eq!(
-            VersionSpec::Range(0, 2).without_last(),
-            VersionSpec::Range(0, 1)
-        );
     }
 }

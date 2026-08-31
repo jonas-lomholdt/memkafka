@@ -17,39 +17,44 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0-1
+/// Valid versions: 0-2
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrokerHeartbeatRequest {
     /// The broker ID.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub broker_id: super::BrokerId,
 
     /// The broker epoch.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub broker_epoch: i64,
 
     /// The highest metadata offset which the broker has reached.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub current_metadata_offset: i64,
 
     /// True if the broker wants to be fenced, false otherwise.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub want_fence: bool,
 
     /// True if the broker wants to be shut down, false otherwise.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub want_shut_down: bool,
 
     /// Log directories that failed and went offline.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub offline_log_dirs: Vec<Uuid>,
+
+    /// List of log directories that are cordoned. This is null before the broker reaches the RECOVERY state.
+    ///
+    /// Supported API versions: 2
+    pub cordoned_log_dirs: Option<Vec<Uuid>>,
 
     /// Other tagged fields
     pub unknown_tagged_fields: BTreeMap<i32, Bytes>,
@@ -60,7 +65,7 @@ impl BrokerHeartbeatRequest {
     ///
     /// The broker ID.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_broker_id(mut self, value: super::BrokerId) -> Self {
         self.broker_id = value;
         self
@@ -69,7 +74,7 @@ impl BrokerHeartbeatRequest {
     ///
     /// The broker epoch.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_broker_epoch(mut self, value: i64) -> Self {
         self.broker_epoch = value;
         self
@@ -78,7 +83,7 @@ impl BrokerHeartbeatRequest {
     ///
     /// The highest metadata offset which the broker has reached.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_current_metadata_offset(mut self, value: i64) -> Self {
         self.current_metadata_offset = value;
         self
@@ -87,7 +92,7 @@ impl BrokerHeartbeatRequest {
     ///
     /// True if the broker wants to be fenced, false otherwise.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_want_fence(mut self, value: bool) -> Self {
         self.want_fence = value;
         self
@@ -96,7 +101,7 @@ impl BrokerHeartbeatRequest {
     ///
     /// True if the broker wants to be shut down, false otherwise.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_want_shut_down(mut self, value: bool) -> Self {
         self.want_shut_down = value;
         self
@@ -105,9 +110,18 @@ impl BrokerHeartbeatRequest {
     ///
     /// Log directories that failed and went offline.
     ///
-    /// Supported API versions: 1
+    /// Supported API versions: 1-2
     pub fn with_offline_log_dirs(mut self, value: Vec<Uuid>) -> Self {
         self.offline_log_dirs = value;
+        self
+    }
+    /// Sets `cordoned_log_dirs` to the passed value.
+    ///
+    /// List of log directories that are cordoned. This is null before the broker reaches the RECOVERY state.
+    ///
+    /// Supported API versions: 2
+    pub fn with_cordoned_log_dirs(mut self, value: Option<Vec<Uuid>>) -> Self {
+        self.cordoned_log_dirs = value;
         self
     }
     /// Sets unknown_tagged_fields to the passed value.
@@ -125,7 +139,7 @@ impl BrokerHeartbeatRequest {
 #[cfg(feature = "client")]
 impl Encodable for BrokerHeartbeatRequest {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 0 || version > 1 {
+        if version < 0 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.broker_id)?;
@@ -136,6 +150,11 @@ impl Encodable for BrokerHeartbeatRequest {
         let mut num_tagged_fields = self.unknown_tagged_fields.len();
         if version >= 1 {
             if !self.offline_log_dirs.is_empty() {
+                num_tagged_fields += 1;
+            }
+        }
+        if version >= 2 {
+            if !self.cordoned_log_dirs.is_none() {
                 num_tagged_fields += 1;
             }
         }
@@ -161,7 +180,22 @@ impl Encodable for BrokerHeartbeatRequest {
                 types::CompactArray(types::Uuid).encode(buf, &self.offline_log_dirs)?;
             }
         }
-        write_unknown_tagged_fields(buf, 1.., &self.unknown_tagged_fields)?;
+        if version >= 2 {
+            if !self.cordoned_log_dirs.is_none() {
+                let computed_size =
+                    types::CompactArray(types::Uuid).compute_size(&self.cordoned_log_dirs)?;
+                if computed_size > std::u32::MAX as usize {
+                    bail!(
+                        "Tagged field is too large to encode ({} bytes)",
+                        computed_size
+                    );
+                }
+                types::UnsignedVarInt.encode(buf, 1)?;
+                types::UnsignedVarInt.encode(buf, computed_size as u32)?;
+                types::CompactArray(types::Uuid).encode(buf, &self.cordoned_log_dirs)?;
+            }
+        }
+        write_unknown_tagged_fields(buf, 2.., &self.unknown_tagged_fields)?;
         Ok(())
     }
     fn compute_size(&self, version: i16) -> Result<usize> {
@@ -174,6 +208,11 @@ impl Encodable for BrokerHeartbeatRequest {
         let mut num_tagged_fields = self.unknown_tagged_fields.len();
         if version >= 1 {
             if !self.offline_log_dirs.is_empty() {
+                num_tagged_fields += 1;
+            }
+        }
+        if version >= 2 {
+            if !self.cordoned_log_dirs.is_none() {
                 num_tagged_fields += 1;
             }
         }
@@ -199,6 +238,21 @@ impl Encodable for BrokerHeartbeatRequest {
                 total_size += computed_size;
             }
         }
+        if version >= 2 {
+            if !self.cordoned_log_dirs.is_none() {
+                let computed_size =
+                    types::CompactArray(types::Uuid).compute_size(&self.cordoned_log_dirs)?;
+                if computed_size > std::u32::MAX as usize {
+                    bail!(
+                        "Tagged field is too large to encode ({} bytes)",
+                        computed_size
+                    );
+                }
+                total_size += types::UnsignedVarInt.compute_size(1)?;
+                total_size += types::UnsignedVarInt.compute_size(computed_size as u32)?;
+                total_size += computed_size;
+            }
+        }
         total_size += compute_unknown_tagged_fields_size(&self.unknown_tagged_fields)?;
         Ok(total_size)
     }
@@ -207,7 +261,7 @@ impl Encodable for BrokerHeartbeatRequest {
 #[cfg(feature = "broker")]
 impl Decodable for BrokerHeartbeatRequest {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 0 || version > 1 {
+        if version < 0 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         let broker_id = types::Int32.decode(buf)?;
@@ -216,6 +270,7 @@ impl Decodable for BrokerHeartbeatRequest {
         let want_fence = types::Boolean.decode(buf)?;
         let want_shut_down = types::Boolean.decode(buf)?;
         let mut offline_log_dirs = Default::default();
+        let mut cordoned_log_dirs = None;
         let mut unknown_tagged_fields = BTreeMap::new();
         let num_tagged_fields = types::UnsignedVarInt.decode(buf)?;
         for _ in 0..num_tagged_fields {
@@ -225,6 +280,13 @@ impl Decodable for BrokerHeartbeatRequest {
                 0 => {
                     if version >= 1 {
                         offline_log_dirs = types::CompactArray(types::Uuid).decode(buf)?;
+                    } else {
+                        bail!("Tag {} is not valid for version {}", tag, version);
+                    }
+                }
+                1 => {
+                    if version >= 2 {
+                        cordoned_log_dirs = types::CompactArray(types::Uuid).decode(buf)?;
                     } else {
                         bail!("Tag {} is not valid for version {}", tag, version);
                     }
@@ -242,6 +304,7 @@ impl Decodable for BrokerHeartbeatRequest {
             want_fence,
             want_shut_down,
             offline_log_dirs,
+            cordoned_log_dirs,
             unknown_tagged_fields,
         })
     }
@@ -256,13 +319,14 @@ impl Default for BrokerHeartbeatRequest {
             want_fence: false,
             want_shut_down: false,
             offline_log_dirs: Default::default(),
+            cordoned_log_dirs: None,
             unknown_tagged_fields: BTreeMap::new(),
         }
     }
 }
 
 impl Message for BrokerHeartbeatRequest {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 2 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

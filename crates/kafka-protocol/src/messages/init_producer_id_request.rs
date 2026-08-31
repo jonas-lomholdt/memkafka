@@ -17,38 +17,38 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0-5
+/// Valid versions: 0-6
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct InitProducerIdRequest {
     /// The transactional id, or null if the producer is not transactional.
     ///
-    /// Supported API versions: 0-5
+    /// Supported API versions: 0-6
     pub transactional_id: Option<super::TransactionalId>,
 
     /// The time in ms to wait before aborting idle transactions sent by this producer. This is only relevant if a TransactionalId has been defined.
     ///
-    /// Supported API versions: 0-5
+    /// Supported API versions: 0-6
     pub transaction_timeout_ms: i32,
 
     /// The producer id. This is used to disambiguate requests if a transactional id is reused following its expiration.
     ///
-    /// Supported API versions: 3-5
+    /// Supported API versions: 3-6
     pub producer_id: super::ProducerId,
 
     /// The producer's current epoch. This will be checked against the producer epoch on the broker, and the request will return an error if they do not match.
     ///
-    /// Supported API versions: 3-5
+    /// Supported API versions: 3-6
     pub producer_epoch: i16,
 
     /// True if the client wants to enable two-phase commit (2PC) protocol for transactions.
     ///
-    /// Supported API versions: none
+    /// Supported API versions: 6
     pub enable_2_pc: bool,
 
     /// True if the client wants to keep the currently ongoing transaction instead of aborting it.
     ///
-    /// Supported API versions: none
+    /// Supported API versions: 6
     pub keep_prepared_txn: bool,
 
     /// Other tagged fields
@@ -60,7 +60,7 @@ impl InitProducerIdRequest {
     ///
     /// The transactional id, or null if the producer is not transactional.
     ///
-    /// Supported API versions: 0-5
+    /// Supported API versions: 0-6
     pub fn with_transactional_id(mut self, value: Option<super::TransactionalId>) -> Self {
         self.transactional_id = value;
         self
@@ -69,7 +69,7 @@ impl InitProducerIdRequest {
     ///
     /// The time in ms to wait before aborting idle transactions sent by this producer. This is only relevant if a TransactionalId has been defined.
     ///
-    /// Supported API versions: 0-5
+    /// Supported API versions: 0-6
     pub fn with_transaction_timeout_ms(mut self, value: i32) -> Self {
         self.transaction_timeout_ms = value;
         self
@@ -78,7 +78,7 @@ impl InitProducerIdRequest {
     ///
     /// The producer id. This is used to disambiguate requests if a transactional id is reused following its expiration.
     ///
-    /// Supported API versions: 3-5
+    /// Supported API versions: 3-6
     pub fn with_producer_id(mut self, value: super::ProducerId) -> Self {
         self.producer_id = value;
         self
@@ -87,7 +87,7 @@ impl InitProducerIdRequest {
     ///
     /// The producer's current epoch. This will be checked against the producer epoch on the broker, and the request will return an error if they do not match.
     ///
-    /// Supported API versions: 3-5
+    /// Supported API versions: 3-6
     pub fn with_producer_epoch(mut self, value: i16) -> Self {
         self.producer_epoch = value;
         self
@@ -96,7 +96,7 @@ impl InitProducerIdRequest {
     ///
     /// True if the client wants to enable two-phase commit (2PC) protocol for transactions.
     ///
-    /// Supported API versions: none
+    /// Supported API versions: 6
     pub fn with_enable_2_pc(mut self, value: bool) -> Self {
         self.enable_2_pc = value;
         self
@@ -105,7 +105,7 @@ impl InitProducerIdRequest {
     ///
     /// True if the client wants to keep the currently ongoing transaction instead of aborting it.
     ///
-    /// Supported API versions: none
+    /// Supported API versions: 6
     pub fn with_keep_prepared_txn(mut self, value: bool) -> Self {
         self.keep_prepared_txn = value;
         self
@@ -125,7 +125,7 @@ impl InitProducerIdRequest {
 #[cfg(feature = "client")]
 impl Encodable for InitProducerIdRequest {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 0 || version > 5 {
+        if version < 0 || version > 6 {
             bail!("specified version not supported by this message type");
         }
         if version >= 2 {
@@ -145,6 +145,20 @@ impl Encodable for InitProducerIdRequest {
             types::Int16.encode(buf, &self.producer_epoch)?;
         } else {
             if self.producer_epoch != -1 {
+                bail!("A field is set that is not available on the selected protocol version");
+            }
+        }
+        if version >= 6 {
+            types::Boolean.encode(buf, &self.enable_2_pc)?;
+        } else {
+            if self.enable_2_pc {
+                bail!("A field is set that is not available on the selected protocol version");
+            }
+        }
+        if version >= 6 {
+            types::Boolean.encode(buf, &self.keep_prepared_txn)?;
+        } else {
+            if self.keep_prepared_txn {
                 bail!("A field is set that is not available on the selected protocol version");
             }
         }
@@ -184,6 +198,20 @@ impl Encodable for InitProducerIdRequest {
                 bail!("A field is set that is not available on the selected protocol version");
             }
         }
+        if version >= 6 {
+            total_size += types::Boolean.compute_size(&self.enable_2_pc)?;
+        } else {
+            if self.enable_2_pc {
+                bail!("A field is set that is not available on the selected protocol version");
+            }
+        }
+        if version >= 6 {
+            total_size += types::Boolean.compute_size(&self.keep_prepared_txn)?;
+        } else {
+            if self.keep_prepared_txn {
+                bail!("A field is set that is not available on the selected protocol version");
+            }
+        }
         if version >= 2 {
             let num_tagged_fields = self.unknown_tagged_fields.len();
             if num_tagged_fields > std::u32::MAX as usize {
@@ -203,7 +231,7 @@ impl Encodable for InitProducerIdRequest {
 #[cfg(feature = "broker")]
 impl Decodable for InitProducerIdRequest {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 0 || version > 5 {
+        if version < 0 || version > 6 {
             bail!("specified version not supported by this message type");
         }
         let transactional_id = if version >= 2 {
@@ -222,8 +250,16 @@ impl Decodable for InitProducerIdRequest {
         } else {
             -1
         };
-        let enable_2_pc = false;
-        let keep_prepared_txn = false;
+        let enable_2_pc = if version >= 6 {
+            types::Boolean.decode(buf)?
+        } else {
+            false
+        };
+        let keep_prepared_txn = if version >= 6 {
+            types::Boolean.decode(buf)?
+        } else {
+            false
+        };
         let mut unknown_tagged_fields = BTreeMap::new();
         if version >= 2 {
             let num_tagged_fields = types::UnsignedVarInt.decode(buf)?;
@@ -261,7 +297,7 @@ impl Default for InitProducerIdRequest {
 }
 
 impl Message for InitProducerIdRequest {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 5 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 6 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

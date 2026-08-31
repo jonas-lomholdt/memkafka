@@ -17,23 +17,23 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddRaftVoterResponse {
     /// The duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub throttle_time_ms: i32,
 
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub error_code: i16,
 
     /// The error message, or null if there was no error.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub error_message: Option<StrBytes>,
 
     /// Other tagged fields
@@ -45,7 +45,7 @@ impl AddRaftVoterResponse {
     ///
     /// The duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
         self.throttle_time_ms = value;
         self
@@ -54,7 +54,7 @@ impl AddRaftVoterResponse {
     ///
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_error_code(mut self, value: i16) -> Self {
         self.error_code = value;
         self
@@ -63,7 +63,7 @@ impl AddRaftVoterResponse {
     ///
     /// The error message, or null if there was no error.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_error_message(mut self, value: Option<StrBytes>) -> Self {
         self.error_message = value;
         self
@@ -83,7 +83,7 @@ impl AddRaftVoterResponse {
 #[cfg(feature = "broker")]
 impl Encodable for AddRaftVoterResponse {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.throttle_time_ms)?;
@@ -123,7 +123,7 @@ impl Encodable for AddRaftVoterResponse {
 #[cfg(feature = "client")]
 impl Decodable for AddRaftVoterResponse {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let throttle_time_ms = types::Int32.decode(buf)?;
@@ -158,7 +158,7 @@ impl Default for AddRaftVoterResponse {
 }
 
 impl Message for AddRaftVoterResponse {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

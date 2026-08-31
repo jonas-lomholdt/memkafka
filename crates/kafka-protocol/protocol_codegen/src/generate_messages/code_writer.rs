@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use failure::Error;
+use anyhow::Error;
 
 pub struct CodeWriter<W> {
     inner: W,

@@ -17,18 +17,18 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 1-4
+/// Valid versions: 1-5
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribableLogDirTopic {
     /// The topic name.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub topic: super::TopicName,
 
     /// The partition indexes.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub partitions: Vec<i32>,
 
     /// Other tagged fields
@@ -40,7 +40,7 @@ impl DescribableLogDirTopic {
     ///
     /// The topic name.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_topic(mut self, value: super::TopicName) -> Self {
         self.topic = value;
         self
@@ -49,7 +49,7 @@ impl DescribableLogDirTopic {
     ///
     /// The partition indexes.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
         self.partitions = value;
         self
@@ -69,7 +69,7 @@ impl DescribableLogDirTopic {
 #[cfg(feature = "client")]
 impl Encodable for DescribableLogDirTopic {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         if version >= 2 {
@@ -127,7 +127,7 @@ impl Encodable for DescribableLogDirTopic {
 #[cfg(feature = "broker")]
 impl Decodable for DescribableLogDirTopic {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         let topic = if version >= 2 {
@@ -169,17 +169,17 @@ impl Default for DescribableLogDirTopic {
 }
 
 impl Message for DescribableLogDirTopic {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 4 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 5 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1-4
+/// Valid versions: 1-5
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeLogDirsRequest {
     /// Each topic that we want to describe log directories for, or null for all topics.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub topics: Option<Vec<DescribableLogDirTopic>>,
 
     /// Other tagged fields
@@ -191,7 +191,7 @@ impl DescribeLogDirsRequest {
     ///
     /// Each topic that we want to describe log directories for, or null for all topics.
     ///
-    /// Supported API versions: 1-4
+    /// Supported API versions: 1-5
     pub fn with_topics(mut self, value: Option<Vec<DescribableLogDirTopic>>) -> Self {
         self.topics = value;
         self
@@ -211,7 +211,7 @@ impl DescribeLogDirsRequest {
 #[cfg(feature = "client")]
 impl Encodable for DescribeLogDirsRequest {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         if version >= 2 {
@@ -260,7 +260,7 @@ impl Encodable for DescribeLogDirsRequest {
 #[cfg(feature = "broker")]
 impl Decodable for DescribeLogDirsRequest {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 4 {
+        if version < 1 || version > 5 {
             bail!("specified version not supported by this message type");
         }
         let topics = if version >= 2 {
@@ -295,7 +295,7 @@ impl Default for DescribeLogDirsRequest {
 }
 
 impl Message for DescribeLogDirsRequest {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 4 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 5 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

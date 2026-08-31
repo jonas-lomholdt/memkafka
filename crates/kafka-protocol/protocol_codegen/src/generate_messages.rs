@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use failure::Error;
+use anyhow::Result;
 
 mod code_writer;
 pub mod expr;
@@ -13,10 +13,13 @@ mod spec;
 
 use spec::{SpecType, VersionSpec};
 
-pub fn run(messages_module_dir: &str, mut input_file_paths: Vec<PathBuf>) -> Result<(), Error> {
+pub fn run(messages_module_dir: &Path, mut input_file_paths: Vec<PathBuf>) -> Result<()> {
     input_file_paths.sort();
 
-    let module_path = format!("{}.rs", messages_module_dir);
+    let module_path = messages_module_dir.with_extension("rs");
+    let messages_module_dir = messages_module_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("output directory path is not valid UTF-8"))?;
 
     // generate file messages.rs
     let mut m = File::create(module_path)?;

@@ -17,13 +17,13 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeShareGroupOffsetsRequest {
     /// The groups to describe offsets for.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub groups: Vec<DescribeShareGroupOffsetsRequestGroup>,
 
     /// Other tagged fields
@@ -35,7 +35,7 @@ impl DescribeShareGroupOffsetsRequest {
     ///
     /// The groups to describe offsets for.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_groups(mut self, value: Vec<DescribeShareGroupOffsetsRequestGroup>) -> Self {
         self.groups = value;
         self
@@ -55,7 +55,7 @@ impl DescribeShareGroupOffsetsRequest {
 #[cfg(feature = "client")]
 impl Encodable for DescribeShareGroupOffsetsRequest {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::CompactArray(types::Struct { version }).encode(buf, &self.groups)?;
@@ -91,7 +91,7 @@ impl Encodable for DescribeShareGroupOffsetsRequest {
 #[cfg(feature = "broker")]
 impl Decodable for DescribeShareGroupOffsetsRequest {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let groups = types::CompactArray(types::Struct { version }).decode(buf)?;
@@ -120,22 +120,22 @@ impl Default for DescribeShareGroupOffsetsRequest {
 }
 
 impl Message for DescribeShareGroupOffsetsRequest {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeShareGroupOffsetsRequestGroup {
     /// The group identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub group_id: super::GroupId,
 
     /// The topics to describe offsets for, or null for all topic-partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub topics: Option<Vec<DescribeShareGroupOffsetsRequestTopic>>,
 
     /// Other tagged fields
@@ -147,7 +147,7 @@ impl DescribeShareGroupOffsetsRequestGroup {
     ///
     /// The group identifier.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_group_id(mut self, value: super::GroupId) -> Self {
         self.group_id = value;
         self
@@ -156,7 +156,7 @@ impl DescribeShareGroupOffsetsRequestGroup {
     ///
     /// The topics to describe offsets for, or null for all topic-partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_topics(
         mut self,
         value: Option<Vec<DescribeShareGroupOffsetsRequestTopic>>,
@@ -179,7 +179,7 @@ impl DescribeShareGroupOffsetsRequestGroup {
 #[cfg(feature = "client")]
 impl Encodable for DescribeShareGroupOffsetsRequestGroup {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::CompactString.encode(buf, &self.group_id)?;
@@ -217,7 +217,7 @@ impl Encodable for DescribeShareGroupOffsetsRequestGroup {
 #[cfg(feature = "broker")]
 impl Decodable for DescribeShareGroupOffsetsRequestGroup {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let group_id = types::CompactString.decode(buf)?;
@@ -249,22 +249,22 @@ impl Default for DescribeShareGroupOffsetsRequestGroup {
 }
 
 impl Message for DescribeShareGroupOffsetsRequestGroup {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 0
+/// Valid versions: 0-1
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DescribeShareGroupOffsetsRequestTopic {
     /// The topic name.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub topic_name: super::TopicName,
 
     /// The partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub partitions: Vec<i32>,
 
     /// Other tagged fields
@@ -276,7 +276,7 @@ impl DescribeShareGroupOffsetsRequestTopic {
     ///
     /// The topic name.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_topic_name(mut self, value: super::TopicName) -> Self {
         self.topic_name = value;
         self
@@ -285,7 +285,7 @@ impl DescribeShareGroupOffsetsRequestTopic {
     ///
     /// The partitions.
     ///
-    /// Supported API versions: 0
+    /// Supported API versions: 0-1
     pub fn with_partitions(mut self, value: Vec<i32>) -> Self {
         self.partitions = value;
         self
@@ -305,7 +305,7 @@ impl DescribeShareGroupOffsetsRequestTopic {
 #[cfg(feature = "client")]
 impl Encodable for DescribeShareGroupOffsetsRequestTopic {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         types::CompactString.encode(buf, &self.topic_name)?;
@@ -343,7 +343,7 @@ impl Encodable for DescribeShareGroupOffsetsRequestTopic {
 #[cfg(feature = "broker")]
 impl Decodable for DescribeShareGroupOffsetsRequestTopic {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version != 0 {
+        if version < 0 || version > 1 {
             bail!("specified version not supported by this message type");
         }
         let topic_name = types::CompactString.decode(buf)?;
@@ -375,7 +375,7 @@ impl Default for DescribeShareGroupOffsetsRequestTopic {
 }
 
 impl Message for DescribeShareGroupOffsetsRequestTopic {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 0 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

@@ -17,33 +17,33 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 0-1
+/// Valid versions: 0-2
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrokerHeartbeatResponse {
     /// Duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub throttle_time_ms: i32,
 
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub error_code: i16,
 
     /// True if the broker has approximately caught up with the latest metadata.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub is_caught_up: bool,
 
     /// True if the broker is fenced.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub is_fenced: bool,
 
     /// True if the broker should proceed with its shutdown.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub should_shut_down: bool,
 
     /// Other tagged fields
@@ -55,7 +55,7 @@ impl BrokerHeartbeatResponse {
     ///
     /// Duration in milliseconds for which the request was throttled due to a quota violation, or zero if the request did not violate any quota.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_throttle_time_ms(mut self, value: i32) -> Self {
         self.throttle_time_ms = value;
         self
@@ -64,7 +64,7 @@ impl BrokerHeartbeatResponse {
     ///
     /// The error code, or 0 if there was no error.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_error_code(mut self, value: i16) -> Self {
         self.error_code = value;
         self
@@ -73,7 +73,7 @@ impl BrokerHeartbeatResponse {
     ///
     /// True if the broker has approximately caught up with the latest metadata.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_is_caught_up(mut self, value: bool) -> Self {
         self.is_caught_up = value;
         self
@@ -82,7 +82,7 @@ impl BrokerHeartbeatResponse {
     ///
     /// True if the broker is fenced.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_is_fenced(mut self, value: bool) -> Self {
         self.is_fenced = value;
         self
@@ -91,7 +91,7 @@ impl BrokerHeartbeatResponse {
     ///
     /// True if the broker should proceed with its shutdown.
     ///
-    /// Supported API versions: 0-1
+    /// Supported API versions: 0-2
     pub fn with_should_shut_down(mut self, value: bool) -> Self {
         self.should_shut_down = value;
         self
@@ -111,7 +111,7 @@ impl BrokerHeartbeatResponse {
 #[cfg(feature = "broker")]
 impl Encodable for BrokerHeartbeatResponse {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 0 || version > 1 {
+        if version < 0 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.throttle_time_ms)?;
@@ -155,7 +155,7 @@ impl Encodable for BrokerHeartbeatResponse {
 #[cfg(feature = "client")]
 impl Decodable for BrokerHeartbeatResponse {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 0 || version > 1 {
+        if version < 0 || version > 2 {
             bail!("specified version not supported by this message type");
         }
         let throttle_time_ms = types::Int32.decode(buf)?;
@@ -196,7 +196,7 @@ impl Default for BrokerHeartbeatResponse {
 }
 
 impl Message for BrokerHeartbeatResponse {
-    const VERSIONS: VersionRange = VersionRange { min: 0, max: 1 };
+    const VERSIONS: VersionRange = VersionRange { min: 0, max: 2 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

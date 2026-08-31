@@ -17,23 +17,23 @@ use crate::protocol::{
     Encodable, Encoder, HeaderVersion, Message, StrBytes, VersionRange,
 };
 
-/// Valid versions: 1-10
+/// Valid versions: 1-11
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListOffsetsPartition {
     /// The partition index.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub partition_index: i32,
 
     /// The current leader epoch.
     ///
-    /// Supported API versions: 4-10
+    /// Supported API versions: 4-11
     pub current_leader_epoch: i32,
 
     /// The current timestamp.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub timestamp: i64,
 
     /// Other tagged fields
@@ -45,7 +45,7 @@ impl ListOffsetsPartition {
     ///
     /// The partition index.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub fn with_partition_index(mut self, value: i32) -> Self {
         self.partition_index = value;
         self
@@ -54,7 +54,7 @@ impl ListOffsetsPartition {
     ///
     /// The current leader epoch.
     ///
-    /// Supported API versions: 4-10
+    /// Supported API versions: 4-11
     pub fn with_current_leader_epoch(mut self, value: i32) -> Self {
         self.current_leader_epoch = value;
         self
@@ -63,7 +63,7 @@ impl ListOffsetsPartition {
     ///
     /// The current timestamp.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub fn with_timestamp(mut self, value: i64) -> Self {
         self.timestamp = value;
         self
@@ -83,7 +83,7 @@ impl ListOffsetsPartition {
 #[cfg(feature = "client")]
 impl Encodable for ListOffsetsPartition {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 10 {
+        if version < 1 || version > 11 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.partition_index)?;
@@ -131,7 +131,7 @@ impl Encodable for ListOffsetsPartition {
 #[cfg(feature = "broker")]
 impl Decodable for ListOffsetsPartition {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 10 {
+        if version < 1 || version > 11 {
             bail!("specified version not supported by this message type");
         }
         let partition_index = types::Int32.decode(buf)?;
@@ -172,32 +172,32 @@ impl Default for ListOffsetsPartition {
 }
 
 impl Message for ListOffsetsPartition {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 10 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 11 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1-10
+/// Valid versions: 1-11
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListOffsetsRequest {
     /// The broker ID of the requester, or -1 if this request is being made by a normal consumer.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub replica_id: super::BrokerId,
 
     /// This setting controls the visibility of transactional records. Using READ_UNCOMMITTED (isolation_level = 0) makes all records visible. With READ_COMMITTED (isolation_level = 1), non-transactional and COMMITTED transactional records are visible. To be more concrete, READ_COMMITTED returns all data from offsets smaller than the current LSO (last stable offset), and enables the inclusion of the list of aborted transactions in the result, which allows consumers to discard ABORTED transactional records.
     ///
-    /// Supported API versions: 2-10
+    /// Supported API versions: 2-11
     pub isolation_level: i8,
 
     /// Each topic in the request.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub topics: Vec<ListOffsetsTopic>,
 
     /// The timeout to await a response in milliseconds for requests that require reading from remote storage for topics enabled with tiered storage.
     ///
-    /// Supported API versions: 10
+    /// Supported API versions: 10-11
     pub timeout_ms: i32,
 
     /// Other tagged fields
@@ -209,7 +209,7 @@ impl ListOffsetsRequest {
     ///
     /// The broker ID of the requester, or -1 if this request is being made by a normal consumer.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub fn with_replica_id(mut self, value: super::BrokerId) -> Self {
         self.replica_id = value;
         self
@@ -218,7 +218,7 @@ impl ListOffsetsRequest {
     ///
     /// This setting controls the visibility of transactional records. Using READ_UNCOMMITTED (isolation_level = 0) makes all records visible. With READ_COMMITTED (isolation_level = 1), non-transactional and COMMITTED transactional records are visible. To be more concrete, READ_COMMITTED returns all data from offsets smaller than the current LSO (last stable offset), and enables the inclusion of the list of aborted transactions in the result, which allows consumers to discard ABORTED transactional records.
     ///
-    /// Supported API versions: 2-10
+    /// Supported API versions: 2-11
     pub fn with_isolation_level(mut self, value: i8) -> Self {
         self.isolation_level = value;
         self
@@ -227,7 +227,7 @@ impl ListOffsetsRequest {
     ///
     /// Each topic in the request.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub fn with_topics(mut self, value: Vec<ListOffsetsTopic>) -> Self {
         self.topics = value;
         self
@@ -236,7 +236,7 @@ impl ListOffsetsRequest {
     ///
     /// The timeout to await a response in milliseconds for requests that require reading from remote storage for topics enabled with tiered storage.
     ///
-    /// Supported API versions: 10
+    /// Supported API versions: 10-11
     pub fn with_timeout_ms(mut self, value: i32) -> Self {
         self.timeout_ms = value;
         self
@@ -256,7 +256,7 @@ impl ListOffsetsRequest {
 #[cfg(feature = "client")]
 impl Encodable for ListOffsetsRequest {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 10 {
+        if version < 1 || version > 11 {
             bail!("specified version not supported by this message type");
         }
         types::Int32.encode(buf, &self.replica_id)?;
@@ -327,7 +327,7 @@ impl Encodable for ListOffsetsRequest {
 #[cfg(feature = "broker")]
 impl Decodable for ListOffsetsRequest {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 10 {
+        if version < 1 || version > 11 {
             bail!("specified version not supported by this message type");
         }
         let replica_id = types::Int32.decode(buf)?;
@@ -379,22 +379,22 @@ impl Default for ListOffsetsRequest {
 }
 
 impl Message for ListOffsetsRequest {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 10 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 11 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 
-/// Valid versions: 1-10
+/// Valid versions: 1-11
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListOffsetsTopic {
     /// The topic name.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub name: super::TopicName,
 
     /// Each partition in the request.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub partitions: Vec<ListOffsetsPartition>,
 
     /// Other tagged fields
@@ -406,7 +406,7 @@ impl ListOffsetsTopic {
     ///
     /// The topic name.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub fn with_name(mut self, value: super::TopicName) -> Self {
         self.name = value;
         self
@@ -415,7 +415,7 @@ impl ListOffsetsTopic {
     ///
     /// Each partition in the request.
     ///
-    /// Supported API versions: 1-10
+    /// Supported API versions: 1-11
     pub fn with_partitions(mut self, value: Vec<ListOffsetsPartition>) -> Self {
         self.partitions = value;
         self
@@ -435,7 +435,7 @@ impl ListOffsetsTopic {
 #[cfg(feature = "client")]
 impl Encodable for ListOffsetsTopic {
     fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> Result<()> {
-        if version < 1 || version > 10 {
+        if version < 1 || version > 11 {
             bail!("specified version not supported by this message type");
         }
         if version >= 6 {
@@ -494,7 +494,7 @@ impl Encodable for ListOffsetsTopic {
 #[cfg(feature = "broker")]
 impl Decodable for ListOffsetsTopic {
     fn decode<B: ByteBuf>(buf: &mut B, version: i16) -> Result<Self> {
-        if version < 1 || version > 10 {
+        if version < 1 || version > 11 {
             bail!("specified version not supported by this message type");
         }
         let name = if version >= 6 {
@@ -536,7 +536,7 @@ impl Default for ListOffsetsTopic {
 }
 
 impl Message for ListOffsetsTopic {
-    const VERSIONS: VersionRange = VersionRange { min: 1, max: 10 };
+    const VERSIONS: VersionRange = VersionRange { min: 1, max: 11 };
     const DEPRECATED_VERSIONS: Option<VersionRange> = None;
 }
 

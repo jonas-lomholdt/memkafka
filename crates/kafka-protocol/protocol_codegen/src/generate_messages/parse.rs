@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use failure::Error;
+use anyhow::Error;
 use json_comments::StripComments;
 use serde_json::Value;
 
