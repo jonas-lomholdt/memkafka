@@ -61,7 +61,13 @@ const API_VERSIONS_VERSION: i16 = 3;
 struct BoundaryCase {
     api_key: ApiKey,
     request_for: fn(i16) -> RequestKind,
+    assert_supported: fn(&RequestKind, &ResponseKind, i16),
     assert_error: fn(&RequestKind, &ResponseKind, i16),
+}
+
+struct TaggedRequestExpectation {
+    header: (i32, Bytes),
+    body: (i32, Bytes),
 }
 
 #[derive(Deserialize)]
@@ -82,6 +88,18 @@ struct BoundaryCapability {
 struct BoundaryVersion {
     min: i16,
     max: i16,
+}
+
+#[test]
+#[should_panic(expected = "assertion `left == right` failed")]
+fn supported_api_versions_callback_rejects_a_default_response_stub() {
+    // Mutation evidence: a dispatcher that returns the generated default response does not
+    // satisfy the precise supported-response contract below.
+    assert_api_versions_supported(
+        &RequestKind::ApiVersions(ApiVersionsRequest::default()),
+        &ResponseKind::ApiVersions(Default::default()),
+        4,
+    );
 }
 
 #[test]
@@ -490,6 +508,11 @@ async fn advertised_api_boundary_matrix() {
 
         for version in supported_boundary_versions(capability) {
             let request = supported_request_for(case.api_key, version);
+            if case.api_key == ApiKey::ListGroups && version == capability.supported.min {
+                correlation_id += 1;
+                seed_list_groups_fixture(&mut connection, correlation_id).await;
+                correlation_id += 1;
+            }
             correlation_id += 1;
             write_frame(
                 &mut connection,
@@ -509,7 +532,7 @@ async fn advertised_api_boundary_matrix() {
             .await;
             let (header, response) = decode_response_kind(case.api_key, version, encoded);
             assert_eq!(header.correlation_id, correlation_id);
-            assert_supported_response(case.api_key, &response);
+            (case.assert_supported)(&request, &response, version);
         }
 
         for version in adjacent_unsupported_versions(capability) {
@@ -551,11 +574,16 @@ async fn advertised_api_same_connection_matrix() {
     let mut correlation_id = 81_000;
     let mut exercised_lower_neighbor = false;
     let mut exercised_upper_neighbor = false;
+    let mut one_neighbor_exceptions = Vec::new();
 
-    for (index, case) in cases.iter().enumerate() {
+    for case in &cases {
         let capability = boundary_capability(&manifest, case.api_key);
-        let versions = adjacent_unsupported_versions(capability);
-        let version = versions[index % versions.len()];
+        let requested_direction = scheduled_boundary_direction(case.api_key);
+        let (version, actual_direction) =
+            scheduled_same_connection_version(capability, requested_direction);
+        if requested_direction != actual_direction {
+            one_neighbor_exceptions.push((case.api_key, requested_direction, actual_direction));
+        }
         exercised_lower_neighbor |= version < capability.supported.min;
         exercised_upper_neighbor |= version > capability.supported.max;
         let request = (case.request_for)(version);
@@ -587,6 +615,27 @@ async fn advertised_api_same_connection_matrix() {
     assert!(
         exercised_lower_neighbor && exercised_upper_neighbor,
         "same-connection matrix must exercise lower and upper neighbors"
+    );
+    assert_eq!(
+        one_neighbor_exceptions,
+        vec![
+            (
+                ApiKey::ListGroups,
+                BoundaryDirection::Lower,
+                BoundaryDirection::Upper
+            ),
+            (
+                ApiKey::ApiVersions,
+                BoundaryDirection::Upper,
+                BoundaryDirection::Lower
+            ),
+            (
+                ApiKey::DescribeConfigs,
+                BoundaryDirection::Lower,
+                BoundaryDirection::Upper
+            ),
+        ],
+        "only schema edges may override the explicit lower/upper schedule"
     );
 
     assert!(
@@ -668,23 +717,35 @@ async fn tagged_field_boundary_rejections_remain_decodable() {
             body_tag,
             Bytes::from(vec![body_tag as u8]),
         );
-        write_frame(
-            &mut connection,
-            &encode_boundary_request(
-                api_key,
-                version,
-                correlation_id,
-                &request,
-                Some((header_tag, Bytes::from(vec![header_tag as u8]))),
-            ),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("write tagged {:?} v{version} request: {error}", api_key));
+        let header_value = Bytes::from(vec![header_tag as u8]);
+        let encoded_request = encode_boundary_request(
+            api_key,
+            version,
+            correlation_id,
+            &request,
+            Some((header_tag, header_value.clone())),
+        );
+        assert_encoded_request_tags(
+            encoded_request.clone(),
+            api_key,
+            version,
+            correlation_id,
+            TaggedRequestExpectation {
+                header: (header_tag, header_value),
+                body: (body_tag, Bytes::from(vec![body_tag as u8])),
+            },
+        );
+        write_frame(&mut connection, &encoded_request)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("write tagged {:?} v{version} request: {error}", api_key)
+            });
         let encoded =
             read_response(&mut connection, &format!("tagged {:?} v{version}", api_key)).await;
         let (header, response) = decode_response_kind(api_key, version, encoded);
         assert_eq!(header.correlation_id, correlation_id);
         (case.assert_error)(&request, &response, version);
+        assert_flexible_rejection_tags_empty(api_key, &response);
     }
 
     server.shutdown().await;
@@ -2685,86 +2746,103 @@ fn boundary_cases() -> [BoundaryCase; 17] {
         BoundaryCase {
             api_key: ApiKey::Produce,
             request_for: |_: i16| RequestKind::Produce(produce_request(1)),
+            assert_supported: assert_produce_supported,
             assert_error: assert_produce_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::Fetch,
             request_for: fetch_boundary_request,
+            assert_supported: assert_fetch_supported,
             assert_error: assert_fetch_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::ListOffsets,
             request_for: list_offsets_boundary_request,
+            assert_supported: assert_list_offsets_supported,
             assert_error: assert_list_offsets_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::Metadata,
             request_for: metadata_boundary_request,
+            assert_supported: assert_metadata_supported,
             assert_error: assert_metadata_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::OffsetCommit,
             request_for: offset_commit_boundary_request,
+            assert_supported: assert_offset_commit_supported,
             assert_error: assert_offset_commit_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::OffsetFetch,
             request_for: offset_fetch_boundary_request,
+            assert_supported: assert_offset_fetch_supported,
             assert_error: assert_offset_fetch_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::FindCoordinator,
             request_for: find_coordinator_boundary_request,
+            assert_supported: assert_find_coordinator_supported,
             assert_error: assert_find_coordinator_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::JoinGroup,
             request_for: join_group_boundary_request,
+            assert_supported: assert_join_group_supported,
             assert_error: assert_join_group_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::Heartbeat,
             request_for: heartbeat_boundary_request,
+            assert_supported: assert_heartbeat_supported,
             assert_error: assert_heartbeat_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::LeaveGroup,
             request_for: leave_group_boundary_request,
+            assert_supported: assert_leave_group_supported,
             assert_error: assert_leave_group_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::SyncGroup,
             request_for: sync_group_boundary_request,
+            assert_supported: assert_sync_group_supported,
             assert_error: assert_sync_group_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::DescribeGroups,
             request_for: describe_groups_boundary_request,
+            assert_supported: assert_describe_groups_supported,
             assert_error: assert_describe_groups_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::ListGroups,
             request_for: |_: i16| RequestKind::ListGroups(ListGroupsRequest::default()),
+            assert_supported: assert_list_groups_supported,
             assert_error: assert_list_groups_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::ApiVersions,
             request_for: |_: i16| RequestKind::ApiVersions(ApiVersionsRequest::default()),
+            assert_supported: assert_api_versions_supported,
             assert_error: assert_api_versions_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::CreateTopics,
             request_for: create_topics_boundary_request,
+            assert_supported: assert_create_topics_supported,
             assert_error: assert_create_topics_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::InitProducerId,
             request_for: |_: i16| RequestKind::InitProducerId(InitProducerIdRequest::default()),
+            assert_supported: assert_init_producer_id_supported,
             assert_error: assert_init_producer_id_unsupported,
         },
         BoundaryCase {
             api_key: ApiKey::DescribeConfigs,
             request_for: describe_configs_boundary_request,
+            assert_supported: assert_describe_configs_supported,
             assert_error: assert_describe_configs_unsupported,
         },
     ]
@@ -2829,6 +2907,63 @@ fn adjacent_unsupported_versions(capability: &BoundaryCapability) -> Vec<i16> {
                 && !capability_supports(capability, *version)
         })
         .collect()
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum BoundaryDirection {
+    Lower,
+    Upper,
+}
+
+fn scheduled_boundary_direction(api_key: ApiKey) -> BoundaryDirection {
+    match api_key {
+        ApiKey::Produce
+        | ApiKey::ListOffsets
+        | ApiKey::OffsetCommit
+        | ApiKey::FindCoordinator
+        | ApiKey::Heartbeat
+        | ApiKey::SyncGroup
+        | ApiKey::ListGroups
+        | ApiKey::CreateTopics
+        | ApiKey::DescribeConfigs => BoundaryDirection::Lower,
+        ApiKey::Fetch
+        | ApiKey::Metadata
+        | ApiKey::OffsetFetch
+        | ApiKey::JoinGroup
+        | ApiKey::LeaveGroup
+        | ApiKey::DescribeGroups
+        | ApiKey::ApiVersions
+        | ApiKey::InitProducerId => BoundaryDirection::Upper,
+        _ => panic!("same-connection schedule is missing {api_key:?}"),
+    }
+}
+
+fn scheduled_same_connection_version(
+    capability: &BoundaryCapability,
+    requested_direction: BoundaryDirection,
+) -> (i16, BoundaryDirection) {
+    let adjacent = adjacent_unsupported_versions(capability);
+    let matches_requested_direction = |version: &i16| match requested_direction {
+        BoundaryDirection::Lower => *version < capability.supported.min,
+        BoundaryDirection::Upper => *version > capability.supported.max,
+    };
+    if let Some(version) = adjacent.iter().copied().find(matches_requested_direction) {
+        return (version, requested_direction);
+    }
+
+    assert_eq!(
+        adjacent.len(),
+        1,
+        "{:#?} must have a requested neighbor or exactly one schema-known exception",
+        capability.api_key
+    );
+    let version = adjacent[0];
+    let actual_direction = if version < capability.supported.min {
+        BoundaryDirection::Lower
+    } else {
+        BoundaryDirection::Upper
+    };
+    (version, actual_direction)
 }
 
 fn produce_request(acks: i16) -> ProduceRequest {
@@ -3111,42 +3246,21 @@ fn describe_configs_boundary_request(_: i16) -> RequestKind {
 
 fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
     match api_key {
-        ApiKey::Produce => {
-            RequestKind::Produce(ProduceRequest::default().with_acks(1).with_topic_data(vec![
-                produce_topic(
-                    "boundary-supported-produce",
-                    vec![produce_partition(0, record_batch(&["supported"]))],
-                ),
-            ]))
-        }
-        ApiKey::Fetch => RequestKind::Fetch(
-            FetchRequest::default()
-                .with_replica_id(BrokerId::from(-1))
-                .with_max_wait_ms(0)
-                .with_min_bytes(0)
-                .with_max_bytes(0),
+        ApiKey::Produce => RequestKind::Produce(produce_request(2)),
+        ApiKey::Fetch => fetch_boundary_request(version),
+        ApiKey::ListOffsets => list_offsets_boundary_request(version),
+        ApiKey::Metadata => RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_name(Some(topic_name("boundary-supported-metadata-a"))),
+                    MetadataRequestTopic::default()
+                        .with_name(Some(topic_name("boundary-supported-metadata-b"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
         ),
-        ApiKey::ListOffsets => RequestKind::ListOffsets(
-            ListOffsetsRequest::default()
-                .with_replica_id(BrokerId::from(-1))
-                .with_topics(Vec::new()),
-        ),
-        ApiKey::Metadata => RequestKind::Metadata(MetadataRequest::default().with_topics(None)),
-        ApiKey::OffsetCommit => RequestKind::OffsetCommit(
-            OffsetCommitRequest::default()
-                .with_group_id(GroupId::from(StrBytes::from_static_str(
-                    "boundary-supported-commit",
-                )))
-                .with_member_id(StrBytes::from_static_str("boundary-supported-member"))
-                .with_topics(Vec::new()),
-        ),
-        ApiKey::OffsetFetch => RequestKind::OffsetFetch(
-            OffsetFetchRequest::default()
-                .with_group_id(GroupId::from(StrBytes::from_static_str(
-                    "boundary-supported-fetch",
-                )))
-                .with_topics(Some(Vec::new())),
-        ),
+        ApiKey::OffsetCommit => offset_commit_boundary_request(version),
+        ApiKey::OffsetFetch => offset_fetch_boundary_request(version),
         ApiKey::FindCoordinator => RequestKind::FindCoordinator(
             FindCoordinatorRequest::default()
                 .with_key(StrBytes::from_static_str("boundary-supported-coordinator")),
@@ -3191,11 +3305,7 @@ fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
                 )))
                 .with_member_id(StrBytes::from_static_str("boundary-supported-member")),
         ),
-        ApiKey::DescribeGroups => {
-            RequestKind::DescribeGroups(DescribeGroupsRequest::default().with_groups(vec![
-                GroupId::from(StrBytes::from_static_str("boundary-supported-describe")),
-            ]))
-        }
+        ApiKey::DescribeGroups => describe_groups_boundary_request(version),
         ApiKey::ListGroups => RequestKind::ListGroups(ListGroupsRequest::default()),
         ApiKey::ApiVersions => RequestKind::ApiVersions(
             ApiVersionsRequest::default()
@@ -3207,15 +3317,19 @@ fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
                 .with_validate_only(true)
                 .with_topics(vec![
                     CreatableTopic::default()
-                        .with_name(topic_name("boundary-supported-create"))
+                        .with_name(topic_name("boundary-supported-create-a"))
                         .with_num_partitions(1)
+                        .with_replication_factor(1),
+                    CreatableTopic::default()
+                        .with_name(topic_name("boundary-supported-create-b"))
+                        .with_num_partitions(2)
                         .with_replication_factor(1),
                 ]),
         ),
-        ApiKey::InitProducerId => RequestKind::InitProducerId(InitProducerIdRequest::default()),
-        ApiKey::DescribeConfigs => RequestKind::DescribeConfigs(
-            DescribeConfigsRequest::default().with_resources(Vec::new()),
+        ApiKey::InitProducerId => RequestKind::InitProducerId(
+            InitProducerIdRequest::default().with_transactional_id(None),
         ),
+        ApiKey::DescribeConfigs => describe_configs_boundary_request(version),
         _ => panic!("supported boundary fixture is missing {api_key:?}"),
     }
 }
@@ -3262,6 +3376,188 @@ fn add_unknown_body_tag(request: &mut RequestKind, api_key: ApiKey, tag: i32, va
     }
 }
 
+fn assert_encoded_request_tags(
+    encoded: Bytes,
+    api_key: ApiKey,
+    version: i16,
+    correlation_id: i32,
+    tags: TaggedRequestExpectation,
+) {
+    let DecodedFrame::Request(decoded) = decode_frame(encoded).expect("decode tagged request")
+    else {
+        panic!("expected decoded tagged request");
+    };
+    assert_eq!(decoded.api_key, api_key);
+    assert_eq!(decoded.header.request_api_version, version);
+    assert_eq!(decoded.header.correlation_id, correlation_id);
+    assert_eq!(decoded.header.unknown_tagged_fields.len(), 1);
+    assert_eq!(
+        decoded.header.unknown_tagged_fields.get(&tags.header.0),
+        Some(&tags.header.1)
+    );
+    let unknown_tagged_fields = match decoded.body {
+        RequestKind::Produce(body) if api_key == ApiKey::Produce => body.unknown_tagged_fields,
+        RequestKind::Fetch(body) if api_key == ApiKey::Fetch => body.unknown_tagged_fields,
+        RequestKind::OffsetFetch(body) if api_key == ApiKey::OffsetFetch => {
+            body.unknown_tagged_fields
+        }
+        RequestKind::CreateTopics(body) if api_key == ApiKey::CreateTopics => {
+            body.unknown_tagged_fields
+        }
+        _ => panic!("decoded tagged request has the wrong body for {api_key:?}"),
+    };
+    assert_eq!(unknown_tagged_fields.len(), 1);
+    assert_eq!(unknown_tagged_fields.get(&tags.body.0), Some(&tags.body.1));
+}
+
+fn assert_flexible_rejection_tags_empty(api_key: ApiKey, response: &ResponseKind) {
+    match response {
+        ResponseKind::Produce(response) if api_key == ApiKey::Produce => {
+            assert!(response.unknown_tagged_fields.is_empty());
+            for topic in &response.responses {
+                assert!(topic.unknown_tagged_fields.is_empty());
+                for partition in &topic.partition_responses {
+                    assert!(partition.unknown_tagged_fields.is_empty());
+                    assert!(partition.current_leader.unknown_tagged_fields.is_empty());
+                    for record_error in &partition.record_errors {
+                        assert!(record_error.unknown_tagged_fields.is_empty());
+                    }
+                }
+            }
+            for endpoint in &response.node_endpoints {
+                assert!(endpoint.unknown_tagged_fields.is_empty());
+            }
+        }
+        ResponseKind::Fetch(response) if api_key == ApiKey::Fetch => {
+            assert!(response.unknown_tagged_fields.is_empty());
+            for topic in &response.responses {
+                assert!(topic.unknown_tagged_fields.is_empty());
+                for partition in &topic.partitions {
+                    assert!(partition.unknown_tagged_fields.is_empty());
+                    assert!(partition.diverging_epoch.unknown_tagged_fields.is_empty());
+                    assert!(partition.current_leader.unknown_tagged_fields.is_empty());
+                    assert!(partition.snapshot_id.unknown_tagged_fields.is_empty());
+                    for transaction in partition
+                        .aborted_transactions
+                        .as_deref()
+                        .unwrap_or_default()
+                    {
+                        assert!(transaction.unknown_tagged_fields.is_empty());
+                    }
+                }
+            }
+            for endpoint in &response.node_endpoints {
+                assert!(endpoint.unknown_tagged_fields.is_empty());
+            }
+        }
+        ResponseKind::OffsetFetch(response) if api_key == ApiKey::OffsetFetch => {
+            assert!(response.unknown_tagged_fields.is_empty());
+            for topic in &response.topics {
+                assert!(topic.unknown_tagged_fields.is_empty());
+                for partition in &topic.partitions {
+                    assert!(partition.unknown_tagged_fields.is_empty());
+                }
+            }
+            for group in &response.groups {
+                assert!(group.unknown_tagged_fields.is_empty());
+                for topic in &group.topics {
+                    assert!(topic.unknown_tagged_fields.is_empty());
+                    for partition in &topic.partitions {
+                        assert!(partition.unknown_tagged_fields.is_empty());
+                    }
+                }
+            }
+        }
+        ResponseKind::CreateTopics(response) if api_key == ApiKey::CreateTopics => {
+            assert!(response.unknown_tagged_fields.is_empty());
+            for topic in &response.topics {
+                assert!(topic.unknown_tagged_fields.is_empty());
+                for config in topic.configs.as_deref().unwrap_or_default() {
+                    assert!(config.unknown_tagged_fields.is_empty());
+                }
+            }
+        }
+        _ => panic!("missing flexible response tag audit for {api_key:?}"),
+    }
+}
+
+async fn seed_list_groups_fixture(connection: &mut TcpStream, correlation_id: i32) {
+    let initial = RequestKind::JoinGroup(
+        JoinGroupRequest::default()
+            .with_group_id(GroupId::from(StrBytes::from_static_str(
+                "boundary-list-group",
+            )))
+            .with_session_timeout_ms(10_000)
+            .with_rebalance_timeout_ms(10_000)
+            .with_member_id(StrBytes::new())
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("range"))
+                    .with_metadata(Bytes::new()),
+            ]),
+    );
+    write_frame(
+        connection,
+        &encode_boundary_request(ApiKey::JoinGroup, 5, correlation_id, &initial, None),
+    )
+    .await
+    .expect("write ListGroups fixture member-id JoinGroup");
+    let (header, response) = decode_response_kind(
+        ApiKey::JoinGroup,
+        5,
+        read_response(connection, "ListGroups fixture member-id JoinGroup").await,
+    );
+    assert_eq!(header.correlation_id, correlation_id);
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected ListGroups fixture JoinGroup response");
+    };
+    assert_eq!(response.error_code, ResponseError::MemberIdRequired.code());
+    assert_eq!(response.member_id.as_str(), "boundary-matrix-1");
+
+    let joined = RequestKind::JoinGroup(
+        JoinGroupRequest::default()
+            .with_group_id(GroupId::from(StrBytes::from_static_str(
+                "boundary-list-group",
+            )))
+            .with_session_timeout_ms(10_000)
+            .with_rebalance_timeout_ms(10_000)
+            .with_member_id(response.member_id.clone())
+            .with_protocol_type(StrBytes::from_static_str("consumer"))
+            .with_protocols(vec![
+                JoinGroupRequestProtocol::default()
+                    .with_name(StrBytes::from_static_str("range"))
+                    .with_metadata(Bytes::new()),
+            ]),
+    );
+    write_frame(
+        connection,
+        &encode_boundary_request(ApiKey::JoinGroup, 5, correlation_id + 1, &joined, None),
+    )
+    .await
+    .expect("write ListGroups fixture JoinGroup");
+    let (header, response) = decode_response_kind(
+        ApiKey::JoinGroup,
+        5,
+        read_response(connection, "ListGroups fixture JoinGroup").await,
+    );
+    assert_eq!(header.correlation_id, correlation_id + 1);
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected completed ListGroups fixture JoinGroup response");
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.generation_id, 1);
+    assert_eq!(
+        response.protocol_name,
+        Some(StrBytes::from_static_str("range"))
+    );
+    assert_eq!(response.leader.as_str(), "boundary-matrix-1");
+    assert_eq!(response.member_id.as_str(), "boundary-matrix-1");
+    assert_eq!(response.members.len(), 1);
+    assert_eq!(response.members[0].member_id.as_str(), "boundary-matrix-1");
+    assert_eq!(response.members[0].metadata, Bytes::new());
+}
+
 async fn assert_api_versions_v4_success(connection: &mut TcpStream, correlation_id: i32) {
     write_frame(
         connection,
@@ -3283,103 +3579,447 @@ async fn assert_api_versions_v4_success(connection: &mut TcpStream, correlation_
     assert_eq!(response.api_keys.len(), 17);
 }
 
-fn assert_supported_response(api_key: ApiKey, response: &ResponseKind) {
-    match response {
-        ResponseKind::Produce(response) if api_key == ApiKey::Produce => {
-            for topic in &response.responses {
-                for partition in &topic.partition_responses {
-                    assert_not_unsupported(partition.error_code);
-                }
-            }
+fn assert_produce_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::Produce(request) = request else {
+        panic!("expected supported Produce fixture");
+    };
+    let ResponseKind::Produce(response) = response else {
+        panic!("expected supported Produce response");
+    };
+    assert_eq!(
+        request.acks, 2,
+        "fixture must exercise validation, not a stub"
+    );
+    assert_eq!(response.throttle_time_ms, 0);
+    assert!(response.node_endpoints.is_empty());
+    assert_eq!(response.responses.len(), request.topic_data.len());
+    for (actual_topic, expected_topic) in response.responses.iter().zip(&request.topic_data) {
+        assert_eq!(actual_topic.name, expected_topic.name);
+        assert_eq!(
+            actual_topic.partition_responses.len(),
+            expected_topic.partition_data.len()
+        );
+        for (actual_partition, expected_partition) in actual_topic
+            .partition_responses
+            .iter()
+            .zip(&expected_topic.partition_data)
+        {
+            assert_eq!(actual_partition.index, expected_partition.index);
+            assert_eq!(
+                actual_partition.error_code,
+                ResponseError::InvalidRequiredAcks.code()
+            );
+            assert_eq!(actual_partition.base_offset, -1);
+            assert_eq!(actual_partition.log_append_time_ms, -1);
+            assert_eq!(actual_partition.log_start_offset, 0);
+            assert!(actual_partition.record_errors.is_empty());
+            assert_eq!(actual_partition.error_message, None);
         }
-        ResponseKind::Fetch(response) if api_key == ApiKey::Fetch => {
-            assert_not_unsupported(response.error_code);
-            for topic in &response.responses {
-                for partition in &topic.partitions {
-                    assert_not_unsupported(partition.error_code);
-                }
-            }
-        }
-        ResponseKind::ListOffsets(response) if api_key == ApiKey::ListOffsets => {
-            for topic in &response.topics {
-                for partition in &topic.partitions {
-                    assert_not_unsupported(partition.error_code);
-                }
-            }
-        }
-        ResponseKind::Metadata(response) if api_key == ApiKey::Metadata => {
-            assert_not_unsupported(response.error_code);
-            for topic in &response.topics {
-                assert_not_unsupported(topic.error_code);
-            }
-        }
-        ResponseKind::OffsetCommit(response) if api_key == ApiKey::OffsetCommit => {
-            for topic in &response.topics {
-                for partition in &topic.partitions {
-                    assert_not_unsupported(partition.error_code);
-                }
-            }
-        }
-        ResponseKind::OffsetFetch(response) if api_key == ApiKey::OffsetFetch => {
-            assert_not_unsupported(response.error_code);
-            for topic in &response.topics {
-                for partition in &topic.partitions {
-                    assert_not_unsupported(partition.error_code);
-                }
-            }
-        }
-        ResponseKind::FindCoordinator(response) if api_key == ApiKey::FindCoordinator => {
-            assert_not_unsupported(response.error_code);
-            for coordinator in &response.coordinators {
-                assert_not_unsupported(coordinator.error_code);
-            }
-        }
-        ResponseKind::JoinGroup(response) if api_key == ApiKey::JoinGroup => {
-            assert_not_unsupported(response.error_code);
-        }
-        ResponseKind::Heartbeat(response) if api_key == ApiKey::Heartbeat => {
-            assert_not_unsupported(response.error_code);
-        }
-        ResponseKind::LeaveGroup(response) if api_key == ApiKey::LeaveGroup => {
-            assert_not_unsupported(response.error_code);
-            for member in &response.members {
-                assert_not_unsupported(member.error_code);
-            }
-        }
-        ResponseKind::SyncGroup(response) if api_key == ApiKey::SyncGroup => {
-            assert_not_unsupported(response.error_code);
-        }
-        ResponseKind::DescribeGroups(response) if api_key == ApiKey::DescribeGroups => {
-            for group in &response.groups {
-                assert_not_unsupported(group.error_code);
-            }
-        }
-        ResponseKind::ListGroups(response) if api_key == ApiKey::ListGroups => {
-            assert_not_unsupported(response.error_code);
-        }
-        ResponseKind::ApiVersions(response) if api_key == ApiKey::ApiVersions => {
-            assert_eq!(response.error_code, 0);
-            assert_eq!(response.api_keys.len(), 17);
-        }
-        ResponseKind::CreateTopics(response) if api_key == ApiKey::CreateTopics => {
-            for topic in &response.topics {
-                assert_not_unsupported(topic.error_code);
-            }
-        }
-        ResponseKind::InitProducerId(response) if api_key == ApiKey::InitProducerId => {
-            assert_not_unsupported(response.error_code);
-        }
-        ResponseKind::DescribeConfigs(response) if api_key == ApiKey::DescribeConfigs => {
-            for result in &response.results {
-                assert_not_unsupported(result.error_code);
-            }
-        }
-        _ => panic!("supported {api_key:?} dispatched to the wrong response variant"),
     }
 }
 
-fn assert_not_unsupported(error_code: i16) {
-    assert_ne!(error_code, ResponseError::UnsupportedVersion.code());
+fn assert_fetch_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::Fetch(request) = request else {
+        panic!("expected supported Fetch fixture");
+    };
+    let ResponseKind::Fetch(response) = response else {
+        panic!("expected supported Fetch response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.session_id, 0);
+    assert!(response.node_endpoints.is_empty());
+    assert_eq!(response.responses.len(), request.topics.len());
+    for (actual_topic, expected_topic) in response.responses.iter().zip(&request.topics) {
+        assert_eq!(actual_topic.topic, expected_topic.topic);
+        assert_eq!(
+            actual_topic.partitions.len(),
+            expected_topic.partitions.len()
+        );
+        for (actual_partition, expected_partition) in actual_topic
+            .partitions
+            .iter()
+            .zip(&expected_topic.partitions)
+        {
+            assert_eq!(
+                actual_partition.partition_index,
+                expected_partition.partition
+            );
+            assert_eq!(
+                actual_partition.error_code,
+                ResponseError::UnknownTopicOrPartition.code()
+            );
+            assert_eq!(actual_partition.high_watermark, -1);
+            assert_eq!(actual_partition.last_stable_offset, -1);
+            assert_eq!(actual_partition.log_start_offset, -1);
+            assert_eq!(actual_partition.diverging_epoch.epoch, -1);
+            assert_eq!(actual_partition.diverging_epoch.end_offset, -1);
+            assert_eq!(
+                actual_partition.current_leader.leader_id,
+                BrokerId::from(-1)
+            );
+            assert_eq!(actual_partition.current_leader.leader_epoch, -1);
+            assert_eq!(actual_partition.snapshot_id.end_offset, -1);
+            assert_eq!(actual_partition.snapshot_id.epoch, -1);
+            assert_eq!(actual_partition.aborted_transactions, Some(Vec::new()));
+            assert_eq!(actual_partition.preferred_read_replica, BrokerId::from(-1));
+            assert_eq!(actual_partition.records, Some(Bytes::new()));
+        }
+    }
+}
+
+fn assert_list_offsets_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::ListOffsets(request) = request else {
+        panic!("expected supported ListOffsets fixture");
+    };
+    let ResponseKind::ListOffsets(response) = response else {
+        panic!("expected supported ListOffsets response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.topics.len(), request.topics.len());
+    for (actual_topic, expected_topic) in response.topics.iter().zip(&request.topics) {
+        assert_eq!(actual_topic.name, expected_topic.name);
+        assert_eq!(
+            actual_topic.partitions.len(),
+            expected_topic.partitions.len()
+        );
+        for (actual_partition, expected_partition) in actual_topic
+            .partitions
+            .iter()
+            .zip(&expected_topic.partitions)
+        {
+            assert_eq!(
+                actual_partition.partition_index,
+                expected_partition.partition_index
+            );
+            assert_eq!(
+                actual_partition.error_code,
+                ResponseError::UnknownTopicOrPartition.code()
+            );
+            assert_eq!(actual_partition.timestamp, -1);
+            assert_eq!(actual_partition.offset, -1);
+            assert_eq!(actual_partition.leader_epoch, -1);
+        }
+    }
+}
+
+fn assert_metadata_supported(request: &RequestKind, response: &ResponseKind, version: i16) {
+    let RequestKind::Metadata(request) = request else {
+        panic!("expected supported Metadata fixture");
+    };
+    let ResponseKind::Metadata(response) = response else {
+        panic!("expected supported Metadata response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.brokers.len(), 1);
+    assert_eq!(response.brokers[0].node_id, BrokerId::from(1));
+    assert_eq!(response.brokers[0].host.as_str(), "127.0.0.1");
+    assert_eq!(response.brokers[0].port, 19_092);
+    assert_eq!(
+        response.cluster_id,
+        Some(StrBytes::from_static_str("memkafka"))
+    );
+    assert_eq!(response.controller_id, BrokerId::from(1));
+    if version >= 8 {
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
+    }
+    let expected_topics = request.topics.as_deref().expect("explicit Metadata topics");
+    assert_eq!(response.topics.len(), expected_topics.len());
+    for (actual_topic, expected_topic) in response.topics.iter().zip(expected_topics) {
+        assert_eq!(
+            actual_topic.error_code,
+            ResponseError::UnknownTopicOrPartition.code()
+        );
+        assert_eq!(actual_topic.name, expected_topic.name);
+        assert!(actual_topic.topic_id.is_nil());
+        assert!(!actual_topic.is_internal);
+        assert!(actual_topic.partitions.is_empty());
+        if version >= 8 {
+            assert_eq!(actual_topic.topic_authorized_operations, i32::MIN);
+        }
+    }
+}
+
+fn assert_offset_commit_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::OffsetCommit(request) = request else {
+        panic!("expected supported OffsetCommit fixture");
+    };
+    let ResponseKind::OffsetCommit(response) = response else {
+        panic!("expected supported OffsetCommit response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.topics.len(), request.topics.len());
+    for (actual_topic, expected_topic) in response.topics.iter().zip(&request.topics) {
+        assert_eq!(actual_topic.name, expected_topic.name);
+        assert_eq!(
+            actual_topic.partitions.len(),
+            expected_topic.partitions.len()
+        );
+        for (actual_partition, expected_partition) in actual_topic
+            .partitions
+            .iter()
+            .zip(&expected_topic.partitions)
+        {
+            assert_eq!(
+                actual_partition.partition_index,
+                expected_partition.partition_index
+            );
+            assert_eq!(
+                actual_partition.error_code,
+                ResponseError::UnknownMemberId.code()
+            );
+        }
+    }
+}
+
+fn assert_offset_fetch_supported(request: &RequestKind, response: &ResponseKind, version: i16) {
+    let RequestKind::OffsetFetch(request) = request else {
+        panic!("expected supported OffsetFetch fixture");
+    };
+    let ResponseKind::OffsetFetch(response) = response else {
+        panic!("expected supported OffsetFetch response");
+    };
+    assert_eq!(version, 5);
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert!(response.groups.is_empty());
+    let expected_topics = request.topics.as_deref().expect("OffsetFetch v5 topics");
+    assert_eq!(response.topics.len(), expected_topics.len());
+    for (actual_topic, expected_topic) in response.topics.iter().zip(expected_topics) {
+        assert_eq!(actual_topic.name, expected_topic.name);
+        assert_eq!(
+            actual_topic.partitions.len(),
+            expected_topic.partition_indexes.len()
+        );
+        for (actual_partition, expected_partition) in actual_topic
+            .partitions
+            .iter()
+            .zip(&expected_topic.partition_indexes)
+        {
+            assert_eq!(actual_partition.partition_index, *expected_partition);
+            assert_eq!(actual_partition.committed_offset, -1);
+            assert_eq!(actual_partition.committed_leader_epoch, -1);
+            assert_eq!(actual_partition.metadata, None);
+            assert_eq!(actual_partition.error_code, 0);
+        }
+    }
+}
+
+fn assert_find_coordinator_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::FindCoordinator(request) = request else {
+        panic!("expected supported FindCoordinator fixture");
+    };
+    let ResponseKind::FindCoordinator(response) = response else {
+        panic!("expected supported FindCoordinator response");
+    };
+    assert_eq!(request.key.as_str(), "boundary-supported-coordinator");
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.error_message, None);
+    assert_eq!(response.node_id, BrokerId::from(1));
+    assert_eq!(response.host.as_str(), "127.0.0.1");
+    assert_eq!(response.port, 19_092);
+    assert!(response.coordinators.is_empty());
+}
+
+fn assert_join_group_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::JoinGroup(request) = request else {
+        panic!("expected supported JoinGroup fixture");
+    };
+    let ResponseKind::JoinGroup(response) = response else {
+        panic!("expected supported JoinGroup response");
+    };
+    assert!(
+        request.protocols.is_empty(),
+        "fixture must take validation path"
+    );
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(
+        response.error_code,
+        ResponseError::InconsistentGroupProtocol.code()
+    );
+    assert_eq!(response.generation_id, -1);
+    assert_eq!(response.protocol_type, None);
+    assert_eq!(response.protocol_name, Some(StrBytes::new()));
+    assert!(response.leader.is_empty());
+    assert!(!response.skip_assignment);
+    assert!(response.member_id.is_empty());
+    assert!(response.members.is_empty());
+}
+
+fn assert_heartbeat_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::Heartbeat(request) = request else {
+        panic!("expected supported Heartbeat fixture");
+    };
+    let ResponseKind::Heartbeat(response) = response else {
+        panic!("expected supported Heartbeat response");
+    };
+    assert_eq!(request.group_id.0.as_str(), "boundary-supported-heartbeat");
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, ResponseError::UnknownMemberId.code());
+}
+
+fn assert_leave_group_supported(request: &RequestKind, response: &ResponseKind, version: i16) {
+    let RequestKind::LeaveGroup(request) = request else {
+        panic!("expected supported LeaveGroup fixture");
+    };
+    let ResponseKind::LeaveGroup(response) = response else {
+        panic!("expected supported LeaveGroup response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    if version <= 2 {
+        assert_eq!(response.error_code, ResponseError::UnknownMemberId.code());
+        assert!(response.members.is_empty());
+    } else {
+        assert_eq!(response.error_code, 0);
+        assert_eq!(response.members.len(), request.members.len());
+        for (actual_member, expected_member) in response.members.iter().zip(&request.members) {
+            assert_eq!(actual_member.member_id, expected_member.member_id);
+            assert_eq!(actual_member.group_instance_id, None);
+            assert_eq!(
+                actual_member.error_code,
+                ResponseError::UnknownMemberId.code()
+            );
+        }
+    }
+}
+
+fn assert_sync_group_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::SyncGroup(request) = request else {
+        panic!("expected supported SyncGroup fixture");
+    };
+    let ResponseKind::SyncGroup(response) = response else {
+        panic!("expected supported SyncGroup response");
+    };
+    assert_eq!(request.group_id.0.as_str(), "boundary-supported-sync");
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, ResponseError::UnknownMemberId.code());
+    assert_eq!(response.protocol_type, None);
+    assert_eq!(response.protocol_name, None);
+    assert!(response.assignment.is_empty());
+}
+
+fn assert_describe_groups_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::DescribeGroups(request) = request else {
+        panic!("expected supported DescribeGroups fixture");
+    };
+    let ResponseKind::DescribeGroups(response) = response else {
+        panic!("expected supported DescribeGroups response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.groups.len(), request.groups.len());
+    for (actual_group, expected_group) in response.groups.iter().zip(&request.groups) {
+        assert_eq!(
+            actual_group.error_code,
+            ResponseError::GroupIdNotFound.code()
+        );
+        assert_eq!(actual_group.error_message, None);
+        assert_eq!(actual_group.group_id, *expected_group);
+        assert!(actual_group.group_state.is_empty());
+        assert!(actual_group.protocol_type.is_empty());
+        assert!(actual_group.protocol_data.is_empty());
+        assert!(actual_group.members.is_empty());
+    }
+}
+
+fn assert_list_groups_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::ListGroups(_) = request else {
+        panic!("expected supported ListGroups fixture");
+    };
+    let ResponseKind::ListGroups(response) = response else {
+        panic!("expected supported ListGroups response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.groups.len(), 1);
+    assert_eq!(
+        response.groups[0].group_id.0.as_str(),
+        "boundary-list-group"
+    );
+    assert_eq!(response.groups[0].protocol_type.as_str(), "consumer");
+}
+
+fn assert_create_topics_supported(request: &RequestKind, response: &ResponseKind, version: i16) {
+    let RequestKind::CreateTopics(request) = request else {
+        panic!("expected supported CreateTopics fixture");
+    };
+    let ResponseKind::CreateTopics(response) = response else {
+        panic!("expected supported CreateTopics response");
+    };
+    assert!(
+        request.validate_only,
+        "fixture must leave topic state unchanged"
+    );
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.topics.len(), request.topics.len());
+    for (actual_topic, expected_topic) in response.topics.iter().zip(&request.topics) {
+        assert_eq!(actual_topic.name, expected_topic.name);
+        assert!(actual_topic.topic_id.is_nil());
+        assert_eq!(actual_topic.error_code, 0);
+        assert_eq!(actual_topic.error_message, None);
+        assert_eq!(actual_topic.topic_config_error_code, 0);
+        assert_eq!(
+            actual_topic.num_partitions,
+            if version >= 5 {
+                expected_topic.num_partitions
+            } else {
+                -1
+            }
+        );
+        assert_eq!(
+            actual_topic.replication_factor,
+            if version >= 5 {
+                expected_topic.replication_factor
+            } else {
+                -1
+            }
+        );
+        assert_eq!(actual_topic.configs, Some(Vec::new()));
+    }
+}
+
+fn assert_init_producer_id_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::InitProducerId(request) = request else {
+        panic!("expected supported InitProducerId fixture");
+    };
+    let ResponseKind::InitProducerId(response) = response else {
+        panic!("expected supported InitProducerId response");
+    };
+    assert_eq!(request.transactional_id, None);
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.producer_id, ProducerId::from(1));
+    assert_eq!(response.producer_epoch, 0);
+    assert_eq!(response.ongoing_txn_producer_id, ProducerId::from(-1));
+    assert_eq!(response.ongoing_txn_producer_epoch, -1);
+}
+
+fn assert_describe_configs_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::DescribeConfigs(request) = request else {
+        panic!("expected supported DescribeConfigs fixture");
+    };
+    let ResponseKind::DescribeConfigs(response) = response else {
+        panic!("expected supported DescribeConfigs response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.results.len(), request.resources.len());
+    let expected_errors = [
+        ResponseError::UnknownTopicOrPartition.code(),
+        ResponseError::BrokerNotAvailable.code(),
+    ];
+    for ((actual_result, expected_resource), expected_error) in response
+        .results
+        .iter()
+        .zip(&request.resources)
+        .zip(expected_errors)
+    {
+        assert_eq!(actual_result.error_code, expected_error);
+        assert_eq!(actual_result.error_message, None);
+        assert_eq!(actual_result.resource_type, expected_resource.resource_type);
+        assert_eq!(actual_result.resource_name, expected_resource.resource_name);
+        assert!(actual_result.configs.is_empty());
+    }
 }
 
 fn assert_unsupported(error_code: i16) {
@@ -3526,6 +4166,9 @@ fn assert_metadata_unsupported(request: &RequestKind, response: &ResponseKind, v
     assert!(response.brokers.is_empty());
     assert_eq!(response.cluster_id, None);
     assert_eq!(response.controller_id, BrokerId::from(-1));
+    if version >= 8 {
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
+    }
     if version >= 13 {
         assert_unsupported(response.error_code);
     }
@@ -3536,6 +4179,9 @@ fn assert_metadata_unsupported(request: &RequestKind, response: &ResponseKind, v
         assert_eq!(response_topic.name, request_topic.name);
         if version >= 10 {
             assert_eq!(response_topic.topic_id, request_topic.topic_id);
+        }
+        if version >= 8 {
+            assert_eq!(response_topic.topic_authorized_operations, i32::MIN);
         }
         assert!(!response_topic.is_internal);
         assert!(response_topic.partitions.is_empty());
@@ -3780,6 +4426,48 @@ fn assert_list_groups_unsupported(request: &RequestKind, response: &ResponseKind
     assert!(response.groups.is_empty());
 }
 
+fn assert_api_versions_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::ApiVersions(_) = request else {
+        panic!("expected ApiVersions request fixture");
+    };
+    let ResponseKind::ApiVersions(response) = response else {
+        panic!("expected ApiVersions response");
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.throttle_time_ms, 0);
+    assert!(response.unknown_tagged_fields.is_empty());
+    assert!(response.supported_features.is_empty());
+    assert_eq!(response.finalized_features_epoch, -1);
+    assert!(response.finalized_features.is_empty());
+    assert!(!response.zk_migration_ready);
+    assert_eq!(
+        response
+            .api_keys
+            .iter()
+            .map(|api| (api.api_key, api.min_version, api.max_version))
+            .collect::<Vec<_>>(),
+        vec![
+            (ApiKey::Produce as i16, 7, 7),
+            (ApiKey::Fetch as i16, 4, 4),
+            (ApiKey::ListOffsets as i16, 3, 3),
+            (ApiKey::Metadata as i16, 4, 9),
+            (ApiKey::OffsetCommit as i16, 7, 7),
+            (ApiKey::OffsetFetch as i16, 5, 5),
+            (ApiKey::FindCoordinator as i16, 2, 2),
+            (ApiKey::JoinGroup as i16, 5, 5),
+            (ApiKey::Heartbeat as i16, 3, 3),
+            (ApiKey::LeaveGroup as i16, 1, 3),
+            (ApiKey::SyncGroup as i16, 3, 3),
+            (ApiKey::DescribeGroups as i16, 0, 0),
+            (ApiKey::ListGroups as i16, 0, 0),
+            (ApiKey::ApiVersions as i16, 3, 4),
+            (ApiKey::CreateTopics as i16, 4, 6),
+            (ApiKey::InitProducerId as i16, 0, 0),
+            (ApiKey::DescribeConfigs as i16, 1, 1),
+        ]
+    );
+}
+
 fn assert_api_versions_unsupported(request: &RequestKind, response: &ResponseKind, _: i16) {
     let RequestKind::ApiVersions(_) = request else {
         panic!("expected ApiVersions request fixture");
@@ -3862,6 +4550,8 @@ fn ephemeral_config() -> Config {
             "memkafka",
             "--kafka-listen",
             "127.0.0.1:0",
+            "--kafka-advertised-address",
+            "127.0.0.1:19092",
             "--schema-registry-listen",
             "127.0.0.1:0",
         ])
@@ -3901,8 +4591,9 @@ impl SpawnedServer {
     }
 
     async fn connect(&self) -> TcpStream {
-        TcpStream::connect(self.kafka)
+        timeout(Duration::from_secs(1), TcpStream::connect(self.kafka))
             .await
+            .expect("Kafka connection timed out")
             .expect("connect to Kafka endpoint")
     }
 
@@ -4093,6 +4784,10 @@ fn decode_response_kind(
 ) -> (ResponseHeader, ResponseKind) {
     let header = ResponseHeader::decode(&mut encoded, api_key.response_header_version(version))
         .unwrap_or_else(|error| panic!("decode {api_key:?} v{version} response header: {error}"));
+    assert!(
+        header.unknown_tagged_fields.is_empty(),
+        "{api_key:?} v{version} response header unexpectedly contains unknown tags"
+    );
     let response = ResponseKind::decode(api_key, &mut encoded, version)
         .unwrap_or_else(|error| panic!("decode {api_key:?} v{version} response body: {error}"));
     assert!(
