@@ -210,7 +210,11 @@ mod tests {
         fetch.assert_no_response_bytes("after only the first batch is available");
 
         append_records(&broker, second).await;
-        let (header, response) = decode_fetch_response(fetch.receive().await);
+        let (header, response) = decode_fetch_response(
+            fetch
+                .receive("after the second append satisfied Fetch min_bytes")
+                .await,
+        );
         assert_eq!(header.correlation_id, 164);
         assert_eq!(
             decode_records(
@@ -243,12 +247,35 @@ mod tests {
         fetch.assert_no_response_bytes("one millisecond before the max-wait deadline");
         advance(Duration::from_millis(1)).await;
 
-        let (header, response) = decode_fetch_response(fetch.receive().await);
+        let (header, response) = decode_fetch_response(
+            fetch
+                .receive("after the 100 ms Fetch max-wait deadline elapsed")
+                .await,
+        );
         assert_eq!(header.correlation_id, 167);
         let partition = &response.responses[0].partitions[0];
         assert_eq!(partition.error_code, 0);
         assert!(partition.records.as_ref().is_none_or(Bytes::is_empty));
         fetch.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[should_panic(
+        expected = "Fetch response timed out in real time while the server kept the socket open without a request"
+    )]
+    async fn observed_fetch_receive_times_out_in_real_time_while_socket_stays_open() {
+        let dispatcher = Dispatcher::new(test_broker_state());
+        let mut fetch = ObservedFetchConnection::start(&dispatcher).await;
+        let (_outer_watchdog, outer_expired) = RealTimeWatchdog::start(Duration::from_secs(2));
+
+        tokio::select! {
+            response = fetch.receive(
+                "while the server kept the socket open without a request"
+            ) => panic!("silent Fetch connection returned {} response bytes", response.len()),
+            _ = outer_expired => panic!(
+                "outer watchdog observed an unbounded silent Fetch response wait"
+            ),
+        }
     }
 
     struct ObservedFetchConnection {
@@ -321,11 +348,14 @@ mod tests {
             }
         }
 
-        async fn receive(&mut self) -> Bytes {
-            read_frame(&mut self.client)
-                .await
-                .expect("read loopback Fetch response")
-                .expect("loopback Kafka connection closed before its Fetch response")
+        async fn receive(&mut self, context: &str) -> Bytes {
+            let (_watchdog, expired) = RealTimeWatchdog::start(Duration::from_secs(1));
+            tokio::select! {
+                response = read_frame(&mut self.client) => response
+                    .expect("read loopback Fetch response")
+                    .expect("loopback Kafka connection closed before its Fetch response"),
+                _ = expired => panic!("Fetch response timed out in real time {context}"),
+            }
         }
 
         async fn shutdown(&mut self) {
