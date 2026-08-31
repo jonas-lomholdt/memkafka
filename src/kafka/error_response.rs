@@ -569,6 +569,9 @@ mod tests {
 
     const CORRELATION_ID: i32 = 0x1020_3040;
     const TOPIC_ID: &str = "12345678-1234-5678-9abc-def012345678";
+    const TOPIC_ID_2: &str = "22345678-1234-5678-9abc-def012345678";
+    const TOPIC_ID_3: &str = "32345678-1234-5678-9abc-def012345678";
+    const TOPIC_ID_4: &str = "42345678-1234-5678-9abc-def012345678";
 
     struct ErrorResponseCase {
         api_key: ApiKey,
@@ -859,6 +862,24 @@ mod tests {
                         PartitionProduceData::default()
                             .with_index(7)
                             .with_records(Some(Bytes::from_static(b"records-must-not-echo"))),
+                        PartitionProduceData::default()
+                            .with_index(17)
+                            .with_records(Some(Bytes::from_static(
+                                b"second-records-must-not-echo",
+                            ))),
+                    ]),
+                TopicProduceData::default()
+                    .with_name(topic_name("produce-topic-2"))
+                    .with_topic_id(TOPIC_ID_2.parse().expect("valid topic UUID"))
+                    .with_partition_data(vec![
+                        PartitionProduceData::default()
+                            .with_index(27)
+                            .with_records(Some(Bytes::from_static(b"third-records-must-not-echo"))),
+                        PartitionProduceData::default()
+                            .with_index(37)
+                            .with_records(Some(Bytes::from_static(
+                                b"fourth-records-must-not-echo",
+                            ))),
                     ]),
             ])
     }
@@ -881,6 +902,23 @@ mod tests {
                                 .with_partition(8)
                                 .with_fetch_offset(456)
                                 .with_partition_max_bytes(2_048),
+                            FetchPartition::default()
+                                .with_partition(18)
+                                .with_fetch_offset(556)
+                                .with_partition_max_bytes(2_048),
+                        ]),
+                    FetchTopic::default()
+                        .with_topic(topic_name("fetch-topic-2"))
+                        .with_topic_id(TOPIC_ID_2.parse().expect("valid topic UUID"))
+                        .with_partitions(vec![
+                            FetchPartition::default()
+                                .with_partition(28)
+                                .with_fetch_offset(656)
+                                .with_partition_max_bytes(2_048),
+                            FetchPartition::default()
+                                .with_partition(38)
+                                .with_fetch_offset(756)
+                                .with_partition_max_bytes(2_048),
                         ]),
                 ]),
         )
@@ -897,6 +935,19 @@ mod tests {
                             ListOffsetsPartition::default()
                                 .with_partition_index(9)
                                 .with_timestamp(1_725_000_000_000),
+                            ListOffsetsPartition::default()
+                                .with_partition_index(19)
+                                .with_timestamp(1_725_000_000_001),
+                        ]),
+                    ListOffsetsTopic::default()
+                        .with_name(topic_name("offsets-topic-2"))
+                        .with_partitions(vec![
+                            ListOffsetsPartition::default()
+                                .with_partition_index(29)
+                                .with_timestamp(1_725_000_000_002),
+                            ListOffsetsPartition::default()
+                                .with_partition_index(39)
+                                .with_timestamp(1_725_000_000_003),
                         ]),
                 ]),
         )
@@ -907,6 +958,9 @@ mod tests {
             MetadataRequestTopic::default()
                 .with_name(Some(topic_name("metadata-topic")))
                 .with_topic_id(TOPIC_ID.parse().expect("valid topic UUID")),
+            MetadataRequestTopic::default()
+                .with_name(Some(topic_name("metadata-topic-2")))
+                .with_topic_id(TOPIC_ID_2.parse().expect("valid topic UUID")),
         ])))
     }
 
@@ -926,6 +980,23 @@ mod tests {
                                 .with_committed_metadata(Some(StrBytes::from_static_str(
                                     "metadata-must-not-echo",
                                 ))),
+                            OffsetCommitRequestPartition::default()
+                                .with_partition_index(20)
+                                .with_committed_offset(988)
+                                .with_committed_metadata(Some(StrBytes::from_static_str(
+                                    "second-metadata-must-not-echo",
+                                ))),
+                        ]),
+                    OffsetCommitRequestTopic::default()
+                        .with_name(topic_name("commit-topic-2"))
+                        .with_topic_id(TOPIC_ID_2.parse().expect("valid topic UUID"))
+                        .with_partitions(vec![
+                            OffsetCommitRequestPartition::default()
+                                .with_partition_index(30)
+                                .with_committed_offset(989),
+                            OffsetCommitRequestPartition::default()
+                                .with_partition_index(40)
+                                .with_committed_offset(990),
                         ]),
                 ]),
         )
@@ -939,7 +1010,10 @@ mod tests {
                 .with_topics(Some(vec![
                     OffsetFetchRequestTopic::default()
                         .with_name(topic_name("fetch-offset-topic"))
-                        .with_partition_indexes(vec![11]),
+                        .with_partition_indexes(vec![11, 21]),
+                    OffsetFetchRequestTopic::default()
+                        .with_name(topic_name("fetch-offset-topic-2"))
+                        .with_partition_indexes(vec![31, 41]),
                 ]));
         } else {
             request = request.with_groups(vec![
@@ -949,7 +1023,23 @@ mod tests {
                         OffsetFetchRequestTopics::default()
                             .with_name(topic_name("fetch-offset-topic-v8"))
                             .with_topic_id(TOPIC_ID.parse().expect("valid topic UUID"))
-                            .with_partition_indexes(vec![12]),
+                            .with_partition_indexes(vec![12, 22]),
+                        OffsetFetchRequestTopics::default()
+                            .with_name(topic_name("fetch-offset-topic-v8-2"))
+                            .with_topic_id(TOPIC_ID_2.parse().expect("valid topic UUID"))
+                            .with_partition_indexes(vec![32, 42]),
+                    ])),
+                OffsetFetchRequestGroup::default()
+                    .with_group_id(group_id("fetch-offset-group-v8-2"))
+                    .with_topics(Some(vec![
+                        OffsetFetchRequestTopics::default()
+                            .with_name(topic_name("fetch-offset-topic-v8-3"))
+                            .with_topic_id(TOPIC_ID_3.parse().expect("valid topic UUID"))
+                            .with_partition_indexes(vec![52, 62]),
+                        OffsetFetchRequestTopics::default()
+                            .with_name(topic_name("fetch-offset-topic-v8-4"))
+                            .with_topic_id(TOPIC_ID_4.parse().expect("valid topic UUID"))
+                            .with_partition_indexes(vec![72, 82]),
                     ])),
             ]);
         }
@@ -961,8 +1051,10 @@ mod tests {
         if version <= 3 {
             request = request.with_key(StrBytes::from_static_str("coordinator-key"));
         } else {
-            request = request
-                .with_coordinator_keys(vec![StrBytes::from_static_str("coordinator-key-v4")]);
+            request = request.with_coordinator_keys(vec![
+                StrBytes::from_static_str("coordinator-key-v4"),
+                StrBytes::from_static_str("coordinator-key-v4-2"),
+            ]);
         }
         RequestKind::FindCoordinator(request)
     }
@@ -993,6 +1085,9 @@ mod tests {
                 MemberIdentity::default()
                     .with_member_id(StrBytes::from_static_str("leave-member-v3"))
                     .with_group_instance_id(Some(StrBytes::from_static_str("leave-instance-v3"))),
+                MemberIdentity::default()
+                    .with_member_id(StrBytes::from_static_str("leave-member-v3-2"))
+                    .with_group_instance_id(Some(StrBytes::from_static_str("leave-instance-v3-2"))),
             ]);
         }
         RequestKind::LeaveGroup(request)
@@ -1007,9 +1102,10 @@ mod tests {
     }
 
     fn describe_groups_request(_: i16) -> RequestKind {
-        RequestKind::DescribeGroups(
-            DescribeGroupsRequest::default().with_groups(vec![group_id("described-group")]),
-        )
+        RequestKind::DescribeGroups(DescribeGroupsRequest::default().with_groups(vec![
+            group_id("described-group"),
+            group_id("described-group-2"),
+        ]))
     }
 
     fn list_groups_request(_: i16) -> RequestKind {
@@ -1026,6 +1122,10 @@ mod tests {
                 .with_name(topic_name("created-topic"))
                 .with_num_partitions(5)
                 .with_replication_factor(1),
+            CreatableTopic::default()
+                .with_name(topic_name("created-topic-2"))
+                .with_num_partitions(7)
+                .with_replication_factor(1),
         ]))
     }
 
@@ -1038,6 +1138,9 @@ mod tests {
             DescribeConfigsResource::default()
                 .with_resource_type(2)
                 .with_resource_name(StrBytes::from_static_str("configured-topic")),
+            DescribeConfigsResource::default()
+                .with_resource_type(4)
+                .with_resource_name(StrBytes::from_static_str("configured-broker")),
         ]))
     }
 
@@ -1047,25 +1150,33 @@ mod tests {
         };
         assert_eq!(response.throttle_time_ms, 0);
         assert!(response.node_endpoints.is_empty());
-        let topic = response.responses.first().expect("Produce topic result");
-        if version <= 12 {
-            assert_eq!(topic.name.as_str(), "produce-topic");
-        } else {
-            assert_eq!(topic.topic_id.to_string(), TOPIC_ID);
+        assert_eq!(response.responses.len(), 2);
+        for (topic, (expected_name, expected_id, expected_partitions)) in
+            response.responses.iter().zip([
+                ("produce-topic", TOPIC_ID, [7, 17]),
+                ("produce-topic-2", TOPIC_ID_2, [27, 37]),
+            ])
+        {
+            if version <= 12 {
+                assert_eq!(topic.name.as_str(), expected_name);
+            } else {
+                assert_eq!(topic.topic_id.to_string(), expected_id);
+            }
+            assert_eq!(topic.partition_responses.len(), 2);
+            for (partition, expected_index) in
+                topic.partition_responses.iter().zip(expected_partitions)
+            {
+                assert_eq!(partition.index, expected_index);
+                assert_unsupported(partition.error_code);
+                assert_eq!(partition.base_offset, -1);
+                assert_eq!(partition.log_append_time_ms, -1);
+                assert_eq!(partition.log_start_offset, -1);
+                assert!(partition.record_errors.is_empty());
+                assert_eq!(partition.error_message, None);
+                assert_eq!(partition.current_leader.leader_id, BrokerId::from(-1));
+                assert_eq!(partition.current_leader.leader_epoch, -1);
+            }
         }
-        let partition = topic
-            .partition_responses
-            .first()
-            .expect("Produce partition result");
-        assert_eq!(partition.index, 7);
-        assert_unsupported(partition.error_code);
-        assert_eq!(partition.base_offset, -1);
-        assert_eq!(partition.log_append_time_ms, -1);
-        assert_eq!(partition.log_start_offset, -1);
-        assert!(partition.record_errors.is_empty());
-        assert_eq!(partition.error_message, None);
-        assert_eq!(partition.current_leader.leader_id, BrokerId::from(-1));
-        assert_eq!(partition.current_leader.leader_epoch, -1);
     }
 
     fn assert_fetch(response: &ResponseKind, version: i16) {
@@ -1078,27 +1189,36 @@ mod tests {
         }
         assert_eq!(response.session_id, 0);
         assert!(response.node_endpoints.is_empty());
-        let topic = response.responses.first().expect("Fetch topic result");
-        if version <= 12 {
-            assert_eq!(topic.topic.as_str(), "fetch-topic");
-        } else {
-            assert_eq!(topic.topic_id.to_string(), TOPIC_ID);
+        assert_eq!(response.responses.len(), 2);
+        for (topic, (expected_name, expected_id, expected_partitions)) in
+            response.responses.iter().zip([
+                ("fetch-topic", TOPIC_ID, [8, 18]),
+                ("fetch-topic-2", TOPIC_ID_2, [28, 38]),
+            ])
+        {
+            if version <= 12 {
+                assert_eq!(topic.topic.as_str(), expected_name);
+            } else {
+                assert_eq!(topic.topic_id.to_string(), expected_id);
+            }
+            assert_eq!(topic.partitions.len(), 2);
+            for (partition, expected_index) in topic.partitions.iter().zip(expected_partitions) {
+                assert_eq!(partition.partition_index, expected_index);
+                assert_unsupported(partition.error_code);
+                assert_eq!(partition.high_watermark, -1);
+                assert_eq!(partition.last_stable_offset, -1);
+                assert_eq!(partition.log_start_offset, -1);
+                assert_eq!(partition.diverging_epoch.epoch, -1);
+                assert_eq!(partition.diverging_epoch.end_offset, -1);
+                assert_eq!(partition.current_leader.leader_id, BrokerId::from(-1));
+                assert_eq!(partition.current_leader.leader_epoch, -1);
+                assert_eq!(partition.snapshot_id.end_offset, -1);
+                assert_eq!(partition.snapshot_id.epoch, -1);
+                assert_eq!(partition.aborted_transactions, Some(Vec::new()));
+                assert_eq!(partition.preferred_read_replica, BrokerId::from(-1));
+                assert_eq!(partition.records, Some(Bytes::new()));
+            }
         }
-        let partition = topic.partitions.first().expect("Fetch partition result");
-        assert_eq!(partition.partition_index, 8);
-        assert_unsupported(partition.error_code);
-        assert_eq!(partition.high_watermark, -1);
-        assert_eq!(partition.last_stable_offset, -1);
-        assert_eq!(partition.log_start_offset, -1);
-        assert_eq!(partition.diverging_epoch.epoch, -1);
-        assert_eq!(partition.diverging_epoch.end_offset, -1);
-        assert_eq!(partition.current_leader.leader_id, BrokerId::from(-1));
-        assert_eq!(partition.current_leader.leader_epoch, -1);
-        assert_eq!(partition.snapshot_id.end_offset, -1);
-        assert_eq!(partition.snapshot_id.epoch, -1);
-        assert_eq!(partition.aborted_transactions, Some(Vec::new()));
-        assert_eq!(partition.preferred_read_replica, BrokerId::from(-1));
-        assert_eq!(partition.records, Some(Bytes::new()));
     }
 
     fn assert_list_offsets(response: &ResponseKind, _: i16) {
@@ -1106,17 +1226,22 @@ mod tests {
             panic!("expected ListOffsets response, got {response:?}");
         };
         assert_eq!(response.throttle_time_ms, 0);
-        let topic = response.topics.first().expect("ListOffsets topic result");
-        assert_eq!(topic.name.as_str(), "offsets-topic");
-        let partition = topic
-            .partitions
-            .first()
-            .expect("ListOffsets partition result");
-        assert_eq!(partition.partition_index, 9);
-        assert_unsupported(partition.error_code);
-        assert_eq!(partition.timestamp, -1);
-        assert_eq!(partition.offset, -1);
-        assert_eq!(partition.leader_epoch, -1);
+        assert_eq!(response.topics.len(), 2);
+        for (topic, (expected_name, expected_partitions)) in response
+            .topics
+            .iter()
+            .zip([("offsets-topic", [9, 19]), ("offsets-topic-2", [29, 39])])
+        {
+            assert_eq!(topic.name.as_str(), expected_name);
+            assert_eq!(topic.partitions.len(), 2);
+            for (partition, expected_index) in topic.partitions.iter().zip(expected_partitions) {
+                assert_eq!(partition.partition_index, expected_index);
+                assert_unsupported(partition.error_code);
+                assert_eq!(partition.timestamp, -1);
+                assert_eq!(partition.offset, -1);
+                assert_eq!(partition.leader_epoch, -1);
+            }
+        }
     }
 
     fn assert_metadata(response: &ResponseKind, version: i16) {
@@ -1130,17 +1255,22 @@ mod tests {
         if version >= 13 {
             assert_unsupported(response.error_code);
         }
-        let topic = response.topics.first().expect("Metadata topic result");
-        assert_unsupported(topic.error_code);
-        assert_eq!(
-            topic.name.as_ref().map(|name| name.as_str()),
-            Some("metadata-topic")
-        );
-        if version >= 10 {
-            assert_eq!(topic.topic_id.to_string(), TOPIC_ID);
+        assert_eq!(response.topics.len(), 2);
+        for (topic, (expected_name, expected_id)) in response.topics.iter().zip([
+            ("metadata-topic", TOPIC_ID),
+            ("metadata-topic-2", TOPIC_ID_2),
+        ]) {
+            assert_unsupported(topic.error_code);
+            assert_eq!(
+                topic.name.as_ref().map(|name| name.as_str()),
+                Some(expected_name)
+            );
+            if version >= 10 {
+                assert_eq!(topic.topic_id.to_string(), expected_id);
+            }
+            assert!(!topic.is_internal);
+            assert!(topic.partitions.is_empty());
         }
-        assert!(!topic.is_internal);
-        assert!(topic.partitions.is_empty());
     }
 
     fn assert_offset_commit(response: &ResponseKind, version: i16) {
@@ -1148,18 +1278,24 @@ mod tests {
             panic!("expected OffsetCommit response, got {response:?}");
         };
         assert_eq!(response.throttle_time_ms, 0);
-        let topic = response.topics.first().expect("OffsetCommit topic result");
-        if version <= 9 {
-            assert_eq!(topic.name.as_str(), "commit-topic");
-        } else {
-            assert_eq!(topic.topic_id.to_string(), TOPIC_ID);
+        assert_eq!(response.topics.len(), 2);
+        for (topic, (expected_name, expected_id, expected_partitions)) in
+            response.topics.iter().zip([
+                ("commit-topic", TOPIC_ID, [10, 20]),
+                ("commit-topic-2", TOPIC_ID_2, [30, 40]),
+            ])
+        {
+            if version <= 9 {
+                assert_eq!(topic.name.as_str(), expected_name);
+            } else {
+                assert_eq!(topic.topic_id.to_string(), expected_id);
+            }
+            assert_eq!(topic.partitions.len(), 2);
+            for (partition, expected_index) in topic.partitions.iter().zip(expected_partitions) {
+                assert_eq!(partition.partition_index, expected_index);
+                assert_unsupported(partition.error_code);
+            }
         }
-        let partition = topic
-            .partitions
-            .first()
-            .expect("OffsetCommit partition result");
-        assert_eq!(partition.partition_index, 10);
-        assert_unsupported(partition.error_code);
     }
 
     fn assert_offset_fetch(response: &ResponseKind, version: i16) {
@@ -1172,37 +1308,64 @@ mod tests {
                 assert_unsupported(response.error_code);
             }
             assert!(response.groups.is_empty());
-            let topic = response.topics.first().expect("OffsetFetch topic result");
-            assert_eq!(topic.name.as_str(), "fetch-offset-topic");
-            let partition = topic
-                .partitions
-                .first()
-                .expect("OffsetFetch partition result");
-            assert_eq!(partition.partition_index, 11);
-            assert_eq!(partition.committed_offset, -1);
-            assert_eq!(partition.committed_leader_epoch, -1);
-            assert_eq!(partition.metadata, None);
-            assert_unsupported(partition.error_code);
+            assert_eq!(response.topics.len(), 2);
+            for (topic, (expected_name, expected_partitions)) in response.topics.iter().zip([
+                ("fetch-offset-topic", [11, 21]),
+                ("fetch-offset-topic-2", [31, 41]),
+            ]) {
+                assert_eq!(topic.name.as_str(), expected_name);
+                assert_eq!(topic.partitions.len(), 2);
+                for (partition, expected_index) in topic.partitions.iter().zip(expected_partitions)
+                {
+                    assert_eq!(partition.partition_index, expected_index);
+                    assert_eq!(partition.committed_offset, -1);
+                    assert_eq!(partition.committed_leader_epoch, -1);
+                    assert_eq!(partition.metadata, None);
+                    assert_unsupported(partition.error_code);
+                }
+            }
         } else {
             assert!(response.topics.is_empty());
-            let group = response.groups.first().expect("OffsetFetch group result");
-            assert_eq!(group.group_id.as_str(), "fetch-offset-group-v8");
-            assert_unsupported(group.error_code);
-            let topic = group.topics.first().expect("OffsetFetch v8 topic result");
-            if version <= 9 {
-                assert_eq!(topic.name.as_str(), "fetch-offset-topic-v8");
-            } else {
-                assert_eq!(topic.topic_id.to_string(), TOPIC_ID);
+            assert_eq!(response.groups.len(), 2);
+            for (group, (expected_group_id, expected_topics)) in response.groups.iter().zip([
+                (
+                    "fetch-offset-group-v8",
+                    [
+                        ("fetch-offset-topic-v8", TOPIC_ID, [12, 22]),
+                        ("fetch-offset-topic-v8-2", TOPIC_ID_2, [32, 42]),
+                    ],
+                ),
+                (
+                    "fetch-offset-group-v8-2",
+                    [
+                        ("fetch-offset-topic-v8-3", TOPIC_ID_3, [52, 62]),
+                        ("fetch-offset-topic-v8-4", TOPIC_ID_4, [72, 82]),
+                    ],
+                ),
+            ]) {
+                assert_eq!(group.group_id.as_str(), expected_group_id);
+                assert_unsupported(group.error_code);
+                assert_eq!(group.topics.len(), 2);
+                for (topic, (expected_name, expected_id, expected_partitions)) in
+                    group.topics.iter().zip(expected_topics)
+                {
+                    if version <= 9 {
+                        assert_eq!(topic.name.as_str(), expected_name);
+                    } else {
+                        assert_eq!(topic.topic_id.to_string(), expected_id);
+                    }
+                    assert_eq!(topic.partitions.len(), 2);
+                    for (partition, expected_index) in
+                        topic.partitions.iter().zip(expected_partitions)
+                    {
+                        assert_eq!(partition.partition_index, expected_index);
+                        assert_eq!(partition.committed_offset, -1);
+                        assert_eq!(partition.committed_leader_epoch, -1);
+                        assert_eq!(partition.metadata, None);
+                        assert_unsupported(partition.error_code);
+                    }
+                }
             }
-            let partition = topic
-                .partitions
-                .first()
-                .expect("OffsetFetch v8 partition result");
-            assert_eq!(partition.partition_index, 12);
-            assert_eq!(partition.committed_offset, -1);
-            assert_eq!(partition.committed_leader_epoch, -1);
-            assert_eq!(partition.metadata, None);
-            assert_unsupported(partition.error_code);
         }
     }
 
@@ -1223,16 +1386,19 @@ mod tests {
             assert_eq!(response.port, -1);
             assert!(response.coordinators.is_empty());
         } else {
-            let coordinator = response
+            assert_eq!(response.coordinators.len(), 2);
+            for (coordinator, expected_key) in response
                 .coordinators
-                .first()
-                .expect("FindCoordinator coordinator result");
-            assert_eq!(coordinator.key.as_str(), "coordinator-key-v4");
-            assert_eq!(coordinator.node_id, BrokerId::from(-1));
-            assert!(coordinator.host.is_empty());
-            assert_eq!(coordinator.port, -1);
-            assert_unsupported(coordinator.error_code);
-            assert_eq!(coordinator.error_message, None);
+                .iter()
+                .zip(["coordinator-key-v4", "coordinator-key-v4-2"])
+            {
+                assert_eq!(coordinator.key.as_str(), expected_key);
+                assert_eq!(coordinator.node_id, BrokerId::from(-1));
+                assert!(coordinator.host.is_empty());
+                assert_eq!(coordinator.port, -1);
+                assert_unsupported(coordinator.error_code);
+                assert_eq!(coordinator.error_message, None);
+            }
         }
     }
 
@@ -1266,16 +1432,23 @@ mod tests {
         assert_eq!(response.throttle_time_ms, 0);
         assert_unsupported(response.error_code);
         if version >= 3 {
-            let member = response.members.first().expect("LeaveGroup member result");
-            assert_eq!(member.member_id.as_str(), "leave-member-v3");
-            assert_eq!(
-                member
-                    .group_instance_id
-                    .as_ref()
-                    .map(|value| value.as_str()),
-                Some("leave-instance-v3")
-            );
-            assert_unsupported(member.error_code);
+            assert_eq!(response.members.len(), 2);
+            for (member, (expected_member_id, expected_instance_id)) in
+                response.members.iter().zip([
+                    ("leave-member-v3", "leave-instance-v3"),
+                    ("leave-member-v3-2", "leave-instance-v3-2"),
+                ])
+            {
+                assert_eq!(member.member_id.as_str(), expected_member_id);
+                assert_eq!(
+                    member
+                        .group_instance_id
+                        .as_ref()
+                        .map(|value| value.as_str()),
+                    Some(expected_instance_id)
+                );
+                assert_unsupported(member.error_code);
+            }
         } else {
             assert!(response.members.is_empty());
         }
@@ -1297,16 +1470,19 @@ mod tests {
             panic!("expected DescribeGroups response, got {response:?}");
         };
         assert_eq!(response.throttle_time_ms, 0);
-        let group = response
+        assert_eq!(response.groups.len(), 2);
+        for (group, expected_group_id) in response
             .groups
-            .first()
-            .expect("DescribeGroups group result");
-        assert_unsupported(group.error_code);
-        assert_eq!(group.group_id.as_str(), "described-group");
-        assert!(group.group_state.is_empty());
-        assert!(group.protocol_type.is_empty());
-        assert!(group.protocol_data.is_empty());
-        assert!(group.members.is_empty());
+            .iter()
+            .zip(["described-group", "described-group-2"])
+        {
+            assert_unsupported(group.error_code);
+            assert_eq!(group.group_id.as_str(), expected_group_id);
+            assert!(group.group_state.is_empty());
+            assert!(group.protocol_type.is_empty());
+            assert!(group.protocol_data.is_empty());
+            assert!(group.members.is_empty());
+        }
     }
 
     fn assert_list_groups(response: &ResponseKind, _: i16) {
@@ -1336,15 +1512,21 @@ mod tests {
             panic!("expected CreateTopics response, got {response:?}");
         };
         assert_eq!(response.throttle_time_ms, 0);
-        let topic = response.topics.first().expect("CreateTopics topic result");
-        assert_eq!(topic.name.as_str(), "created-topic");
-        assert!(topic.topic_id.is_nil());
-        assert_unsupported(topic.error_code);
-        assert_eq!(topic.error_message, None);
-        assert_eq!(topic.topic_config_error_code, 0);
-        assert_eq!(topic.num_partitions, -1);
-        assert_eq!(topic.replication_factor, -1);
-        assert_eq!(topic.configs, Some(Vec::new()));
+        assert_eq!(response.topics.len(), 2);
+        for (topic, expected_name) in response
+            .topics
+            .iter()
+            .zip(["created-topic", "created-topic-2"])
+        {
+            assert_eq!(topic.name.as_str(), expected_name);
+            assert!(topic.topic_id.is_nil());
+            assert_unsupported(topic.error_code);
+            assert_eq!(topic.error_message, None);
+            assert_eq!(topic.topic_config_error_code, 0);
+            assert_eq!(topic.num_partitions, -1);
+            assert_eq!(topic.replication_factor, -1);
+            assert_eq!(topic.configs, Some(Vec::new()));
+        }
     }
 
     fn assert_init_producer_id(response: &ResponseKind, _: i16) {
@@ -1364,15 +1546,18 @@ mod tests {
             panic!("expected DescribeConfigs response, got {response:?}");
         };
         assert_eq!(response.throttle_time_ms, 0);
-        let result = response
+        assert_eq!(response.results.len(), 2);
+        for (result, (expected_type, expected_name)) in response
             .results
-            .first()
-            .expect("DescribeConfigs resource result");
-        assert_unsupported(result.error_code);
-        assert_eq!(result.error_message, None);
-        assert_eq!(result.resource_type, 2);
-        assert_eq!(result.resource_name.as_str(), "configured-topic");
-        assert!(result.configs.is_empty());
+            .iter()
+            .zip([(2, "configured-topic"), (4, "configured-broker")])
+        {
+            assert_unsupported(result.error_code);
+            assert_eq!(result.error_message, None);
+            assert_eq!(result.resource_type, expected_type);
+            assert_eq!(result.resource_name.as_str(), expected_name);
+            assert!(result.configs.is_empty());
+        }
     }
 
     fn assert_unsupported(error_code: i16) {
