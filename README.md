@@ -54,15 +54,13 @@ docker run --rm \
 
 ## Aspire and mixed host/container clients
 
-Host processes and containers such as Kafbat reach MemKafka over different networks, so they need different advertised addresses. Bind one Kafka listener per network and give each one its own advertised address; `--kafka-listen` and `--kafka-advertised-address` are repeatable and pair by position. This mirrors the two-listener topology Aspire's own Kafka resource uses (`PLAINTEXT_HOST` for host processes, `PLAINTEXT_INTERNAL` for the container network):
+Host processes and containers such as Kafbat reach MemKafka over different networks, so they need different advertised addresses. Bind one Kafka listener per network with `--kafka-listener`, naming each listener's own advertised address in the same value. This mirrors the two-listener topology Aspire's own Kafka resource uses (`PLAINTEXT_HOST` for host processes, `PLAINTEXT_INTERNAL` for the container network):
 
 ```csharp
 var kafka = builder.AddContainer("kafka", "memkafka")
     .WithArgs(
-        "--kafka-listen", "0.0.0.0:9092",
-        "--kafka-advertised-address", "localhost:9092",
-        "--kafka-listen", "0.0.0.0:9093",
-        "--kafka-advertised-address", "kafka:9093",
+        "--kafka-listener", "listen=0.0.0.0:9092,advertised=localhost:9092",
+        "--kafka-listener", "listen=0.0.0.0:9093,advertised=kafka:9093",
         "--schema-registry-listen", "0.0.0.0:8081",
         "--force-auto-create-topics", "true")
     .WithEndpoint(port: 9092, targetPort: 9092, name: "primary", isProxied: false)
@@ -113,8 +111,9 @@ Point both host clients and container clients at `kafka.127.0.0.1.nip.io:9092`, 
 ## CLI
 
 ```text
---kafka-listen <host:port>              (repeatable)
---kafka-advertised-address <host:port>  (repeatable)
+--kafka-listener listen=<host:port>[,advertised=<host:port>]   (repeatable)
+--kafka-listen <host:port>                                     (single listener)
+--kafka-advertised-address <host:port>                         (single listener)
 --schema-registry-listen <host:port>
 --auto-create-topics <true|false>
 --force-auto-create-topics <true|false>
@@ -123,12 +122,19 @@ Point both host clients and container clients at `kafka.127.0.0.1.nip.io:9092`, 
 --quiet
 ```
 
-`--kafka-listen` and `--kafka-advertised-address` may each be repeated to serve clients that arrive over different networks. The two options pair by position, so the first advertised address belongs to the first listener. Either give one advertised address per listener or none at all: with none, every listener advertises its own bound address, exactly as a single-listener setup does. Any other count is a fatal configuration error. Each connection is answered with the advertised address of the listener it arrived on, in both Metadata and FindCoordinator responses.
+`--kafka-listener` may be repeated to serve clients that arrive over different networks. Each value names its own fields, so a listener and its advertised address cannot drift apart and the order of both the fields and the flags is irrelevant:
+
+- `listen=<host:port>` — required, the address to bind.
+- `advertised=<host:port>` — optional; omitted means the listener advertises its own bound address, exactly as a single-listener setup does.
+
+Each connection is answered with the advertised address of the listener it arrived on, in both Metadata and FindCoordinator responses.
+
+`--kafka-listen` and `--kafka-advertised-address` remain for the single-listener case and are unchanged. Combining them with `--kafka-listener` is rejected.
 
 ```bash
 memkafka \
-  --kafka-listen 0.0.0.0:9092 --kafka-advertised-address localhost:9092 \
-  --kafka-listen 0.0.0.0:9093 --kafka-advertised-address kafka:9093
+  --kafka-listener listen=0.0.0.0:9092,advertised=localhost:9092 \
+  --kafka-listener listen=0.0.0.0:9093,advertised=kafka:9093
 ```
 
 `--force-auto-create-topics true` is an explicit integration-test convenience. When server auto-creation is enabled, it lets named consumer subscriptions create missing topics even if the client sends `allow_auto_topic_creation=false`. The default remains Kafka-compatible and honors the client opt-out.

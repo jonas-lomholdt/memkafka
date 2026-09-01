@@ -2061,14 +2061,10 @@ async fn every_kafka_listener_advertises_its_own_address() {
     let config = Config::try_from(
         Cli::try_parse_from([
             "memkafka",
-            "--kafka-listen",
-            "127.0.0.1:0",
-            "--kafka-advertised-address",
-            "host-clients:19092",
-            "--kafka-listen",
-            "127.0.0.1:0",
-            "--kafka-advertised-address",
-            "container-clients:19093",
+            "--kafka-listener",
+            "listen=127.0.0.1:0,advertised=host-clients:19092",
+            "--kafka-listener",
+            "listen=127.0.0.1:0,advertised=container-clients:19093",
             "--schema-registry-listen",
             "127.0.0.1:0",
         ])

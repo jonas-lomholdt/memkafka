@@ -2,7 +2,7 @@
 
 **Goal:** Serve clients that arrive over different networks by binding one Kafka listener per network and advertising the address that belongs to that listener.
 
-**Architecture:** The advertised Kafka address becomes a property of the listener instead of the broker. `Cli` accepts repeatable `--kafka-listen` and `--kafka-advertised-address` options that pair by position and become `Config::kafka_listeners`. `server::serve` binds each configured listener, resolves its advertised address, and gives each listener its own `Dispatcher`. `BrokerState` no longer carries an advertised address; `Dispatcher` carries it and passes it to the two handlers that report broker coordinates, `metadata` and `find_coordinator`. `connection::serve` is unchanged because the dispatcher it already receives is per listener.
+**Architecture:** The advertised Kafka address becomes a property of the listener instead of the broker. `Cli` accepts a repeatable `--kafka-listener` option whose value states its own fields as `listen=<host:port>[,advertised=<host:port>]`, becoming `Config::kafka_listeners`. Naming the fields keeps a listener and its advertised address together, so neither field nor flag order carries meaning. The single-listener `--kafka-listen` / `--kafka-advertised-address` options stay as they were and cannot be combined with `--kafka-listener`. `server::serve` binds each configured listener, resolves its advertised address, and gives each listener its own `Dispatcher`. `BrokerState` no longer carries an advertised address; `Dispatcher` carries it and passes it to the two handlers that report broker coordinates, `metadata` and `find_coordinator`. `connection::serve` is unchanged because the dispatcher it already receives is per listener.
 
 **Tech Stack:** Rust 1.98.0, Clap 4, Tokio, `kafka-protocol` 0.18.0, and the existing Rust wire-test harness.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- One `--kafka-listen` and at most one `--kafka-advertised-address` behave exactly as before, including the readiness log line.
+- One `--kafka-listen` and at most one `--kafka-advertised-address` behave exactly as before, including the readiness log line, so the `Dockerfile` CMD, `tests/kafbat/run.sh` and the throughput benchmark are unaffected.
 - The advertised-address count must be zero or exactly the listener count; any other count is a fatal configuration error reported before readiness.
 - With no advertised addresses, every listener advertises its own bound address, as a single listener does today.
 - A client is answered with the advertised address of the listener its connection arrived on, in both Metadata and FindCoordinator responses.
@@ -30,7 +30,7 @@
 
 - [x] **Step 1: Write the failing configuration tests**
 
-Add positional-pairing, derive-every-address, and both count-mismatch cases, and restate the defaults test in terms of `kafka_listeners`.
+Add per-listener pairing, field-order independence, derive-own-address, missing `listen`, unknown field, repeated field, malformed field and style-mixing cases, and restate the defaults test in terms of `kafka_listeners`.
 
 - [x] **Step 2: Make both options repeatable**
 
