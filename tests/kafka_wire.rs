@@ -450,7 +450,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
             panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
         }
     };
-    let mut connection = TcpStream::connect(endpoints.kafka)
+    let mut connection = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect to Kafka endpoint");
 
@@ -511,7 +511,7 @@ async fn same_connection_survives_a_typed_unsupported_version_response() {
             panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
         }
     };
-    let mut connection = TcpStream::connect(endpoints.kafka)
+    let mut connection = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect to Kafka endpoint");
 
@@ -907,10 +907,10 @@ async fn fatal_connection_inputs_close_only_the_offending_socket() {
     ];
 
     for (case, frame) in fatal_frames {
-        let mut offender = TcpStream::connect(endpoints.kafka)
+        let mut offender = TcpStream::connect(endpoints.kafka())
             .await
             .unwrap_or_else(|error| panic!("connect offender for {case}: {error}"));
-        let mut survivor = TcpStream::connect(endpoints.kafka)
+        let mut survivor = TcpStream::connect(endpoints.kafka())
             .await
             .unwrap_or_else(|error| panic!("connect survivor for {case}: {error}"));
 
@@ -1666,7 +1666,7 @@ async fn describe_configs_v1_returns_read_only_results_for_every_requested_resou
         .await
         .expect("create topic");
     let response = dispatch_kind(
-        &Dispatcher::new(broker),
+        &test_dispatcher_for(broker),
         ApiKey::DescribeConfigs,
         1,
         RequestKind::DescribeConfigs(DescribeConfigsRequest::default().with_resources(vec![
@@ -1998,7 +1998,7 @@ async fn metadata_v9_auto_creates_two_partitions() {
             panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
         }
     };
-    let mut connection = TcpStream::connect(endpoints.kafka)
+    let mut connection = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect to Kafka endpoint");
 
@@ -2020,11 +2020,11 @@ async fn metadata_v9_auto_creates_two_partitions() {
     assert_eq!(response.brokers[0].node_id, 1);
     assert_eq!(
         response.brokers[0].host.as_str(),
-        endpoints.advertised_kafka.host()
+        endpoints.advertised_kafka().host()
     );
     assert_eq!(
         response.brokers[0].port,
-        i32::from(endpoints.advertised_kafka.port())
+        i32::from(endpoints.advertised_kafka().port())
     );
     assert_eq!(
         response.cluster_id.as_ref().map(StrBytes::as_str),
@@ -2057,10 +2057,105 @@ async fn metadata_v9_auto_creates_two_partitions() {
 }
 
 #[tokio::test]
+async fn every_kafka_listener_advertises_its_own_address() {
+    let config = Config::from(
+        Cli::try_parse_from([
+            "memkafka",
+            "--kafka-listener",
+            "listen=127.0.0.1:0,advertised=host-clients:19092",
+            "--kafka-listener",
+            "listen=127.0.0.1:0,advertised=container-clients:19093",
+            "--schema-registry-listen",
+            "127.0.0.1:0",
+        ])
+        .expect("parse the two-listener configuration"),
+    );
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut server = tokio::spawn(serve(config, ready_tx, async {
+        let _ = shutdown_rx.await;
+    }));
+    let endpoints = match timeout(Duration::from_secs(1), ready_rx).await {
+        Ok(Ok(endpoints)) => endpoints,
+        ready_result => {
+            let server_result = timeout(Duration::from_secs(1), &mut server).await;
+            panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
+        }
+    };
+    let listeners = endpoints.kafka_listeners().to_vec();
+
+    assert_eq!(listeners.len(), 2);
+    assert_ne!(listeners[0].listen(), listeners[1].listen());
+    assert_eq!(endpoints.kafka(), listeners[0].listen());
+
+    for (index, (expected_host, expected_port)) in
+        [("host-clients", 19_092), ("container-clients", 19_093)]
+            .into_iter()
+            .enumerate()
+    {
+        let listener = &listeners[index];
+        assert_eq!(listener.advertised().host(), expected_host);
+        assert_eq!(listener.advertised().port(), expected_port);
+
+        let correlation_id = 2_000 + i32::try_from(index).expect("listener index fits");
+        let mut connection = TcpStream::connect(listener.listen())
+            .await
+            .expect("connect to Kafka listener");
+        write_frame(
+            &mut connection,
+            &encode_metadata_request(correlation_id, "events", true),
+        )
+        .await
+        .expect("write Metadata frame");
+        let (header, response) =
+            decode_metadata_response(read_response(&mut connection, "Metadata").await);
+
+        assert_eq!(header.correlation_id, correlation_id);
+        assert_eq!(response.brokers.len(), 1);
+        assert_eq!(response.brokers[0].node_id, 1);
+        assert_eq!(response.brokers[0].host.as_str(), expected_host);
+        assert_eq!(response.brokers[0].port, i32::from(expected_port));
+    }
+
+    shutdown_tx.send(()).expect("request server shutdown");
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server shutdown timed out")
+        .expect("server task panicked")
+        .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn find_coordinator_v2_uses_the_listener_advertised_address() {
+    let dispatcher = Dispatcher::new(
+        test_broker_state(true),
+        AdvertisedAddress::new("container-clients", 19_093).expect("valid test address"),
+    );
+
+    let response = dispatch_kind(
+        &dispatcher,
+        ApiKey::FindCoordinator,
+        2,
+        RequestKind::FindCoordinator(
+            FindCoordinatorRequest::default().with_key(StrBytes::from_static_str("group")),
+        ),
+    )
+    .await;
+
+    let ResponseKind::FindCoordinator(response) = response else {
+        panic!("expected FindCoordinator response");
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.node_id, BrokerId::from(1));
+    assert_eq!(response.host.as_str(), "container-clients");
+    assert_eq!(response.port, 19_093);
+}
+
+#[tokio::test]
 async fn metadata_requires_server_and_request_auto_creation_flags() {
     let server_disabled = test_broker_state(false);
     let response = dispatch_metadata_request(
-        &Dispatcher::new(server_disabled.clone()),
+        &test_dispatcher_for(server_disabled.clone()),
         101,
         Some(vec!["server-disabled"]),
         true,
@@ -2071,7 +2166,7 @@ async fn metadata_requires_server_and_request_auto_creation_flags() {
 
     let request_disabled = test_broker_state(true);
     let response = dispatch_metadata_request(
-        &Dispatcher::new(request_disabled.clone()),
+        &test_dispatcher_for(request_disabled.clone()),
         102,
         Some(vec!["request-disabled"]),
         false,
@@ -2085,7 +2180,7 @@ async fn metadata_requires_server_and_request_auto_creation_flags() {
 async fn metadata_force_overrides_only_the_named_request_opt_out() {
     let forced = test_broker_state_with_force(true, true);
     let response = dispatch_metadata_request(
-        &Dispatcher::new(forced.clone()),
+        &test_dispatcher_for(forced.clone()),
         104,
         Some(vec!["forced-topic"]),
         false,
@@ -2096,7 +2191,7 @@ async fn metadata_force_overrides_only_the_named_request_opt_out() {
 
     let server_disabled = test_broker_state_with_force(false, true);
     let response = dispatch_metadata_request(
-        &Dispatcher::new(server_disabled.clone()),
+        &test_dispatcher_for(server_disabled.clone()),
         105,
         Some(vec!["still-disabled"]),
         false,
@@ -2107,7 +2202,7 @@ async fn metadata_force_overrides_only_the_named_request_opt_out() {
 
     let before = forced.topics().list().await.len();
     let response =
-        dispatch_metadata_request(&Dispatcher::new(forced.clone()), 106, None, false).await;
+        dispatch_metadata_request(&test_dispatcher_for(forced.clone()), 106, None, false).await;
     assert_eq!(response.topics.len(), before);
     assert_eq!(forced.topics().list().await.len(), before);
 }
@@ -2127,7 +2222,7 @@ async fn metadata_null_topics_lists_catalog_in_name_order_without_mutating() {
         .expect("create alpha");
 
     let response =
-        dispatch_metadata_request(&Dispatcher::new(broker.clone()), 103, None, false).await;
+        dispatch_metadata_request(&test_dispatcher_for(broker.clone()), 103, None, false).await;
     let names = response
         .topics
         .iter()
@@ -2145,7 +2240,7 @@ async fn metadata_maps_invalid_names_to_code_17_without_mutating() {
     let broker = test_broker_state(true);
 
     let response = dispatch_metadata_request(
-        &Dispatcher::new(broker.clone()),
+        &test_dispatcher_for(broker.clone()),
         104,
         Some(vec!["bad/name"]),
         true,
@@ -2171,7 +2266,7 @@ async fn create_topics_v6_creates_six_partitions_over_tcp() {
             panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
         }
     };
-    let mut connection = TcpStream::connect(endpoints.kafka)
+    let mut connection = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect to Kafka endpoint");
 
@@ -2223,7 +2318,7 @@ async fn create_topics_v6_creates_six_partitions_over_tcp() {
 #[tokio::test]
 async fn create_topics_reports_duplicate_without_replacing_metadata() {
     let broker = test_broker_state(true);
-    let dispatcher = Dispatcher::new(broker.clone());
+    let dispatcher = test_dispatcher_for(broker.clone());
 
     let first = dispatch_create_topics_request(
         &dispatcher,
@@ -2269,7 +2364,8 @@ async fn create_topics_maps_unsupported_and_invalid_options_without_mutating() {
     ];
 
     let response =
-        dispatch_create_topics_request(&Dispatcher::new(broker.clone()), 125, topics, false).await;
+        dispatch_create_topics_request(&test_dispatcher_for(broker.clone()), 125, topics, false)
+            .await;
     let codes = response
         .topics
         .iter()
@@ -2291,7 +2387,7 @@ async fn create_topics_validate_only_reports_success_without_mutating() {
     let broker = test_broker_state(true);
 
     let response = dispatch_create_topics_request(
-        &Dispatcher::new(broker.clone()),
+        &test_dispatcher_for(broker.clone()),
         126,
         vec![creatable_topic("preview", 4, 1)],
         true,
@@ -2307,7 +2403,7 @@ async fn create_topics_validate_only_reports_success_without_mutating() {
 #[tokio::test]
 async fn produce_v7_appends_batches_and_returns_contiguous_base_offsets() {
     let broker = test_broker_state(true);
-    let dispatcher = Dispatcher::new(broker.clone());
+    let dispatcher = test_dispatcher_for(broker.clone());
 
     let first = dispatch_produce_request(
         &dispatcher,
@@ -2347,7 +2443,7 @@ async fn idempotent_produce_validates_identity_and_preserves_log_on_rejections()
         .create_explicit("events", 1, 1)
         .await
         .expect("create topic");
-    let dispatcher = Dispatcher::new(broker.clone());
+    let dispatcher = test_dispatcher_for(broker.clone());
     let ResponseKind::InitProducerId(identity) = dispatch_kind(
         &dispatcher,
         ApiKey::InitProducerId,
@@ -2445,7 +2541,7 @@ async fn produce_v7_maps_request_and_partition_errors_without_partial_corruption
         .create_explicit("events", 1, 1)
         .await
         .expect("create topic");
-    let dispatcher = Dispatcher::new(broker);
+    let dispatcher = test_dispatcher_for(broker);
 
     let invalid_acks = dispatch_produce_request(
         &dispatcher,
@@ -2541,7 +2637,7 @@ async fn acks_zero_appends_without_writing_a_produce_response() {
             panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
         }
     };
-    let mut connection = TcpStream::connect(endpoints.kafka)
+    let mut connection = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect to Kafka endpoint");
 
@@ -2610,7 +2706,7 @@ async fn acks_zero_appends_without_writing_a_produce_response() {
 #[tokio::test]
 async fn list_offsets_v3_reports_earliest_latest_and_partition_errors() {
     let broker = test_broker_state(true);
-    let dispatcher = Dispatcher::new(broker);
+    let dispatcher = test_dispatcher_for(broker);
     let produced = dispatch_produce_request(
         &dispatcher,
         150,
@@ -2646,7 +2742,7 @@ async fn list_offsets_v3_reports_earliest_latest_and_partition_errors() {
 #[tokio::test]
 async fn fetch_v4_returns_ordered_records_watermarks_and_partition_errors() {
     let broker = test_broker_state(true);
-    let dispatcher = Dispatcher::new(broker);
+    let dispatcher = test_dispatcher_for(broker);
     dispatch_produce_request(
         &dispatcher,
         160,
@@ -2738,7 +2834,7 @@ async fn fetch_v4_honors_byte_limits_but_returns_the_first_oversized_batch() {
         .create_explicit("events", 2, 1)
         .await
         .expect("create topic");
-    let dispatcher = Dispatcher::new(broker);
+    let dispatcher = test_dispatcher_for(broker);
     let first = record_batch(&["first"]);
     let first_len = i32::try_from(first.len()).expect("small batch");
     dispatch_produce_request(
@@ -4815,7 +4911,7 @@ fn assert_describe_configs_unsupported(request: &RequestKind, response: &Respons
 }
 
 fn ephemeral_config() -> Config {
-    Config::try_from(
+    Config::from(
         Cli::try_parse_from([
             "memkafka",
             "--kafka-listen",
@@ -4827,7 +4923,6 @@ fn ephemeral_config() -> Config {
         ])
         .expect("parse test configuration"),
     )
-    .expect("build test configuration")
 }
 
 struct SpawnedServer {
@@ -4854,7 +4949,7 @@ impl SpawnedServer {
             }
         };
         Self {
-            kafka: endpoints.kafka,
+            kafka: endpoints.kafka(),
             shutdown: Some(shutdown_tx),
             task: Some(task),
         }
@@ -4901,7 +4996,14 @@ async fn read_response(connection: &mut TcpStream, context: &str) -> Bytes {
 }
 
 fn test_dispatcher() -> Dispatcher {
-    Dispatcher::new(test_broker_state(true))
+    test_dispatcher_for(test_broker_state(true))
+}
+
+fn test_dispatcher_for(broker: BrokerState) -> Dispatcher {
+    Dispatcher::new(
+        broker,
+        AdvertisedAddress::new("127.0.0.1", 9092).expect("valid test address"),
+    )
 }
 
 async fn dispatch_kind(
@@ -4979,7 +5081,6 @@ fn test_broker_state_with_force(
 ) -> BrokerState {
     BrokerState::new(
         1,
-        AdvertisedAddress::new("127.0.0.1", 9092).expect("valid test address"),
         auto_create_topics,
         force_auto_create_topics,
         NonZeroU32::new(2).expect("nonzero literal"),

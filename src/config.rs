@@ -1,15 +1,31 @@
-use std::{fmt, net::SocketAddr, num::NonZeroU32, str::FromStr};
+use std::{
+    fmt,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroU32,
+    str::FromStr,
+};
 
 use clap::{ArgAction, Parser, ValueEnum, builder::BoolishValueParser};
+
+const DEFAULT_KAFKA_LISTEN: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092);
 
 #[derive(Debug, Parser)]
 #[command(name = "memkafka", version, about)]
 pub struct Cli {
-    #[arg(long, default_value = "127.0.0.1:9092")]
+    /// Kafka listener as `listen=<host:port>[,advertised=<host:port>]`. Repeat for one listener per
+    /// network. Cannot be combined with --kafka-listen or --kafka-advertised-address.
+    #[arg(
+        long,
+        value_name = "FIELDS",
+        conflicts_with_all = ["kafka_listen", "kafka_advertised_address"]
+    )]
+    kafka_listener: Vec<KafkaListener>,
+
+    #[arg(long, default_value_t = DEFAULT_KAFKA_LISTEN)]
     kafka_listen: SocketAddr,
 
     #[arg(long)]
-    kafka_advertised_address: Option<String>,
+    kafka_advertised_address: Option<AdvertisedAddress>,
 
     #[arg(long, default_value = "127.0.0.1:8081")]
     schema_registry_listen: SocketAddr,
@@ -125,10 +141,83 @@ impl FromStr for AdvertisedAddress {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KafkaListener {
+    pub listen: SocketAddr,
+    pub advertised: Option<AdvertisedAddress>,
+}
+
+impl KafkaListener {
+    pub fn new(listen: SocketAddr, advertised: Option<AdvertisedAddress>) -> Self {
+        Self { listen, advertised }
+    }
+}
+
+const LISTEN_FIELD: &str = "listen";
+const ADVERTISED_FIELD: &str = "advertised";
+
+impl FromStr for KafkaListener {
+    type Err = ConfigError;
+
+    /// Parses `listen=<host:port>[,advertised=<host:port>]`. Fields are order-independent, and an
+    /// omitted `advertised` means the listener advertises its own bound address.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let mut listen = None;
+        let mut advertised = None;
+
+        for field in value.split(',') {
+            let field = field.trim();
+            let Some((key, raw)) = field.split_once('=') else {
+                return Err(ConfigError::invalid_listener(
+                    value,
+                    format!("expected {LISTEN_FIELD}=<host:port> fields, got '{field}'"),
+                ));
+            };
+
+            let raw = raw.trim();
+            match key.trim() {
+                LISTEN_FIELD => {
+                    if listen.is_some() {
+                        return Err(ConfigError::duplicate_listener_field(value, LISTEN_FIELD));
+                    }
+                    listen = Some(raw.parse::<SocketAddr>().map_err(|_| {
+                        ConfigError::invalid_listener(
+                            value,
+                            format!("{LISTEN_FIELD} '{raw}' must be an address literal host:port"),
+                        )
+                    })?);
+                }
+                ADVERTISED_FIELD => {
+                    if advertised.is_some() {
+                        return Err(ConfigError::duplicate_listener_field(
+                            value,
+                            ADVERTISED_FIELD,
+                        ));
+                    }
+                    advertised = Some(AdvertisedAddress::from_str(raw)?);
+                }
+                unknown => {
+                    return Err(ConfigError::invalid_listener(
+                        value,
+                        format!(
+                            "unknown field '{unknown}', expected {LISTEN_FIELD} or {ADVERTISED_FIELD}"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let listen = listen.ok_or_else(|| {
+            ConfigError::invalid_listener(value, format!("missing required {LISTEN_FIELD} field"))
+        })?;
+
+        Ok(Self::new(listen, advertised))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub broker_id: i32,
-    pub kafka_listen: SocketAddr,
-    pub kafka_advertised_address: Option<AdvertisedAddress>,
+    pub kafka_listeners: Vec<KafkaListener>,
     pub schema_registry_listen: SocketAddr,
     pub auto_create_topics: bool,
     pub force_auto_create_topics: bool,
@@ -137,20 +226,23 @@ pub struct Config {
     pub quiet: bool,
 }
 
-impl TryFrom<Cli> for Config {
-    type Error = ConfigError;
+impl From<Cli> for Config {
+    fn from(cli: Cli) -> Self {
+        // --kafka-listener carries every listener explicitly. The older single-listener
+        // --kafka-listen / --kafka-advertised-address pair keeps working unchanged; clap rejects
+        // combining the two styles.
+        let kafka_listeners = if cli.kafka_listener.is_empty() {
+            let listen = cli.kafka_listen;
+            let advertised = cli.kafka_advertised_address;
 
-    fn try_from(cli: Cli) -> Result<Self, Self::Error> {
-        let kafka_advertised_address = cli
-            .kafka_advertised_address
-            .as_deref()
-            .map(AdvertisedAddress::from_str)
-            .transpose()?;
+            vec![KafkaListener::new(listen, advertised)]
+        } else {
+            cli.kafka_listener
+        };
 
-        Ok(Self {
+        Self {
             broker_id: 1,
-            kafka_listen: cli.kafka_listen,
-            kafka_advertised_address,
+            kafka_listeners,
             schema_registry_listen: cli.schema_registry_listen,
             auto_create_topics: cli.auto_create_topics,
             force_auto_create_topics: cli.force_auto_create_topics,
@@ -158,7 +250,7 @@ impl TryFrom<Cli> for Config {
                 .expect("clap rejects a zero partition count"),
             log_level: cli.log_level,
             quiet: cli.quiet,
-        })
+        }
     }
 }
 
@@ -179,6 +271,16 @@ impl ConfigError {
             "invalid Kafka advertised address '{value}': {reason}"
         ))
     }
+
+    fn invalid_listener(value: &str, reason: impl fmt::Display) -> Self {
+        Self::new(format!("invalid Kafka listener '{value}': {reason}"))
+    }
+
+    fn duplicate_listener_field(value: &str, field: &str) -> Self {
+        Self::new(format!(
+            "invalid Kafka listener '{value}': {field} is set more than once"
+        ))
+    }
 }
 
 impl fmt::Display for ConfigError {
@@ -192,18 +294,20 @@ impl std::error::Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{Parser, error::ErrorKind};
 
     #[test]
     fn defaults_match_the_public_contract() {
-        let config = Config::try_from(Cli::try_parse_from(["memkafka"]).unwrap()).unwrap();
+        let config = Config::from(Cli::try_parse_from(["memkafka"]).unwrap());
 
-        assert_eq!(config.kafka_listen, "127.0.0.1:9092".parse().unwrap());
+        assert_eq!(
+            config.kafka_listeners,
+            vec![KafkaListener::new("127.0.0.1:9092".parse().unwrap(), None)]
+        );
         assert_eq!(
             config.schema_registry_listen,
             "127.0.0.1:8081".parse().unwrap()
         );
-        assert_eq!(config.kafka_advertised_address, None);
         assert!(config.auto_create_topics);
         assert!(!config.force_auto_create_topics);
         assert_eq!(config.default_partitions.get(), 2);
@@ -212,11 +316,29 @@ mod tests {
     }
 
     #[test]
+    fn help_reports_the_legacy_kafka_listener_default() {
+        let error = Cli::try_parse_from(["memkafka", "--help"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        let help = error.to_string();
+        let kafka_listen_help = help
+            .split_once("--kafka-listen <KAFKA_LISTEN>")
+            .expect("help includes --kafka-listen")
+            .1
+            .split_once("--kafka-advertised-address")
+            .expect("--kafka-advertised-address follows --kafka-listen")
+            .0;
+
+        assert!(
+            kafka_listen_help.contains("[default: 127.0.0.1:9092]"),
+            "--kafka-listen help did not report its default: {kafka_listen_help}"
+        );
+    }
+
+    #[test]
     fn force_auto_create_topics_accepts_an_explicit_true_value() {
-        let config = Config::try_from(
+        let config = Config::from(
             Cli::try_parse_from(["memkafka", "--force-auto-create-topics", "true"]).unwrap(),
-        )
-        .unwrap();
+        );
 
         assert!(config.force_auto_create_topics);
     }
@@ -230,28 +352,169 @@ mod tests {
 
     #[test]
     fn advertised_address_accepts_a_dns_name() {
-        let config = Config::try_from(
+        let config = Config::from(
             Cli::try_parse_from(["memkafka", "--kafka-advertised-address", "broker:19092"])
                 .unwrap(),
-        )
-        .unwrap();
+        );
 
         assert_eq!(
-            config.kafka_advertised_address,
-            Some(AdvertisedAddress::new("broker", 19092).unwrap())
+            config.kafka_listeners,
+            vec![KafkaListener::new(
+                "127.0.0.1:9092".parse().unwrap(),
+                Some(AdvertisedAddress::new("broker", 19092).unwrap())
+            )]
         );
     }
 
     #[test]
-    fn advertised_address_rejects_a_missing_port() {
-        let error = Config::try_from(
-            Cli::try_parse_from(["memkafka", "--kafka-advertised-address", "broker"]).unwrap(),
-        )
-        .unwrap_err();
+    fn a_listener_pairs_its_own_advertised_address() {
+        let config = Config::from(
+            Cli::try_parse_from([
+                "memkafka",
+                "--kafka-listener",
+                "listen=0.0.0.0:9092,advertised=localhost:9092",
+                "--kafka-listener",
+                "listen=0.0.0.0:9093,advertised=kafka:9093",
+            ])
+            .unwrap(),
+        );
 
         assert_eq!(
-            error.to_string(),
-            "invalid Kafka advertised address 'broker': expected host:port"
+            config.kafka_listeners,
+            vec![
+                KafkaListener::new(
+                    "0.0.0.0:9092".parse().unwrap(),
+                    Some(AdvertisedAddress::new("localhost", 9092).unwrap())
+                ),
+                KafkaListener::new(
+                    "0.0.0.0:9093".parse().unwrap(),
+                    Some(AdvertisedAddress::new("kafka", 9093).unwrap())
+                ),
+            ]
         );
+    }
+
+    #[test]
+    fn listener_fields_are_order_independent() {
+        let config = Config::from(
+            Cli::try_parse_from([
+                "memkafka",
+                "--kafka-listener",
+                "advertised=kafka:9093, listen=0.0.0.0:9093",
+            ])
+            .unwrap(),
+        );
+
+        assert_eq!(
+            config.kafka_listeners,
+            vec![KafkaListener::new(
+                "0.0.0.0:9093".parse().unwrap(),
+                Some(AdvertisedAddress::new("kafka", 9093).unwrap())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_listener_without_an_advertised_field_derives_its_own_address() {
+        let config = Config::from(
+            Cli::try_parse_from(["memkafka", "--kafka-listener", "listen=0.0.0.0:9092"]).unwrap(),
+        );
+
+        assert_eq!(
+            config.kafka_listeners,
+            vec![KafkaListener::new("0.0.0.0:9092".parse().unwrap(), None)]
+        );
+    }
+
+    #[test]
+    fn a_listener_without_a_listen_field_is_rejected() {
+        let error = Cli::try_parse_from(["memkafka", "--kafka-listener", "advertised=kafka:9093"])
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(error.to_string().contains("missing required listen field"));
+    }
+
+    #[test]
+    fn a_listener_with_an_unknown_field_is_rejected() {
+        let error = Cli::try_parse_from([
+            "memkafka",
+            "--kafka-listener",
+            "listen=0.0.0.0:9092,name=HOST",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(error.to_string().contains("unknown field 'name'"));
+    }
+
+    #[test]
+    fn a_listener_repeating_the_listen_field_is_rejected() {
+        let error = Cli::try_parse_from([
+            "memkafka",
+            "--kafka-listener",
+            "listen=0.0.0.0:9092,listen=0.0.0.0:9093",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(error.to_string().contains("listen is set more than once"));
+    }
+
+    #[test]
+    fn a_listener_repeating_the_advertised_field_is_rejected() {
+        let error = Cli::try_parse_from([
+            "memkafka",
+            "--kafka-listener",
+            "listen=0.0.0.0:9092,advertised=host:9092,advertised=container:9093",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(
+            error
+                .to_string()
+                .contains("advertised is set more than once")
+        );
+    }
+
+    #[test]
+    fn a_listener_field_without_a_value_is_rejected() {
+        let error =
+            Cli::try_parse_from(["memkafka", "--kafka-listener", "0.0.0.0:9092"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(error.to_string().contains("expected listen=<host:port>"));
+    }
+
+    #[test]
+    fn each_legacy_listener_option_conflicts_with_the_multi_listener_style() {
+        for (legacy_option, legacy_value) in [
+            ("--kafka-listen", "0.0.0.0:9093"),
+            ("--kafka-advertised-address", "legacy:9093"),
+        ] {
+            let error = Cli::try_parse_from([
+                "memkafka",
+                "--kafka-listener",
+                "listen=0.0.0.0:9092",
+                legacy_option,
+                legacy_value,
+            ])
+            .unwrap_err();
+            let rendered = error.to_string();
+
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+            assert!(rendered.contains("--kafka-listener"));
+            assert!(rendered.contains(legacy_option));
+        }
+    }
+
+    #[test]
+    fn advertised_address_rejects_a_missing_port() {
+        let error =
+            Cli::try_parse_from(["memkafka", "--kafka-advertised-address", "broker"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(error.to_string().contains("expected host:port"));
     }
 }
