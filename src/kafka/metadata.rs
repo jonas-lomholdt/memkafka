@@ -9,12 +9,19 @@ use kafka_protocol::{
     protocol::StrBytes,
 };
 
-use crate::broker::{
-    BrokerState,
-    topics::{TopicError, TopicMetadata},
+use crate::{
+    broker::{
+        BrokerState,
+        topics::{TopicError, TopicMetadata},
+    },
+    config::AdvertisedAddress,
 };
 
-pub(crate) async fn response(request: &MetadataRequest, broker: &BrokerState) -> MetadataResponse {
+pub(crate) async fn response(
+    request: &MetadataRequest,
+    broker: &BrokerState,
+    advertised_kafka: &AdvertisedAddress,
+) -> MetadataResponse {
     let topics = match &request.topics {
         None => broker
             .topics()
@@ -58,10 +65,8 @@ pub(crate) async fn response(request: &MetadataRequest, broker: &BrokerState) ->
         .with_brokers(vec![
             MetadataResponseBroker::default()
                 .with_node_id(BrokerId::from(broker.broker_id()))
-                .with_host(StrBytes::from_string(
-                    broker.advertised_kafka().host().to_owned(),
-                ))
-                .with_port(i32::from(broker.advertised_kafka().port())),
+                .with_host(StrBytes::from_string(advertised_kafka.host().to_owned()))
+                .with_port(i32::from(advertised_kafka.port())),
         ])
         .with_cluster_id(Some(StrBytes::from_static_str("memkafka")))
         .with_controller_id(BrokerId::from(broker.broker_id()))

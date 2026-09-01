@@ -70,8 +70,9 @@ Storage                 memory only
 The following settings must be configurable through stable command-line options:
 
 ```text
---kafka-listen <host:port>
---kafka-advertised-address <host:port>
+--kafka-listener listen=<host:port>[,advertised=<host:port>]   (repeatable)
+--kafka-listen <host:port>                                     (single listener)
+--kafka-advertised-address <host:port>                         (single listener)
 --schema-registry-listen <host:port>
 --auto-create-topics <true|false>
 --force-auto-create-topics <true|false>
@@ -80,7 +81,7 @@ The following settings must be configurable through stable command-line options:
 --quiet
 ```
 
-Configuration errors and address-binding failures are fatal and must be reported before readiness. Once both listeners are accepting connections, MemKafka emits one unambiguous readiness log line containing both resolved endpoints. `--quiet` suppresses the banner and ordinary informational logs, but not fatal startup errors.
+Configuration errors and address-binding failures are fatal and must be reported before readiness. Once every listener is accepting connections, MemKafka emits one unambiguous readiness log line containing the resolved endpoints; repeated Kafka listeners and their advertised addresses appear as comma-separated lists in listener order. `--quiet` suppresses the banner and ordinary informational logs, but not fatal startup errors.
 
 Auto-creation may be triggered by a topic-specific metadata lookup or a Produce request. By default, a named metadata request that sets Kafka's `allow_auto_topic_creation=false` is respected. When both `--auto-create-topics true` and `--force-auto-create-topics true` are set, MemKafka deliberately overrides that client opt-out for named metadata requests; this convenience mode exists for integration-test applications whose consumers do not expose or enable auto-creation. Force mode never creates topics when server auto-creation is disabled, and a metadata request for all topics still lists without mutation. Explicit topic creation always overrides the default partition count.
 
@@ -94,7 +95,7 @@ v0.1 must include a root-level `Dockerfile`, even though running the native bina
 - expose Kafka on port `9092` and Schema Registry on port `8081`;
 - bind both servers to `0.0.0.0` inside the container;
 - default the Kafka advertised address to `127.0.0.1:9092` for deterministic IPv4 host-to-container use;
-- allow the advertised address to be overridden for Docker Compose or other container networks;
+- allow the advertised address to be overridden for Docker Compose or other container networks, per listener;
 - use an exec-form entrypoint so shutdown signals reach MemKafka directly;
 - contain no Java runtime, Kafka distribution, build toolchain, or source code in the final runtime layer.
 
@@ -109,7 +110,9 @@ docker run --rm -p 9092:9092 -p 8081:8081 memkafka
 
 Container support is a packaging requirement, not a separate runtime implementation. The image runs the exact same binary and acceptance suite as native execution.
 
-For mixed host/container development, the documented Aspire pattern uses one explicit IPv4-only DNS name as the advertised Kafka address and registers that same name as the MemKafka container-network alias. This lets host processes and containers such as Kafbat share one address without adding separate internal/external listener profiles. Applications whose consumers opt out of Kafka topic auto-creation may also enable `--force-auto-create-topics true` explicitly.
+For mixed host/container development, the advertised Kafka address is a property of the listener a client connected on, not of the broker. `--kafka-listener` is therefore repeatable and states each listener's fields explicitly as `listen=<host:port>[,advertised=<host:port>]`: MemKafka binds one Kafka listener per network and answers every Metadata and FindCoordinator request with the advertised address of the listener that received it. Naming the fields keeps a listener and its advertised address together, so field order within one value carries no meaning, and an omitted `advertised` means that listener advertises its own bound address. Repeated flags retain their order in readiness output and the first listener remains the primary compatibility endpoint. An unknown or repeated field, or a missing `listen`, is a fatal configuration error. This matches the two-listener topology Aspire's own Kafka resource uses, one endpoint for host processes and one for the container network, so mixed host/container setups need no shared hostname. The single-listener `--kafka-listen` and `--kafka-advertised-address` options are unchanged, and combining the two styles is rejected.
+
+A single listener remains fully supported and unchanged. Where every client can resolve the same name, the previously documented Aspire pattern still applies: use one explicit IPv4-only DNS name as the advertised Kafka address and register that same name as the MemKafka container-network alias. This lets host processes and containers such as Kafbat share one address without adding separate internal/external listener profiles. Applications whose consumers opt out of Kafka topic auto-creation may also enable `--force-auto-create-topics true` explicitly.
 
 ## 5. Architecture
 

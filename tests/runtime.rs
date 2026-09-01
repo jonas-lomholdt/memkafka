@@ -9,7 +9,7 @@ use kafka_protocol::protocol::{Decodable, StrBytes, encode_request_header_into_b
 use memkafka::{
     config::{AdvertisedAddress, Cli, Config},
     kafka::frame::{read_frame, write_frame},
-    server::{BoundEndpoints, readiness_message, serve},
+    server::{BoundEndpoints, BoundKafkaListener, readiness_message, serve},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -19,7 +19,7 @@ use tokio::{
 };
 
 fn ephemeral_config() -> Config {
-    Config::try_from(
+    Config::from(
         Cli::try_parse_from([
             "memkafka",
             "--kafka-listen",
@@ -29,20 +29,43 @@ fn ephemeral_config() -> Config {
         ])
         .unwrap(),
     )
-    .unwrap()
 }
 
 #[test]
 fn readiness_message_names_both_resolved_endpoints() {
     let endpoints = BoundEndpoints::new(
-        "127.0.0.1:19092".parse().unwrap(),
+        vec![BoundKafkaListener::new(
+            "127.0.0.1:19092".parse().unwrap(),
+            AdvertisedAddress::new("broker", 19092).unwrap(),
+        )],
         "127.0.0.1:18081".parse().unwrap(),
-        AdvertisedAddress::new("broker", 19092).unwrap(),
     );
 
     assert_eq!(
         readiness_message(&endpoints),
         "MemKafka ready kafka=127.0.0.1:19092 schema_registry=http://127.0.0.1:18081 advertised_kafka=broker:19092"
+    );
+}
+
+#[test]
+fn readiness_message_names_every_kafka_listener() {
+    let endpoints = BoundEndpoints::new(
+        vec![
+            BoundKafkaListener::new(
+                "0.0.0.0:9092".parse().unwrap(),
+                AdvertisedAddress::new("localhost", 9092).unwrap(),
+            ),
+            BoundKafkaListener::new(
+                "0.0.0.0:9093".parse().unwrap(),
+                AdvertisedAddress::new("kafka", 9093).unwrap(),
+            ),
+        ],
+        "127.0.0.1:18081".parse().unwrap(),
+    );
+
+    assert_eq!(
+        readiness_message(&endpoints),
+        "MemKafka ready kafka=0.0.0.0:9092,0.0.0.0:9093 schema_registry=http://127.0.0.1:18081 advertised_kafka=localhost:9092,kafka:9093"
     );
 }
 
@@ -62,9 +85,14 @@ async fn both_endpoints_accept_connections_until_shutdown() {
         }
     };
 
-    TcpStream::connect(endpoints.kafka).await.unwrap();
-    TcpStream::connect(endpoints.schema_registry).await.unwrap();
-    assert_eq!(endpoints.advertised_kafka.port(), endpoints.kafka.port());
+    TcpStream::connect(endpoints.kafka()).await.unwrap();
+    TcpStream::connect(endpoints.schema_registry())
+        .await
+        .unwrap();
+    assert_eq!(
+        endpoints.advertised_kafka().port(),
+        endpoints.kafka().port()
+    );
 
     shutdown_tx.send(()).unwrap();
     timeout(Duration::from_secs(1), server)
@@ -78,7 +106,7 @@ async fn both_endpoints_accept_connections_until_shutdown() {
 async fn kafka_bind_failure_is_reported_before_readiness() {
     let reserved_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let reserved_address = reserved_listener.local_addr().unwrap();
-    let config = Config::try_from(
+    let config = Config::from(
         Cli::try_parse_from([
             "memkafka",
             "--kafka-listen",
@@ -87,8 +115,7 @@ async fn kafka_bind_failure_is_reported_before_readiness() {
             "127.0.0.1:0",
         ])
         .unwrap(),
-    )
-    .unwrap();
+    );
     let (ready_tx, ready_rx) = oneshot::channel();
 
     let error = serve(config, ready_tx, std::future::pending())
@@ -96,6 +123,29 @@ async fn kafka_bind_failure_is_reported_before_readiness() {
         .unwrap_err();
 
     assert!(error.to_string().contains("failed to bind Kafka listener"));
+    assert!(ready_rx.await.is_err());
+}
+
+#[tokio::test]
+async fn empty_kafka_listener_configuration_is_rejected_before_readiness() {
+    let mut config = ephemeral_config();
+    config.kafka_listeners.clear();
+    let (ready_tx, mut ready_rx) = oneshot::channel();
+    let server = serve(config, ready_tx, std::future::pending());
+    tokio::pin!(server);
+
+    let result = timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            biased;
+            result = &mut server => result,
+            ready = &mut ready_rx => panic!("server reported readiness without a Kafka listener: {ready:?}"),
+        }
+    })
+    .await
+    .expect("empty Kafka listener configuration did not fail");
+
+    let error = result.expect_err("empty Kafka listener configuration was accepted");
+    assert!(error.to_string().contains("at least one Kafka listener"));
     assert!(ready_rx.await.is_err());
 }
 
@@ -110,7 +160,9 @@ async fn shutdown_bounds_an_incomplete_schema_registry_request() {
         .await
         .unwrap()
         .unwrap();
-    let mut client = TcpStream::connect(endpoints.schema_registry).await.unwrap();
+    let mut client = TcpStream::connect(endpoints.schema_registry())
+        .await
+        .unwrap();
     client
         .write_all(
             b"POST /subjects/slow/versions HTTP/1.1\r\n\
@@ -142,10 +194,10 @@ async fn connection_failure_does_not_stop_the_kafka_listener() {
         .await
         .expect("server readiness timed out")
         .expect("server readiness channel closed");
-    let mut offender = TcpStream::connect(endpoints.kafka)
+    let mut offender = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect offending Kafka socket");
-    let mut survivor = TcpStream::connect(endpoints.kafka)
+    let mut survivor = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect surviving Kafka socket");
 

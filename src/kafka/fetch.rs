@@ -192,7 +192,7 @@ mod tests {
             .create_explicit("events", 1, 1)
             .await
             .expect("create topic");
-        let dispatcher = Dispatcher::new(broker.clone());
+        let dispatcher = test_dispatcher(broker.clone());
         let first = record_batch(&["first"]);
         let second = record_batch(&["second"]);
         let min_bytes = i32::try_from(first.len() + second.len()).expect("small batches");
@@ -237,7 +237,7 @@ mod tests {
             .create_explicit("events", 1, 1)
             .await
             .expect("create topic");
-        let dispatcher = Dispatcher::new(broker);
+        let dispatcher = test_dispatcher(broker);
         let mut fetch = ObservedFetchConnection::start(&dispatcher).await;
         fetch.send(&encode_fetch_request(167, 100, 1)).await;
         fetch.wait_until_registered("initial Fetch wait").await;
@@ -264,7 +264,7 @@ mod tests {
         expected = "Fetch response timed out in real time while the server kept the socket open without a request"
     )]
     async fn observed_fetch_receive_times_out_in_real_time_while_socket_stays_open() {
-        let dispatcher = Dispatcher::new(test_broker_state());
+        let dispatcher = test_dispatcher(test_broker_state());
         let mut fetch = ObservedFetchConnection::start(&dispatcher).await;
         let (_outer_watchdog, outer_expired) = RealTimeWatchdog::start(Duration::from_secs(2));
 
@@ -437,10 +437,16 @@ mod tests {
     fn test_broker_state() -> BrokerState {
         BrokerState::new(
             1,
-            AdvertisedAddress::new("127.0.0.1", 9092).expect("valid test address"),
             false,
             false,
             NonZeroU32::new(1).expect("nonzero literal"),
+        )
+    }
+
+    fn test_dispatcher(broker: BrokerState) -> Dispatcher {
+        Dispatcher::new(
+            broker,
+            AdvertisedAddress::new("127.0.0.1", 9092).expect("valid test address"),
         )
     }
 

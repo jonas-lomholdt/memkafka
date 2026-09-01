@@ -10,10 +10,7 @@ use tokio::sync::oneshot;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let config = match Config::try_from(Cli::parse()) {
-        Ok(config) => config,
-        Err(error) => return fatal(error),
-    };
+    let config = Config::from(Cli::parse());
 
     if let Err(error) = logging::init(config.log_level, config.quiet) {
         return fatal(error);

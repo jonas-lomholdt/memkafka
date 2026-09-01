@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     broker::BrokerState,
-    config::{AdvertisedAddress, Config},
+    config::{AdvertisedAddress, Config, KafkaListener},
     kafka::{connection, dispatcher::Dispatcher},
     schema_registry::{Registry, router as schema_registry_router},
 };
@@ -19,31 +19,78 @@ use crate::{
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundKafkaListener {
+    listen: SocketAddr,
+    advertised: AdvertisedAddress,
+}
+
+impl BoundKafkaListener {
+    pub fn new(listen: SocketAddr, advertised: AdvertisedAddress) -> Self {
+        Self { listen, advertised }
+    }
+
+    pub fn listen(&self) -> SocketAddr {
+        self.listen
+    }
+
+    pub fn advertised(&self) -> &AdvertisedAddress {
+        &self.advertised
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundEndpoints {
-    pub kafka: SocketAddr,
-    pub schema_registry: SocketAddr,
-    pub advertised_kafka: AdvertisedAddress,
+    kafka: Vec<BoundKafkaListener>,
+    schema_registry: SocketAddr,
 }
 
 impl BoundEndpoints {
-    pub fn new(
-        kafka: SocketAddr,
-        schema_registry: SocketAddr,
-        advertised_kafka: AdvertisedAddress,
-    ) -> Self {
+    pub fn new(kafka: Vec<BoundKafkaListener>, schema_registry: SocketAddr) -> Self {
         Self {
             kafka,
             schema_registry,
-            advertised_kafka,
         }
+    }
+
+    pub fn kafka_listeners(&self) -> &[BoundKafkaListener] {
+        &self.kafka
+    }
+
+    pub fn primary_kafka(&self) -> &BoundKafkaListener {
+        self.kafka
+            .first()
+            .expect("MemKafka binds at least one Kafka listener")
+    }
+
+    pub fn kafka(&self) -> SocketAddr {
+        self.primary_kafka().listen()
+    }
+
+    pub fn advertised_kafka(&self) -> &AdvertisedAddress {
+        self.primary_kafka().advertised()
+    }
+
+    pub fn schema_registry(&self) -> SocketAddr {
+        self.schema_registry
     }
 }
 
 pub fn readiness_message(endpoints: &BoundEndpoints) -> String {
     format!(
         "MemKafka ready kafka={} schema_registry=http://{} advertised_kafka={}",
-        endpoints.kafka, endpoints.schema_registry, endpoints.advertised_kafka
+        joined(endpoints, |listener| listener.listen().to_string()),
+        endpoints.schema_registry,
+        joined(endpoints, |listener| listener.advertised().to_string())
     )
+}
+
+fn joined(endpoints: &BoundEndpoints, describe: impl Fn(&BoundKafkaListener) -> String) -> String {
+    endpoints
+        .kafka_listeners()
+        .iter()
+        .map(describe)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 pub async fn serve<F>(
@@ -54,9 +101,14 @@ pub async fn serve<F>(
 where
     F: Future<Output = ()> + Send,
 {
-    let kafka_listener = TcpListener::bind(config.kafka_listen)
-        .await
-        .with_context(|| format!("failed to bind Kafka listener at {}", config.kafka_listen))?;
+    if config.kafka_listeners.is_empty() {
+        return Err(anyhow!("at least one Kafka listener is required"));
+    }
+
+    let mut kafka_listeners = Vec::with_capacity(config.kafka_listeners.len());
+    for listener_config in &config.kafka_listeners {
+        kafka_listeners.push(bind_kafka_listener(listener_config).await?);
+    }
     let schema_registry_listener = TcpListener::bind(config.schema_registry_listen)
         .await
         .with_context(|| {
@@ -66,20 +118,18 @@ where
             )
         })?;
 
-    let kafka_address = kafka_listener
-        .local_addr()
-        .context("failed to read bound Kafka listener address")?;
     let schema_registry_address = schema_registry_listener
         .local_addr()
         .context("failed to read bound Schema Registry listener address")?;
-    let advertised_kafka = config.kafka_advertised_address.unwrap_or(
-        AdvertisedAddress::new(kafka_address.ip().to_string(), kafka_address.port())
-            .context("failed to derive Kafka advertised address")?,
+    let endpoints = BoundEndpoints::new(
+        kafka_listeners
+            .iter()
+            .map(|(_, bound)| bound.clone())
+            .collect(),
+        schema_registry_address,
     );
-    let endpoints = BoundEndpoints::new(kafka_address, schema_registry_address, advertised_kafka);
     let broker = BrokerState::new(
         config.broker_id,
-        endpoints.advertised_kafka.clone(),
         config.auto_create_topics,
         config.force_auto_create_topics,
         config.default_partitions,
@@ -87,11 +137,13 @@ where
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut servers = JoinSet::new();
-    servers.spawn(run_kafka_listener(
-        kafka_listener,
-        Dispatcher::new(broker),
-        shutdown_rx.clone(),
-    ));
+    for (listener, bound) in kafka_listeners {
+        servers.spawn(run_kafka_listener(
+            listener,
+            Dispatcher::new(broker.clone(), bound.advertised().clone()),
+            shutdown_rx.clone(),
+        ));
+    }
     servers.spawn(run_schema_registry_listener(
         schema_registry_listener,
         Registry::new(),
@@ -128,6 +180,29 @@ where
     }
 
     result
+}
+
+async fn bind_kafka_listener(
+    listener_config: &KafkaListener,
+) -> Result<(TcpListener, BoundKafkaListener)> {
+    let listener = TcpListener::bind(listener_config.listen)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to bind Kafka listener at {}",
+                listener_config.listen
+            )
+        })?;
+    let address = listener
+        .local_addr()
+        .context("failed to read bound Kafka listener address")?;
+    let advertised = match &listener_config.advertised {
+        Some(advertised) => advertised.clone(),
+        None => AdvertisedAddress::new(address.ip().to_string(), address.port())
+            .context("failed to derive Kafka advertised address")?,
+    };
+
+    Ok((listener, BoundKafkaListener::new(address, advertised)))
 }
 
 async fn drain_servers(servers: &mut JoinSet<Result<()>>, result: &mut Result<()>) {
