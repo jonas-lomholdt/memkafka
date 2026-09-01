@@ -9,7 +9,7 @@ use kafka_protocol::protocol::{Decodable, StrBytes, encode_request_header_into_b
 use memkafka::{
     config::{AdvertisedAddress, Cli, Config},
     kafka::frame::{read_frame, write_frame},
-    server::{BoundEndpoints, readiness_message, serve},
+    server::{BoundEndpoints, BoundKafkaListener, readiness_message, serve},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -35,14 +35,38 @@ fn ephemeral_config() -> Config {
 #[test]
 fn readiness_message_names_both_resolved_endpoints() {
     let endpoints = BoundEndpoints::new(
-        "127.0.0.1:19092".parse().unwrap(),
+        vec![BoundKafkaListener::new(
+            "127.0.0.1:19092".parse().unwrap(),
+            AdvertisedAddress::new("broker", 19092).unwrap(),
+        )],
         "127.0.0.1:18081".parse().unwrap(),
-        AdvertisedAddress::new("broker", 19092).unwrap(),
     );
 
     assert_eq!(
         readiness_message(&endpoints),
         "MemKafka ready kafka=127.0.0.1:19092 schema_registry=http://127.0.0.1:18081 advertised_kafka=broker:19092"
+    );
+}
+
+#[test]
+fn readiness_message_names_every_kafka_listener() {
+    let endpoints = BoundEndpoints::new(
+        vec![
+            BoundKafkaListener::new(
+                "0.0.0.0:9092".parse().unwrap(),
+                AdvertisedAddress::new("localhost", 9092).unwrap(),
+            ),
+            BoundKafkaListener::new(
+                "0.0.0.0:9093".parse().unwrap(),
+                AdvertisedAddress::new("kafka", 9093).unwrap(),
+            ),
+        ],
+        "127.0.0.1:18081".parse().unwrap(),
+    );
+
+    assert_eq!(
+        readiness_message(&endpoints),
+        "MemKafka ready kafka=0.0.0.0:9092,0.0.0.0:9093 schema_registry=http://127.0.0.1:18081 advertised_kafka=localhost:9092,kafka:9093"
     );
 }
 
@@ -62,9 +86,14 @@ async fn both_endpoints_accept_connections_until_shutdown() {
         }
     };
 
-    TcpStream::connect(endpoints.kafka).await.unwrap();
-    TcpStream::connect(endpoints.schema_registry).await.unwrap();
-    assert_eq!(endpoints.advertised_kafka.port(), endpoints.kafka.port());
+    TcpStream::connect(endpoints.kafka()).await.unwrap();
+    TcpStream::connect(endpoints.schema_registry())
+        .await
+        .unwrap();
+    assert_eq!(
+        endpoints.advertised_kafka().port(),
+        endpoints.kafka().port()
+    );
 
     shutdown_tx.send(()).unwrap();
     timeout(Duration::from_secs(1), server)
@@ -110,7 +139,9 @@ async fn shutdown_bounds_an_incomplete_schema_registry_request() {
         .await
         .unwrap()
         .unwrap();
-    let mut client = TcpStream::connect(endpoints.schema_registry).await.unwrap();
+    let mut client = TcpStream::connect(endpoints.schema_registry())
+        .await
+        .unwrap();
     client
         .write_all(
             b"POST /subjects/slow/versions HTTP/1.1\r\n\
@@ -142,10 +173,10 @@ async fn connection_failure_does_not_stop_the_kafka_listener() {
         .await
         .expect("server readiness timed out")
         .expect("server readiness channel closed");
-    let mut offender = TcpStream::connect(endpoints.kafka)
+    let mut offender = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect offending Kafka socket");
-    let mut survivor = TcpStream::connect(endpoints.kafka)
+    let mut survivor = TcpStream::connect(endpoints.kafka())
         .await
         .expect("connect surviving Kafka socket");
 

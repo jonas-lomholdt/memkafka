@@ -2,7 +2,7 @@ use std::{error::Error, fmt};
 
 use kafka_protocol::messages::{ApiKey, RequestKind, ResponseKind};
 
-use crate::broker::BrokerState;
+use crate::{broker::BrokerState, config::AdvertisedAddress};
 
 use super::{
     api_versions, create_topics, describe_configs, describe_groups, fetch, find_coordinator,
@@ -34,11 +34,15 @@ pub(crate) const DISPATCHED_API_KEYS: &[ApiKey] = &[
 #[derive(Clone, Debug)]
 pub struct Dispatcher {
     broker: BrokerState,
+    advertised_kafka: AdvertisedAddress,
 }
 
 impl Dispatcher {
-    pub fn new(broker: BrokerState) -> Self {
-        Self { broker }
+    pub fn new(broker: BrokerState, advertised_kafka: AdvertisedAddress) -> Self {
+        Self {
+            broker,
+            advertised_kafka,
+        }
     }
 
     pub(crate) async fn dispatch(
@@ -54,7 +58,11 @@ impl Dispatcher {
             },
             ApiKey::Metadata => match request.body() {
                 RequestKind::Metadata(body) => {
-                    Ok(metadata::response(body, &self.broker).await.into())
+                    Ok(
+                        metadata::response(body, &self.broker, &self.advertised_kafka)
+                            .await
+                            .into(),
+                    )
                 }
                 _ => Err(DispatchError::BodyMismatch(request.api_key())),
             },
@@ -82,7 +90,10 @@ impl Dispatcher {
             },
             ApiKey::FindCoordinator => match request.body() {
                 RequestKind::FindCoordinator(body) => {
-                    Ok(find_coordinator::response(body, &self.broker).into())
+                    Ok(
+                        find_coordinator::response(body, &self.broker, &self.advertised_kafka)
+                            .into(),
+                    )
                 }
                 _ => Err(DispatchError::BodyMismatch(request.api_key())),
             },

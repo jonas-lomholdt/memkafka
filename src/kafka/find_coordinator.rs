@@ -4,11 +4,12 @@ use kafka_protocol::{
     protocol::StrBytes,
 };
 
-use crate::broker::BrokerState;
+use crate::{broker::BrokerState, config::AdvertisedAddress};
 
 pub(crate) fn response(
     request: &FindCoordinatorRequest,
     broker: &BrokerState,
+    advertised_kafka: &AdvertisedAddress,
 ) -> FindCoordinatorResponse {
     if request.key.is_empty() {
         return error_response(ResponseError::InvalidGroupId);
@@ -22,10 +23,8 @@ pub(crate) fn response(
         .with_error_code(0)
         .with_error_message(None)
         .with_node_id(BrokerId::from(broker.broker_id()))
-        .with_host(StrBytes::from_string(
-            broker.advertised_kafka().host().to_owned(),
-        ))
-        .with_port(i32::from(broker.advertised_kafka().port()))
+        .with_host(StrBytes::from_string(advertised_kafka.host().to_owned()))
+        .with_port(i32::from(advertised_kafka.port()))
 }
 
 fn error_response(error: ResponseError) -> FindCoordinatorResponse {

@@ -6,10 +6,10 @@ use clap::{ArgAction, Parser, ValueEnum, builder::BoolishValueParser};
 #[command(name = "memkafka", version, about)]
 pub struct Cli {
     #[arg(long, default_value = "127.0.0.1:9092")]
-    kafka_listen: SocketAddr,
+    kafka_listen: Vec<SocketAddr>,
 
     #[arg(long)]
-    kafka_advertised_address: Option<String>,
+    kafka_advertised_address: Vec<String>,
 
     #[arg(long, default_value = "127.0.0.1:8081")]
     schema_registry_listen: SocketAddr,
@@ -125,10 +125,21 @@ impl FromStr for AdvertisedAddress {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KafkaListener {
+    pub listen: SocketAddr,
+    pub advertised: Option<AdvertisedAddress>,
+}
+
+impl KafkaListener {
+    pub fn new(listen: SocketAddr, advertised: Option<AdvertisedAddress>) -> Self {
+        Self { listen, advertised }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub broker_id: i32,
-    pub kafka_listen: SocketAddr,
-    pub kafka_advertised_address: Option<AdvertisedAddress>,
+    pub kafka_listeners: Vec<KafkaListener>,
     pub schema_registry_listen: SocketAddr,
     pub auto_create_topics: bool,
     pub force_auto_create_topics: bool,
@@ -141,16 +152,35 @@ impl TryFrom<Cli> for Config {
     type Error = ConfigError;
 
     fn try_from(cli: Cli) -> Result<Self, Self::Error> {
-        let kafka_advertised_address = cli
+        if !cli.kafka_advertised_address.is_empty()
+            && cli.kafka_advertised_address.len() != cli.kafka_listen.len()
+        {
+            return Err(ConfigError::unpaired_advertised_addresses(
+                cli.kafka_listen.len(),
+                cli.kafka_advertised_address.len(),
+            ));
+        }
+        let advertised_addresses = cli
             .kafka_advertised_address
-            .as_deref()
-            .map(AdvertisedAddress::from_str)
-            .transpose()?;
+            .iter()
+            .map(|value| AdvertisedAddress::from_str(value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let kafka_listeners = if advertised_addresses.is_empty() {
+            cli.kafka_listen
+                .into_iter()
+                .map(|listen| KafkaListener::new(listen, None))
+                .collect()
+        } else {
+            cli.kafka_listen
+                .into_iter()
+                .zip(advertised_addresses)
+                .map(|(listen, advertised)| KafkaListener::new(listen, Some(advertised)))
+                .collect()
+        };
 
         Ok(Self {
             broker_id: 1,
-            kafka_listen: cli.kafka_listen,
-            kafka_advertised_address,
+            kafka_listeners,
             schema_registry_listen: cli.schema_registry_listen,
             auto_create_topics: cli.auto_create_topics,
             force_auto_create_topics: cli.force_auto_create_topics,
@@ -179,6 +209,12 @@ impl ConfigError {
             "invalid Kafka advertised address '{value}': {reason}"
         ))
     }
+
+    fn unpaired_advertised_addresses(listeners: usize, advertised: usize) -> Self {
+        Self::new(format!(
+            "expected 0 or {listeners} --kafka-advertised-address values to pair with {listeners} --kafka-listen values, got {advertised}"
+        ))
+    }
 }
 
 impl fmt::Display for ConfigError {
@@ -198,12 +234,14 @@ mod tests {
     fn defaults_match_the_public_contract() {
         let config = Config::try_from(Cli::try_parse_from(["memkafka"]).unwrap()).unwrap();
 
-        assert_eq!(config.kafka_listen, "127.0.0.1:9092".parse().unwrap());
+        assert_eq!(
+            config.kafka_listeners,
+            vec![KafkaListener::new("127.0.0.1:9092".parse().unwrap(), None)]
+        );
         assert_eq!(
             config.schema_registry_listen,
             "127.0.0.1:8081".parse().unwrap()
         );
-        assert_eq!(config.kafka_advertised_address, None);
         assert!(config.auto_create_topics);
         assert!(!config.force_auto_create_topics);
         assert_eq!(config.default_partitions.get(), 2);
@@ -237,8 +275,109 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            config.kafka_advertised_address,
-            Some(AdvertisedAddress::new("broker", 19092).unwrap())
+            config.kafka_listeners,
+            vec![KafkaListener::new(
+                "127.0.0.1:9092".parse().unwrap(),
+                Some(AdvertisedAddress::new("broker", 19092).unwrap())
+            )]
+        );
+    }
+
+    #[test]
+    fn repeated_listeners_pair_with_advertised_addresses_by_position() {
+        let config = Config::try_from(
+            Cli::try_parse_from([
+                "memkafka",
+                "--kafka-listen",
+                "0.0.0.0:9092",
+                "--kafka-advertised-address",
+                "localhost:9092",
+                "--kafka-listen",
+                "0.0.0.0:9093",
+                "--kafka-advertised-address",
+                "kafka:9093",
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.kafka_listeners,
+            vec![
+                KafkaListener::new(
+                    "0.0.0.0:9092".parse().unwrap(),
+                    Some(AdvertisedAddress::new("localhost", 9092).unwrap())
+                ),
+                KafkaListener::new(
+                    "0.0.0.0:9093".parse().unwrap(),
+                    Some(AdvertisedAddress::new("kafka", 9093).unwrap())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_listeners_without_advertised_addresses_derive_every_address() {
+        let config = Config::try_from(
+            Cli::try_parse_from([
+                "memkafka",
+                "--kafka-listen",
+                "127.0.0.1:9092",
+                "--kafka-listen",
+                "127.0.0.1:9093",
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.kafka_listeners,
+            vec![
+                KafkaListener::new("127.0.0.1:9092".parse().unwrap(), None),
+                KafkaListener::new("127.0.0.1:9093".parse().unwrap(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_partial_set_of_advertised_addresses_is_rejected() {
+        let error = Config::try_from(
+            Cli::try_parse_from([
+                "memkafka",
+                "--kafka-listen",
+                "0.0.0.0:9092",
+                "--kafka-listen",
+                "0.0.0.0:9093",
+                "--kafka-advertised-address",
+                "localhost:9092",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "expected 0 or 2 --kafka-advertised-address values to pair with 2 --kafka-listen values, got 1"
+        );
+    }
+
+    #[test]
+    fn more_advertised_addresses_than_listeners_is_rejected() {
+        let error = Config::try_from(
+            Cli::try_parse_from([
+                "memkafka",
+                "--kafka-advertised-address",
+                "localhost:9092",
+                "--kafka-advertised-address",
+                "kafka:9093",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "expected 0 or 1 --kafka-advertised-address values to pair with 1 --kafka-listen values, got 2"
         );
     }
 

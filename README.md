@@ -54,7 +54,31 @@ docker run --rm \
 
 ## Aspire and mixed host/container clients
 
-MemKafka deliberately uses one advertised Kafka address. When host processes and containers such as Kafbat must share it, use an IPv4-only DNS name on the host and register the same name as the Aspire container-network alias:
+Host processes and containers such as Kafbat reach MemKafka over different networks, so they need different advertised addresses. Bind one Kafka listener per network and give each one its own advertised address; `--kafka-listen` and `--kafka-advertised-address` are repeatable and pair by position. This mirrors the two-listener topology Aspire's own Kafka resource uses (`PLAINTEXT_HOST` for host processes, `PLAINTEXT_INTERNAL` for the container network):
+
+```csharp
+var kafka = builder.AddContainer("kafka", "memkafka")
+    .WithArgs(
+        "--kafka-listen", "0.0.0.0:9092",
+        "--kafka-advertised-address", "localhost:9092",
+        "--kafka-listen", "0.0.0.0:9093",
+        "--kafka-advertised-address", "kafka:9093",
+        "--schema-registry-listen", "0.0.0.0:8081",
+        "--force-auto-create-topics", "true")
+    .WithEndpoint(port: 9092, targetPort: 9092, name: "primary", isProxied: false)
+    .WithEndpoint(port: 9093, targetPort: 9093, name: "internal", isProxied: false)
+    .WithEndpoint(port: 8081, targetPort: 8081, name: "schema-registry", scheme: "http", isProxied: false)
+    .WithEndpoint("primary", endpoint => endpoint.TargetHost = "0.0.0.0")
+    .WithEndpoint("internal", endpoint => endpoint.TargetHost = "0.0.0.0")
+    .WithEndpoint("schema-registry", endpoint => endpoint.TargetHost = "0.0.0.0")
+    .WithContainerNetworkAlias("kafka");
+```
+
+Host processes bootstrap against `localhost:9092` and are redirected to `localhost:9092`; container clients bootstrap against `kafka:9093` and are redirected to `kafka:9093`. Neither side needs a hostname that resolves on both networks.
+
+### One shared address instead
+
+A single listener still works when every client can resolve the same name. Use an IPv4-only DNS name on the host and register the same name as the Aspire container-network alias:
 
 ```csharp
 const string kafkaHost = "kafka.127.0.0.1.nip.io";
@@ -89,14 +113,22 @@ Point both host clients and container clients at `kafka.127.0.0.1.nip.io:9092`, 
 ## CLI
 
 ```text
---kafka-listen <host:port>
---kafka-advertised-address <host:port>
+--kafka-listen <host:port>              (repeatable)
+--kafka-advertised-address <host:port>  (repeatable)
 --schema-registry-listen <host:port>
 --auto-create-topics <true|false>
 --force-auto-create-topics <true|false>
 --default-partitions <positive integer>
 --log-level <error|warn|info|debug|trace>
 --quiet
+```
+
+`--kafka-listen` and `--kafka-advertised-address` may each be repeated to serve clients that arrive over different networks. The two options pair by position, so the first advertised address belongs to the first listener. Either give one advertised address per listener or none at all: with none, every listener advertises its own bound address, exactly as a single-listener setup does. Any other count is a fatal configuration error. Each connection is answered with the advertised address of the listener it arrived on, in both Metadata and FindCoordinator responses.
+
+```bash
+memkafka \
+  --kafka-listen 0.0.0.0:9092 --kafka-advertised-address localhost:9092 \
+  --kafka-listen 0.0.0.0:9093 --kafka-advertised-address kafka:9093
 ```
 
 `--force-auto-create-topics true` is an explicit integration-test convenience. When server auto-creation is enabled, it lets named consumer subscriptions create missing topics even if the client sends `allow_auto_topic_creation=false`. The default remains Kafka-compatible and honors the client opt-out.
