@@ -2,7 +2,7 @@
 
 **Goal:** Serve clients that arrive over different networks by binding one Kafka listener per network and advertising the address that belongs to that listener.
 
-**Architecture:** The advertised Kafka address becomes a property of the listener instead of the broker. `Cli` accepts a repeatable `--kafka-listener` option whose value states its own fields as `listen=<host:port>[,advertised=<host:port>]`, becoming `Config::kafka_listeners`. Naming the fields keeps a listener and its advertised address together, so neither field nor flag order carries meaning. The single-listener `--kafka-listen` / `--kafka-advertised-address` options stay as they were and cannot be combined with `--kafka-listener`. `server::serve` binds each configured listener, resolves its advertised address, and gives each listener its own `Dispatcher`. `BrokerState` no longer carries an advertised address; `Dispatcher` carries it and passes it to the two handlers that report broker coordinates, `metadata` and `find_coordinator`. `connection::serve` is unchanged because the dispatcher it already receives is per listener.
+**Architecture:** The advertised Kafka address becomes a property of the listener instead of the broker. `Cli` accepts a repeatable `--kafka-listener` option whose value states its own fields as `listen=<host:port>[,advertised=<host:port>]`, becoming `Config::kafka_listeners`. Naming the fields keeps a listener and its advertised address together, so field order within one value carries no meaning. Repeated flags retain their order because the first listener remains the primary compatibility endpoint. The single-listener `--kafka-listen` / `--kafka-advertised-address` options stay as they were and cannot be combined with `--kafka-listener`. `server::serve` binds each configured listener, resolves its advertised address, and gives each listener its own `Dispatcher`. `BrokerState` no longer carries an advertised address; `Dispatcher` carries it and passes it to the two handlers that report broker coordinates, `metadata` and `find_coordinator`. `connection::serve` is unchanged because the dispatcher it already receives is per listener.
 
 **Tech Stack:** Rust 1.98.0, Clap 4, Tokio, `kafka-protocol` 0.18.0, and the existing Rust wire-test harness.
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - One `--kafka-listen` and at most one `--kafka-advertised-address` behave exactly as before, including the readiness log line, so the `Dockerfile` CMD, `tests/kafbat/run.sh` and the throughput benchmark are unaffected.
-- The advertised-address count must be zero or exactly the listener count; any other count is a fatal configuration error reported before readiness.
+- Every `--kafka-listener` value must contain exactly one `listen` field and at most one `advertised` field; malformed, missing, duplicate, or unknown fields are fatal configuration errors reported before readiness.
 - With no advertised addresses, every listener advertises its own bound address, as a single listener does today.
 - A client is answered with the advertised address of the listener its connection arrived on, in both Metadata and FindCoordinator responses.
 - There is exactly one source of truth for the bound listeners; no primary field duplicating a collection entry.
@@ -32,13 +32,13 @@
 
 Add per-listener pairing, field-order independence, derive-own-address, missing `listen`, unknown field, repeated field, malformed field and style-mixing cases, and restate the defaults test in terms of `kafka_listeners`.
 
-- [x] **Step 2: Make both options repeatable**
+- [x] **Step 2: Add a self-contained repeatable listener option**
 
-Change `Cli::kafka_listen` to `Vec<SocketAddr>` keeping `default_value = "127.0.0.1:9092"`, and `Cli::kafka_advertised_address` to `Vec<String>`.
+Add repeatable `--kafka-listener listen=<host:port>[,advertised=<host:port>]`. Keep the original single-listener options and reject combining either of them with the repeatable style.
 
-- [x] **Step 3: Pair by position in `TryFrom<Cli>`**
+- [x] **Step 3: Parse typed listeners at the CLI boundary**
 
-Reject a non-zero advertised count that differs from the listener count with `ConfigError::unpaired_advertised_addresses`, then zip the two lists into `Vec<KafkaListener>`.
+Implement `FromStr` for `KafkaListener` and let Clap collect `Vec<KafkaListener>` directly. Once Clap has validated every value, convert `Cli` into `Config` infallibly.
 
 ### Task 2: Listener-owned advertised addresses
 
@@ -93,7 +93,7 @@ Add `every_kafka_listener_advertises_its_own_address`, which binds two ephemeral
 
 - [x] **Step 1: Document the option pairing**
 
-Mark both options repeatable in the CLI blocks, explain the pairing and the count rule, and lead the Aspire section with the two-listener topology while keeping the single shared-address pattern as an alternative.
+Document the repeatable self-contained listener option, its field validation, listener ordering, and its conflicts with the original single-listener options. Lead the Aspire section with the two-listener topology while keeping the single shared-address pattern as an alternative.
 
 - [x] **Step 2: Run all repository checks required by `AGENTS.md`**
 

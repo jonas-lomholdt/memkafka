@@ -122,7 +122,7 @@ Point both host clients and container clients at `kafka.127.0.0.1.nip.io:9092`, 
 --quiet
 ```
 
-`--kafka-listener` may be repeated to serve clients that arrive over different networks. Each value names its own fields, so a listener and its advertised address cannot drift apart and the order of both the fields and the flags is irrelevant:
+`--kafka-listener` may be repeated to serve clients that arrive over different networks. Each value names its own fields, so field order is irrelevant and a listener cannot drift away from its advertised address. Repeated flags retain their order in readiness output and the first listener remains the primary compatibility endpoint:
 
 - `listen=<host:port>` — required, the address to bind.
 - `advertised=<host:port>` — optional; omitted means the listener advertises its own bound address, exactly as a single-listener setup does.

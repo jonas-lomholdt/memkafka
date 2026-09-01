@@ -19,7 +19,7 @@ use tokio::{
 };
 
 fn ephemeral_config() -> Config {
-    Config::try_from(
+    Config::from(
         Cli::try_parse_from([
             "memkafka",
             "--kafka-listen",
@@ -29,7 +29,6 @@ fn ephemeral_config() -> Config {
         ])
         .unwrap(),
     )
-    .unwrap()
 }
 
 #[test]
@@ -107,7 +106,7 @@ async fn both_endpoints_accept_connections_until_shutdown() {
 async fn kafka_bind_failure_is_reported_before_readiness() {
     let reserved_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let reserved_address = reserved_listener.local_addr().unwrap();
-    let config = Config::try_from(
+    let config = Config::from(
         Cli::try_parse_from([
             "memkafka",
             "--kafka-listen",
@@ -116,8 +115,7 @@ async fn kafka_bind_failure_is_reported_before_readiness() {
             "127.0.0.1:0",
         ])
         .unwrap(),
-    )
-    .unwrap();
+    );
     let (ready_tx, ready_rx) = oneshot::channel();
 
     let error = serve(config, ready_tx, std::future::pending())

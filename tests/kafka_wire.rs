@@ -2058,7 +2058,7 @@ async fn metadata_v9_auto_creates_two_partitions() {
 
 #[tokio::test]
 async fn every_kafka_listener_advertises_its_own_address() {
-    let config = Config::try_from(
+    let config = Config::from(
         Cli::try_parse_from([
             "memkafka",
             "--kafka-listener",
@@ -2069,8 +2069,7 @@ async fn every_kafka_listener_advertises_its_own_address() {
             "127.0.0.1:0",
         ])
         .expect("parse the two-listener configuration"),
-    )
-    .expect("build the two-listener configuration");
+    );
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let mut server = tokio::spawn(serve(config, ready_tx, async {
@@ -4912,7 +4911,7 @@ fn assert_describe_configs_unsupported(request: &RequestKind, response: &Respons
 }
 
 fn ephemeral_config() -> Config {
-    Config::try_from(
+    Config::from(
         Cli::try_parse_from([
             "memkafka",
             "--kafka-listen",
@@ -4924,7 +4923,6 @@ fn ephemeral_config() -> Config {
         ])
         .expect("parse test configuration"),
     )
-    .expect("build test configuration")
 }
 
 struct SpawnedServer {
