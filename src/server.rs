@@ -101,6 +101,10 @@ pub async fn serve<F>(
 where
     F: Future<Output = ()> + Send,
 {
+    if config.kafka_listeners.is_empty() {
+        return Err(anyhow!("at least one Kafka listener is required"));
+    }
+
     let mut kafka_listeners = Vec::with_capacity(config.kafka_listeners.len());
     for listener_config in &config.kafka_listeners {
         kafka_listeners.push(bind_kafka_listener(listener_config).await?);

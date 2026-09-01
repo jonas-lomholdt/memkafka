@@ -129,6 +129,29 @@ async fn kafka_bind_failure_is_reported_before_readiness() {
 }
 
 #[tokio::test]
+async fn empty_kafka_listener_configuration_is_rejected_before_readiness() {
+    let mut config = ephemeral_config();
+    config.kafka_listeners.clear();
+    let (ready_tx, mut ready_rx) = oneshot::channel();
+    let server = serve(config, ready_tx, std::future::pending());
+    tokio::pin!(server);
+
+    let result = timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            biased;
+            result = &mut server => result,
+            ready = &mut ready_rx => panic!("server reported readiness without a Kafka listener: {ready:?}"),
+        }
+    })
+    .await
+    .expect("empty Kafka listener configuration did not fail");
+
+    let error = result.expect_err("empty Kafka listener configuration was accepted");
+    assert!(error.to_string().contains("at least one Kafka listener"));
+    assert!(ready_rx.await.is_err());
+}
+
+#[tokio::test]
 async fn shutdown_bounds_an_incomplete_schema_registry_request() {
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
