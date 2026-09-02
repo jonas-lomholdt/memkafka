@@ -3,9 +3,11 @@
 This oracle compares MemKafka with Apache Kafka's own `kafka-clients` error
 responses for 27 adjacent unsupported versions across 18 APIs. Metadata v10 and
 CreateTopics v7 left this matrix when they became supported; DescribeCluster v1
-entered as the schema-known version below its v2 floor. DescribeTopicPartitions
-v0 and the schema-maximum upper bounds have no schema-known adjacent version to
-encode as a typed request. The harness also sends raw
+entered as the schema-known version below its v2 floor. When a supported window
+already touches Kafka's schema minimum or maximum, its lower or upper neighbor
+is outside the generated schema and cannot be encoded as a typed request.
+DescribeTopicPartitions v0 is both its schema minimum and maximum, so neither
+adjacent neighbor is schema-known. The harness also sends raw
 unsupported ApiVersions v5 and v32767 requests to MemKafka and a live Kafka
 broker, then compares the uniquely decoded response encodings. Ordinary clients
 negotiate supported versions and therefore cannot exercise these paths.
