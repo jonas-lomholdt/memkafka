@@ -9,6 +9,7 @@ use kafka_protocol::{
     },
     protocol::StrBytes,
 };
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::{
@@ -30,13 +31,19 @@ pub(crate) async fn response(
     broker: &BrokerState,
     advertised_kafka: &AdvertisedAddress,
 ) -> MetadataResponse {
-    let (error_code, mut topics) = topics_for_request(request, version, broker).await;
+    if let Some(error) = request_error(request, version) {
+        return request_error_response(request, version, error);
+    }
+
+    let mut topics = topics_for_request(request, version, broker).await;
     let topic_authorized_operations = optional_authorized_operations(
         request.include_topic_authorized_operations,
         TOPIC_AUTHORIZED_OPERATIONS,
     );
     for topic in &mut topics {
-        topic.topic_authorized_operations = topic_authorized_operations;
+        if topic.error_code != ResponseError::UnknownTopicId.code() {
+            topic.topic_authorized_operations = topic_authorized_operations;
+        }
     }
 
     MetadataResponse::default()
@@ -53,53 +60,29 @@ pub(crate) async fn response(
             request.include_cluster_authorized_operations,
             CLUSTER_AUTHORIZED_OPERATIONS,
         ))
-        .with_error_code(error_code)
 }
 
 async fn topics_for_request(
     request: &MetadataRequest,
     version: i16,
     broker: &BrokerState,
-) -> (i16, Vec<MetadataResponseTopic>) {
+) -> Vec<MetadataResponseTopic> {
     let Some(requested) = request.topics.as_deref() else {
-        let topics = broker
+        return broker
             .topics()
             .list()
             .await
             .into_iter()
             .map(|topic| success_topic(topic, broker.broker_id()))
             .collect();
-        return (0, topics);
     };
     if requested.is_empty() {
-        return (0, Vec::new());
+        return Vec::new();
     }
 
-    let invalid_legacy_shape = (10..=11).contains(&version)
-        && requested
-            .iter()
-            .any(|topic| topic.name.is_none() || !topic.topic_id.is_nil());
     let uuid_mode = version >= 12 && requested.iter().any(|topic| !topic.topic_id.is_nil());
-    let invalid_name_mode =
-        version >= 10 && !uuid_mode && requested.iter().any(|topic| topic.name.is_none());
-    if invalid_legacy_shape || invalid_name_mode {
-        return (
-            ResponseError::InvalidRequest.code(),
-            requested
-                .iter()
-                .map(|topic| {
-                    error_topic(
-                        topic.name.clone(),
-                        Uuid::nil(),
-                        ResponseError::InvalidRequest,
-                    )
-                })
-                .collect(),
-        );
-    }
-
     if uuid_mode {
-        return (0, topics_by_id(requested, broker).await);
+        return topics_by_id(requested, broker).await;
     }
 
     let allow_auto_create = broker.auto_create_topics()
@@ -124,7 +107,46 @@ async fn topics_for_request(
         }
     }
 
-    (0, topics_by_name(requested, version, broker).await)
+    topics_by_name(requested, version, broker).await
+}
+
+fn request_error(request: &MetadataRequest, version: i16) -> Option<ResponseError> {
+    let requested = request.topics.as_deref()?;
+    let has_non_zero_topic_id = requested.iter().any(|topic| !topic.topic_id.is_nil());
+    let has_null_topic_name = requested.iter().any(|topic| topic.name.is_none());
+
+    if (10..=11).contains(&version) && (has_non_zero_topic_id || has_null_topic_name) {
+        Some(ResponseError::InvalidRequest)
+    } else if version >= 12 && !has_non_zero_topic_id && has_null_topic_name {
+        Some(ResponseError::UnknownServerError)
+    } else {
+        None
+    }
+}
+
+fn request_error_response(
+    request: &MetadataRequest,
+    version: i16,
+    error: ResponseError,
+) -> MetadataResponse {
+    let topics = request
+        .topics
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|topic| {
+            error_topic(
+                Some(topic.name.clone().unwrap_or_default()),
+                topic.topic_id,
+                error,
+            )
+        })
+        .collect();
+    let mut response = MetadataResponse::default().with_topics(topics);
+    if version >= 13 {
+        response.error_code = error.code();
+    }
+    response
 }
 
 async fn topics_by_name(
@@ -133,7 +155,11 @@ async fn topics_by_name(
     broker: &BrokerState,
 ) -> Vec<MetadataResponseTopic> {
     let mut topics = Vec::with_capacity(requested.len());
+    let mut seen = HashSet::with_capacity(requested.len());
     for requested in requested {
+        if !seen.insert(requested.name.clone()) {
+            continue;
+        }
         let Some(name) = requested.name.as_ref() else {
             topics.push(error_topic(
                 None,
@@ -165,15 +191,24 @@ async fn topics_by_id(
     requested: &[MetadataRequestTopic],
     broker: &BrokerState,
 ) -> Vec<MetadataResponseTopic> {
-    let mut topics = Vec::with_capacity(requested.len());
+    let mut seen = HashSet::with_capacity(requested.len());
+    let mut unknown_topics = Vec::with_capacity(requested.len());
+    let mut known_topics = Vec::with_capacity(requested.len());
     for requested in requested {
-        let topic = match broker.topics().get_by_id(requested.topic_id).await {
-            Some(metadata) => success_topic(metadata, broker.broker_id()),
-            None => error_topic(None, requested.topic_id, ResponseError::UnknownTopicId),
-        };
-        topics.push(topic);
+        if requested.topic_id.is_nil() || !seen.insert(requested.topic_id) {
+            continue;
+        }
+        match broker.topics().get_by_id(requested.topic_id).await {
+            Some(metadata) => known_topics.push(success_topic(metadata, broker.broker_id())),
+            None => unknown_topics.push(error_topic(
+                None,
+                requested.topic_id,
+                ResponseError::UnknownTopicId,
+            )),
+        }
     }
-    topics
+    unknown_topics.extend(known_topics);
+    unknown_topics
 }
 
 fn success_topic(topic: TopicMetadata, broker_id: i32) -> MetadataResponseTopic {

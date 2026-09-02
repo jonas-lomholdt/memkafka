@@ -181,9 +181,29 @@ test_probe_timeout_is_bounded_and_reaps_the_command() {
   fi
 }
 
+test_success_runs_supported_semantic_differential() {
+  run_case supported-semantics success false
+  if ((RUN_EXIT != 0)); then
+    cat "${RUN_OUTPUT}" >&2
+    printf 'successful runner exited %d\n' "${RUN_EXIT}" >&2
+    return 1
+  fi
+  grep -F 'supported-semantics --bootstrap-server memkafka:9092' \
+    "${RUN_DOCKER_LOG}" >/dev/null
+  grep -F 'supported-semantics --bootstrap-server kafka:19092' \
+    "${RUN_DOCKER_LOG}" >/dev/null
+  find "${RUN_ARTIFACTS}" -type f -name supported-semantics-memkafka.json \
+    -print -quit | grep -q .
+  find "${RUN_ARTIFACTS}" -type f -name supported-semantics-kafka.json \
+    -print -quit | grep -q .
+  grep -F 'PASS   8 supported-response semantic cases match Kafka 4.3.1' \
+    "${RUN_OUTPUT}" >/dev/null
+}
+
 test_missing_local_image_is_never_pulled
 test_failure_captures_diagnostics_and_cleans_exact_owned_targets
 test_probe_timeout_is_bounded_and_reaps_the_command
 test_temp_cleanup_timeout_preserves_failure_and_reaps_cleanup
+test_success_runs_supported_semantic_differential
 
 printf 'PASS   protocol compatibility runner behavior\n'

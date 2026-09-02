@@ -200,7 +200,7 @@ CreateTopics v7 errors return a nil ID.
 Metadata v4-v9 preserve their existing name-based behavior.
 ```
 
-Add focused Metadata v12/v13 cases for known UUID, unknown UUID, mixed UUID/name mode, null topic list, empty topic list, disabled auto-create, invalid names, and authorization flags. Add v10/v11 cases proving a non-nil request UUID or null name yields `INVALID_REQUEST` without catalog mutation. For v13, also assert the top-level error; for earlier response versions, assert the per-topic errors only.
+Add focused Metadata v12/v13 cases for known UUID, unknown UUID, mixed UUID/name mode, zero-UUID omission, duplicate UUID/name set semantics, null topic list, empty topic list, disabled auto-create, invalid names, response grouping, and authorization categories. Add v10/v11 cases proving a non-nil request UUID or null name yields `INVALID_REQUEST` without catalog mutation. Add v12/v13 name-mode null-name cases for Kafka 4.3.1's verified `UNKNOWN_SERVER_ERROR` path. Assert the complete request-error envelope: no brokers, null cluster ID, controller `-1`, default authorization sentinels, preserved request UUIDs, null names normalized to empty strings, and a top-level error only in v13.
 
 Use the generated request fields directly:
 
@@ -264,7 +264,7 @@ async fn topics_for_request(
     request: &MetadataRequest,
     version: i16,
     broker: &BrokerState,
-) -> (i16, Vec<MetadataResponseTopic>);
+) -> Vec<MetadataResponseTopic>;
 
 async fn topics_by_name(
     requested: &[MetadataRequestTopic],
@@ -280,13 +280,13 @@ async fn topics_by_id(
 
 Required branch order:
 
-1. `None` lists the catalog; `Some([])` returns no topics.
-2. In v10-v11, reject the requested entries if any name is null or any UUID is non-nil.
-3. In v12-v13, choose UUID mode for the complete request when any entry has a non-nil UUID.
-4. Name mode keeps the existing auto-create rules.
-5. UUID mode uses `TopicCatalog::get_by_id`, never creates, returns canonical names for hits, and preserves unknown requested IDs with `ResponseError::UnknownTopicId` plus a null name.
+1. Before constructing the normal broker response, v10-v11 reject the raw requested entries if any name is null or any UUID is non-nil. Use `INVALID_REQUEST` per topic, preserve every requested UUID, normalize null names to `""`, and leave broker/cluster/controller/authorization fields at their generated defaults.
+2. Before constructing the normal broker response, v12-v13 name mode with any null name follows the live Kafka 4.3.1 `UNKNOWN_SERVER_ERROR` request-error path with the same default envelope. Only v13 encodes the error at the top level.
+3. `None` lists the catalog; `Some([])` returns no topics.
+4. In v12-v13, choose UUID mode for the complete request when any entry has a non-nil UUID. Resolve each unique non-nil UUID exactly once, omit zero-UUID entries, never create, return canonical names for hits, preserve unknown requested IDs with `ResponseError::UnknownTopicId` plus a null name, and group unknown results before known metadata.
+5. Name mode de-duplicates names and keeps the existing auto-create rules.
 
-Every successful response topic carries `.with_topic_id(topic.id)`. Error topics carry `Uuid::nil()` except unknown-ID results, which preserve the requested UUID. Set topic and cluster authorization bitfields only when the request asks for them. Set the v13 top-level error to `INVALID_REQUEST` for semantic request rejection and zero otherwise.
+Every successful response topic carries `.with_topic_id(topic.id)`. Ordinary name-error topics carry `Uuid::nil()`; unknown-ID results preserve the requested UUID; request-level errors preserve every raw request UUID. Set topic and cluster authorization bitfields only when the request asks for them on normally processed resources. Metadata request-level errors and unknown-ID results retain the generated/default authorization sentinel.
 
 - [ ] **Step 5: Populate CreateTopics v7 IDs only when creation is real**
 
@@ -358,8 +358,8 @@ Add `tests/kafka_wire.rs` cases for:
 endpoint_type=1 returns cluster memkafka, controller=broker, and one unfenced broker.
 include_cluster_authorized_operations=false returns i32::MIN.
 include_cluster_authorized_operations=true returns 8096.
-endpoint_type=2 returns MISMATCHED_ENDPOINT_TYPE and no brokers.
-an unrecognized endpoint type returns UNSUPPORTED_ENDPOINT_TYPE and no brokers.
+endpoint_type=2 returns MISMATCHED_ENDPOINT_TYPE, response endpoint 1, Kafka's exact BROKER/CONTROLLER mismatch message, and no brokers.
+an unrecognized endpoint type returns UNSUPPORTED_ENDPOINT_TYPE, response endpoint 1, `Unsupported endpoint type <id>`, and no brokers.
 two listeners each return their own advertised host/port.
 v1 receives a typed UNSUPPORTED_VERSION response without dispatch.
 ```
@@ -421,7 +421,7 @@ DescribeClusterResponse::default()
     ))
 ```
 
-For endpoint type `2`, return `ResponseError::MismatchedEndpointType`; for every other value, return `ResponseError::UnsupportedEndpointType`. Error results keep an empty broker list and do not invent a controller/cluster payload.
+For endpoint type `2`, return `ResponseError::MismatchedEndpointType` with `The request was sent to an endpoint of type BROKER, but we wanted an endpoint of type CONTROLLER`; for every other value, return `ResponseError::UnsupportedEndpointType` with `Unsupported endpoint type <id>`. Both error results retain the default response endpoint type `1`, empty broker/cluster payload, controller `-1`, and default authorization sentinel.
 
 - [ ] **Step 5: Complete the typed unsupported-version response**
 
@@ -485,7 +485,7 @@ Put the pagination matrix in `tests/kafka_wire.rs` using the existing real TCP h
 
 Also test invalid cursor topic, negative partition, invalid topic name, and valid missing topic. Invalid cursor requests must preserve the raw request entries and return one `INVALID_REQUEST` result per entry, including duplicates, with no cursor. Valid pagination still de-duplicates names before sorting.
 
-For every successful topic in the matrix, assert its non-nil stored UUID, `is_internal=false`, topic authorization bitfield `3576`, and exact leader/epoch/replica/ISR/offline-replica fields. For missing and invalid topics, assert nil UUIDs and empty partition lists.
+For every successful topic in the matrix, assert its non-nil stored UUID, `is_internal=false`, topic authorization bitfield `3576`, and exact leader/epoch/replica/ISR/offline-replica fields. For normally processed missing and invalid topics, assert nil UUIDs, empty partition lists, and topic authorization bitfield `3576`. For request-level cursor failures, assert the default authorization sentinel.
 
 - [ ] **Step 2: Run the new wire tests and confirm RED**
 
@@ -568,12 +568,12 @@ leader=broker ID
 leader epoch=0
 replicas=[broker ID]
 ISR=[broker ID]
-eligible leader replicas=null
-last known ELR=null
+eligible leader replicas=[]
+last known ELR=[]
 offline replicas=[]
 ```
 
-Valid missing names return `UNKNOWN_TOPIC_OR_PARTITION`; invalid names return `INVALID_TOPIC_EXCEPTION`. Both use nil UUIDs and empty partitions.
+Kafka Java 4.3.1 requires both eligible-leader-replica and last-known-ELR decoded arrays to be present empty arrays. Valid missing names return `UNKNOWN_TOPIC_OR_PARTITION`; invalid names return `INVALID_TOPIC_EXCEPTION`. Both use nil UUIDs, empty partitions, and `TOPIC_AUTHORIZED_OPERATIONS` because they are normally processed resources. Request-level failures retain the default authorization sentinel.
 
 - [ ] **Step 7: Add focused helper tests and typed error construction**
 

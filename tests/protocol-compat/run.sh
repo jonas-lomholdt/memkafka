@@ -369,6 +369,14 @@ wait_for_kafka
 run_maven "${MAVEN_TIMEOUT_SECONDS}" "compile and test Java protocol probe" test
 run_probe "typed-errors against MemKafka" \
   'typed-errors --bootstrap-server memkafka:9092 --output /results/typed-errors.json'
+run_probe "supported semantics against MemKafka" \
+  'supported-semantics --bootstrap-server memkafka:9092 --output /results/supported-semantics-memkafka.json'
+run_probe "supported semantics against Kafka" \
+  'supported-semantics --bootstrap-server kafka:19092 --output /results/supported-semantics-kafka.json'
+run_bounded "${DIFF_TIMEOUT_SECONDS}" "diff supported semantic outputs" -- \
+  diff -u \
+  "${RESULT_DIRECTORY}/supported-semantics-kafka.json" \
+  "${RESULT_DIRECTORY}/supported-semantics-memkafka.json"
 
 for version in 5 32767; do
   run_probe "ApiVersions v${version} against MemKafka" \
@@ -383,5 +391,6 @@ done
 
 LAST_COMMAND="completed all protocol compatibility comparisons"
 printf 'PASS   27 Kafka 4.3.1 typed-error cases across 18 APIs\n'
+printf 'PASS   8 supported-response semantic cases match Kafka 4.3.1\n'
 printf 'PASS   unsupported ApiVersions v5 and v32767 match Kafka 4.3.1\n'
 printf 'Protocol compatibility artifacts: %s\n' "${RUN_ARTIFACT_DIRECTORY}"

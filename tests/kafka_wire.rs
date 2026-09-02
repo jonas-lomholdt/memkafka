@@ -2300,23 +2300,42 @@ async fn describe_cluster_v2_optionally_returns_cluster_authorized_operations() 
 async fn describe_cluster_v2_rejects_controller_and_unknown_endpoint_types() {
     let dispatcher = test_dispatcher();
 
-    for (endpoint_type, expected_error) in [
-        (2, ResponseError::MismatchedEndpointType),
-        (3, ResponseError::UnsupportedEndpointType),
-        (-1, ResponseError::UnsupportedEndpointType),
+    for (endpoint_type, expected_error, expected_message) in [
+        (
+            2,
+            ResponseError::MismatchedEndpointType,
+            "The request was sent to an endpoint of type BROKER, but we wanted an endpoint of type CONTROLLER",
+        ),
+        (
+            3,
+            ResponseError::UnsupportedEndpointType,
+            "Unsupported endpoint type 3",
+        ),
+        (
+            -1,
+            ResponseError::UnsupportedEndpointType,
+            "Unsupported endpoint type -1",
+        ),
     ] {
         let response = dispatch_describe_cluster(
             &dispatcher,
             2,
-            DescribeClusterRequest::default().with_endpoint_type(endpoint_type),
+            DescribeClusterRequest::default()
+                .with_endpoint_type(endpoint_type)
+                .with_include_cluster_authorized_operations(true),
         )
         .await;
 
         assert_eq!(response.error_code, expected_error.code());
-        assert_eq!(response.endpoint_type, endpoint_type);
+        assert_eq!(
+            response.error_message.as_ref().map(StrBytes::as_str),
+            Some(expected_message)
+        );
+        assert_eq!(response.endpoint_type, 1);
         assert!(response.cluster_id.is_empty());
         assert_eq!(response.controller_id, BrokerId::from(-1));
         assert!(response.brokers.is_empty());
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
     }
 }
 
@@ -2534,7 +2553,7 @@ async fn describe_topic_partitions_v0_uses_exact_partition_counted_pagination_ov
                     broker.broker_id(),
                 );
             } else {
-                assert_describe_topic_partitions_error(actual, name, *error_code);
+                assert_describe_topic_partitions_resource_error(actual, name, *error_code);
             }
         }
 
@@ -2630,7 +2649,7 @@ async fn describe_topic_partitions_v0_invalid_cursors_preserve_raw_request_entri
 
         assert_eq!(response.topics.len(), raw_names.len());
         for (topic, raw_name) in response.topics.iter().zip(raw_names) {
-            assert_describe_topic_partitions_error(
+            assert_describe_topic_partitions_request_error(
                 topic,
                 &raw_name,
                 ResponseError::InvalidRequest.code(),
@@ -2661,12 +2680,12 @@ async fn describe_topic_partitions_v0_reports_invalid_and_missing_names_without_
     .await;
 
     assert_eq!(response.topics.len(), 2);
-    assert_describe_topic_partitions_error(
+    assert_describe_topic_partitions_resource_error(
         &response.topics[0],
         "bad/name",
         ResponseError::InvalidTopicException.code(),
     );
-    assert_describe_topic_partitions_error(
+    assert_describe_topic_partitions_resource_error(
         &response.topics[1],
         "missing",
         ResponseError::UnknownTopicOrPartition.code(),
@@ -2854,7 +2873,7 @@ async fn metadata_v4_through_v9_preserve_name_based_behavior() {
 }
 
 #[tokio::test]
-async fn metadata_v13_resolves_names_and_metadata_v12_v13_resolve_ids() {
+async fn metadata_v13_resolves_names_and_metadata_v12_v13_use_kafka_uuid_set_semantics() {
     let broker = test_broker_state(false);
     let created = broker
         .topics()
@@ -2887,10 +2906,20 @@ async fn metadata_v13_resolves_names_and_metadata_v12_v13_resolve_ids() {
                         .with_topic_id(created.id)
                         .with_name(None),
                     MetadataRequestTopic::default()
+                        .with_name(Some(topic_name("zero-id-name-only"))),
+                    MetadataRequestTopic::default()
+                        .with_topic_id(unknown_id)
+                        .with_name(None),
+                    MetadataRequestTopic::default()
+                        .with_topic_id(created.id)
+                        .with_name(None),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("another-zero-id"))),
+                    MetadataRequestTopic::default()
                         .with_topic_id(unknown_id)
                         .with_name(None),
                 ]))
-                .with_allow_auto_topic_creation(true),
+                .with_allow_auto_topic_creation(true)
+                .with_include_topic_authorized_operations(true),
         )
         .await;
 
@@ -2898,27 +2927,30 @@ async fn metadata_v13_resolves_names_and_metadata_v12_v13_resolve_ids() {
             response.error_code, 0,
             "Metadata v{version} top-level error"
         );
-        assert_eq!(response.topics[0].error_code, 0);
-        assert_eq!(response.topics[0].topic_id, created.id);
+        assert_eq!(response.topics.len(), 2, "Metadata v{version} topic set");
         assert_eq!(
-            response.topics[0].name.as_ref().map(|name| name.as_str()),
-            Some("identified")
-        );
-        assert_eq!(response.topics[0].partitions.len(), 2);
-        assert_eq!(
-            response.topics[1].error_code,
+            response.topics[0].error_code,
             ResponseError::UnknownTopicId.code()
         );
-        assert_eq!(response.topics[1].topic_id, unknown_id);
-        assert_eq!(response.topics[1].name, None);
-        assert!(response.topics[1].partitions.is_empty());
+        assert_eq!(response.topics[0].topic_id, unknown_id);
+        assert_eq!(response.topics[0].name, None);
+        assert!(response.topics[0].partitions.is_empty());
+        assert_eq!(response.topics[0].topic_authorized_operations, i32::MIN);
+        assert_eq!(response.topics[1].error_code, 0);
+        assert_eq!(response.topics[1].topic_id, created.id);
+        assert_eq!(
+            response.topics[1].name.as_ref().map(|name| name.as_str()),
+            Some("identified")
+        );
+        assert_eq!(response.topics[1].partitions.len(), 2);
+        assert_eq!(response.topics[1].topic_authorized_operations, 3_576);
     }
 
     assert_eq!(broker.topics().list().await.len(), 1);
 }
 
 #[tokio::test]
-async fn metadata_v12_v13_use_request_wide_uuid_mode_for_mixed_entries() {
+async fn metadata_v12_v13_omit_name_only_entries_in_request_wide_uuid_mode() {
     let broker = test_broker_state(true);
     let identified = broker
         .topics()
@@ -2950,13 +2982,8 @@ async fn metadata_v12_v13_use_request_wide_uuid_mode_for_mixed_entries() {
         .await;
 
         assert_eq!(response.error_code, 0);
+        assert_eq!(response.topics.len(), 1);
         assert_eq!(response.topics[0].topic_id, identified.id);
-        for topic in &response.topics[1..] {
-            assert_eq!(topic.error_code, ResponseError::UnknownTopicId.code());
-            assert!(topic.topic_id.is_nil());
-            assert_eq!(topic.name, None);
-            assert!(topic.partitions.is_empty());
-        }
     }
 
     assert!(
@@ -2967,6 +2994,45 @@ async fn metadata_v12_v13_use_request_wide_uuid_mode_for_mixed_entries() {
             .expect("valid topic name")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn metadata_name_mode_deduplicates_requested_names_without_mutation() {
+    let broker = test_broker_state(false);
+    let existing = broker
+        .topics()
+        .create_explicit("deduplicated", 1, 1)
+        .await
+        .expect("create deduplicated topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    for version in [4, 10, 13] {
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("deduplicated"))),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("deduplicated"))),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("deduplicated"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        )
+        .await;
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(response.topics.len(), 1, "Metadata v{version} name set");
+        assert_eq!(
+            response.topics[0].topic_id,
+            if version >= 10 {
+                existing.id
+            } else {
+                Uuid::nil()
+            }
+        );
+    }
+
+    assert_eq!(broker.topics().list().await, vec![existing]);
 }
 
 #[tokio::test]
@@ -3091,15 +3157,37 @@ async fn metadata_v10_v11_reject_uuid_or_null_name_without_mutation() {
                         .with_name(None),
                     MetadataRequestTopic::default().with_name(None),
                 ]))
-                .with_allow_auto_topic_creation(true),
+                .with_allow_auto_topic_creation(true)
+                .with_include_cluster_authorized_operations(version == 10)
+                .with_include_topic_authorized_operations(true),
         )
         .await;
 
         assert_eq!(response.error_code, 0);
+        assert!(response.brokers.is_empty());
+        assert_eq!(response.cluster_id, None);
+        assert_eq!(response.controller_id, BrokerId::from(-1));
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
         assert_eq!(response.topics.len(), 3);
+        assert_eq!(
+            response
+                .topics
+                .iter()
+                .map(|topic| topic.name.as_ref().map(|name| name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![Some("existing"), Some(""), Some("")]
+        );
+        assert_eq!(
+            response
+                .topics
+                .iter()
+                .map(|topic| topic.topic_id)
+                .collect::<Vec<_>>(),
+            vec![Uuid::nil(), existing.id, Uuid::nil()]
+        );
         assert!(response.topics.iter().all(|topic| {
             topic.error_code == ResponseError::InvalidRequest.code()
-                && topic.topic_id.is_nil()
+                && topic.topic_authorized_operations == i32::MIN
                 && topic.partitions.is_empty()
         }));
         assert_eq!(broker.topics().list().await, vec![existing]);
@@ -3107,7 +3195,7 @@ async fn metadata_v10_v11_reject_uuid_or_null_name_without_mutation() {
 }
 
 #[tokio::test]
-async fn metadata_v13_sets_top_level_error_for_semantic_rejection() {
+async fn metadata_v12_v13_match_kafka_unknown_server_request_error_envelope() {
     for version in [12, 13] {
         let broker = test_broker_state(true);
         broker
@@ -3123,19 +3211,33 @@ async fn metadata_v13_sets_top_level_error_for_semantic_rejection() {
                     MetadataRequestTopic::default().with_name(Some(topic_name("must-not-resolve"))),
                     MetadataRequestTopic::default().with_name(None),
                 ]))
-                .with_allow_auto_topic_creation(true),
+                .with_allow_auto_topic_creation(true)
+                .with_include_topic_authorized_operations(true),
         )
         .await;
 
+        assert!(response.brokers.is_empty());
+        assert_eq!(response.cluster_id, None);
+        assert_eq!(response.controller_id, BrokerId::from(-1));
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
+        assert_eq!(
+            response
+                .topics
+                .iter()
+                .map(|topic| topic.name.as_ref().map(|name| name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![Some("must-not-resolve"), Some("")]
+        );
         assert!(response.topics.iter().all(|topic| {
-            topic.error_code == ResponseError::InvalidRequest.code()
+            topic.error_code == ResponseError::UnknownServerError.code()
                 && topic.topic_id.is_nil()
+                && topic.topic_authorized_operations == i32::MIN
                 && topic.partitions.is_empty()
         }));
         assert_eq!(
             response.error_code,
             if version == 13 {
-                ResponseError::InvalidRequest.code()
+                ResponseError::UnknownServerError.code()
             } else {
                 0
             }
@@ -7206,7 +7308,25 @@ fn assert_describe_topic_partitions_success(
     }
 }
 
-fn assert_describe_topic_partitions_error(
+fn assert_describe_topic_partitions_resource_error(
+    topic: &DescribeTopicPartitionsResponseTopic,
+    expected_name: &str,
+    expected_error_code: i16,
+) {
+    assert_describe_topic_partitions_error_fields(topic, expected_name, expected_error_code);
+    assert_eq!(topic.topic_authorized_operations, 3_576);
+}
+
+fn assert_describe_topic_partitions_request_error(
+    topic: &DescribeTopicPartitionsResponseTopic,
+    expected_name: &str,
+    expected_error_code: i16,
+) {
+    assert_describe_topic_partitions_error_fields(topic, expected_name, expected_error_code);
+    assert_eq!(topic.topic_authorized_operations, i32::MIN);
+}
+
+fn assert_describe_topic_partitions_error_fields(
     topic: &DescribeTopicPartitionsResponseTopic,
     expected_name: &str,
     expected_error_code: i16,

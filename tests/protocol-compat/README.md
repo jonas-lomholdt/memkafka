@@ -12,6 +12,15 @@ unsupported ApiVersions v5 and v32767 requests to MemKafka and a live Kafka
 broker, then compares the uniquely decoded response encodings. Ordinary clients
 negotiate supported versions and therefore cannot exercise these paths.
 
+The same run compares eight supported-response semantic cases against live
+Kafka 4.3.1: Metadata request failures at v10-v13, UUID/name set semantics, and
+DescribeCluster v2 controller and unknown endpoint errors. These cases retain
+exact response envelopes, authorization sentinels, topic IDs/names, top-level
+errors, endpoint types, and error messages rather than reducing the result to
+an error code. The two normal Metadata selection cases canonicalize only the
+target-specific cluster ID and advertised host/port; broker count/ID, controller,
+topic order/cardinality, errors, IDs, names, and authorization remain exact.
+
 The environment is pinned to Kafka clients 4.3.1, Java 25 in
 `maven:3.9.11-eclipse-temurin-25`, and Kafka 4.3.1 at the digest in `run.sh`.
 Build the locally owned MemKafka image, then run the oracle:

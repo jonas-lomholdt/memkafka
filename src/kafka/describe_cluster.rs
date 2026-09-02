@@ -18,8 +18,16 @@ pub(crate) fn response(
 ) -> DescribeClusterResponse {
     match request.endpoint_type {
         1 => broker_response(request, broker, advertised_kafka),
-        2 => error_response(2, ResponseError::MismatchedEndpointType),
-        endpoint_type => error_response(endpoint_type, ResponseError::UnsupportedEndpointType),
+        2 => error_response(
+            ResponseError::MismatchedEndpointType,
+            StrBytes::from_static_str(
+                "The request was sent to an endpoint of type BROKER, but we wanted an endpoint of type CONTROLLER",
+            ),
+        ),
+        endpoint_type => error_response(
+            ResponseError::UnsupportedEndpointType,
+            StrBytes::from_string(format!("Unsupported endpoint type {endpoint_type}")),
+        ),
     }
 }
 
@@ -48,8 +56,8 @@ fn broker_response(
         ))
 }
 
-fn error_response(endpoint_type: i8, error: ResponseError) -> DescribeClusterResponse {
+fn error_response(error: ResponseError, message: StrBytes) -> DescribeClusterResponse {
     DescribeClusterResponse::default()
-        .with_endpoint_type(endpoint_type)
         .with_error_code(error.code())
+        .with_error_message(Some(message))
 }

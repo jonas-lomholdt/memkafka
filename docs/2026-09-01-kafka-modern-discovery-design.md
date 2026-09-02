@@ -91,18 +91,19 @@ MemKafka has no authorizer, matching Kafka's allow-all behavior when no authoriz
 - topic operations `READ`, `WRITE`, `CREATE`, `DELETE`, `ALTER`, `DESCRIBE`, `DESCRIBE_CONFIGS`, and `ALTER_CONFIGS`: `3576`;
 - cluster operations `CREATE`, `ALTER`, `DESCRIBE`, `CLUSTER_ACTION`, `DESCRIBE_CONFIGS`, `ALTER_CONFIGS`, and `IDEMPOTENT_WRITE`: `8096`.
 
-An optional authorized-operations field remains the schema default `i32::MIN` unless the request asks for it. `DescribeTopicPartitions` has no include flag, so successful topic entries always carry the topic bitfield, matching Kafka 4.3.1.
+An optional authorized-operations field remains the schema default `i32::MIN` unless the request asks for it. For Metadata, normally processed name resources receive the requested topic bitfield, while request-level errors and unknown-UUID results retain the default sentinel. `DescribeTopicPartitions` has no include flag, so every normally processed topic—including missing and invalid names—carries the topic bitfield; request-level failures retain the default sentinel. These categories match Kafka 4.3.1.
 
 ## Metadata v4-v13
 
-Existing name-based behavior remains unchanged for v4-v9. Successful Metadata responses at v10-v13 include the catalog UUID.
+Existing name lookup, auto-creation, and error behavior remains unchanged for v4-v9. Every name-mode version uses Kafka's set semantics to de-duplicate names. Successful Metadata responses at v10-v13 include the catalog UUID.
 
 Kafka's version-specific request rules apply:
 
 - v10-v11 do not support UUID requests. A null name or non-nil request UUID produces `INVALID_REQUEST` for the requested entries.
 - v12-v13 support UUID requests.
-- if any v12-v13 request entry contains a non-nil UUID, the complete request uses UUID mode, matching Kafka. Name-only entries in that mixed request are not independently resolved.
-- otherwise the request uses name mode.
+- if any v12-v13 request entry contains a non-nil UUID, the complete request uses UUID mode, matching Kafka. UUID mode de-duplicates the non-nil UUIDs and omits every zero-UUID/name-only entry rather than independently resolving it.
+- otherwise the request uses name mode and de-duplicates requested names.
+- in v12-v13 name mode, a null name follows Kafka 4.3.1's live request-failure path and produces `UNKNOWN_SERVER_ERROR`; v13 carries the same top-level error, while v12 has no encoded top-level error field.
 - a null topic collection lists all topics; an empty collection requests no topics for every supported version.
 
 Name mode:
@@ -116,9 +117,12 @@ UUID mode:
 
 - known UUIDs resolve through the reverse index and return the canonical name and stored UUID;
 - unknown UUIDs return `UNKNOWN_TOPIC_ID`, preserve the requested UUID, use a null name in v12-v13, and return no partitions;
+- unknown UUID results precede known topic metadata in the response;
 - UUID requests never auto-create topics.
 
-Topic and cluster authorized-operation fields use the shared constants only when the applicable request flag is true. Metadata v13's top-level error is zero for a normally processed request. Semantic request failures use the Kafka error-response shape: each requested entry receives `INVALID_REQUEST`, and v13 also carries the top-level error.
+For normally processed requests, topic and cluster authorized-operation fields use the shared constants only when the applicable request flag is true, except that unknown-UUID results retain the default topic sentinel. Metadata v13's top-level error is zero for a normally processed request.
+
+Semantic request failures are constructed before the normal broker envelope. They return no brokers, a null cluster ID, controller `-1`, and default authorization sentinels. Each raw requested entry is retained, including duplicates; its UUID is preserved, and a null name is normalized to the non-null empty string required by Kafka Java's v10-v11 response decoder. The per-topic error is `INVALID_REQUEST` for malformed v10-v11 requests and `UNKNOWN_SERVER_ERROR` for the verified v12-v13 null-name path. Only v13 encodes the same error at the top level.
 
 ## CreateTopics v4-v7
 
@@ -145,7 +149,7 @@ For endpoint type `1` (brokers), return:
 - exactly one broker with the connection-specific advertised address, null rack, and `is_fenced=false`;
 - cluster authorized operations `8096` when requested, otherwise `i32::MIN`.
 
-Endpoint type `2` (controllers) returns `MISMATCHED_ENDPOINT_TYPE`, because MemKafka exposes a broker endpoint and does not pretend to expose a KRaft controller listener. Any other endpoint type returns `UNSUPPORTED_ENDPOINT_TYPE`. Error responses do not fabricate brokers.
+Endpoint type `2` (controllers) returns `MISMATCHED_ENDPOINT_TYPE` with `The request was sent to an endpoint of type BROKER, but we wanted an endpoint of type CONTROLLER`, because MemKafka exposes a broker endpoint and does not pretend to expose a KRaft controller listener. Any other endpoint type returns `UNSUPPORTED_ENDPOINT_TYPE` with `Unsupported endpoint type <id>`. Both error forms retain response endpoint type `1`, default authorization, an empty cluster ID and broker list, and controller `-1`.
 
 ## DescribeTopicPartitions v0
 
@@ -176,12 +180,14 @@ A start partition at or beyond a real topic's partition count yields a successfu
 
 ### Topic results
 
-Successful topics return the stored UUID, false internal status, the topic authorization bitfield, and partitions with broker `1` as leader/replica/ISR, epoch `0`, null eligible-leader and last-known-ELR lists, and no offline replicas.
+Successful topics return the stored UUID, false internal status, the topic authorization bitfield, and partitions with broker `1` as leader/replica/ISR, epoch `0`, present empty eligible-leader-replica and last-known-ELR arrays, and no offline replicas. Kafka Java 4.3.1 requires these decoded arrays to be present rather than null.
 
 For an explicit request:
 
 - a valid missing name returns `UNKNOWN_TOPIC_OR_PARTITION`, nil UUID, and no partitions;
 - an invalid name returns `INVALID_TOPIC_EXCEPTION`, nil UUID, and no partitions.
+
+Both normally processed error topics carry the topic authorization bitfield. Request-level cursor failures preserve the raw requested entries but retain the default authorization sentinel.
 
 An all-topics request omits missing topics by construction. DescribeTopicPartitions never auto-creates topics.
 

@@ -15,14 +15,19 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.ApiVersionsResponseData;
+import org.apache.kafka.common.message.DescribeClusterResponseData;
 import org.apache.kafka.common.message.MetadataResponseData;
 import org.apache.kafka.common.message.ResponseHeaderData;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.protocol.MessageUtil;
 import org.apache.kafka.common.protocol.types.RawTaggedField;
+import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.requests.ResponseHeader;
 import org.junit.jupiter.api.Test;
@@ -51,6 +56,118 @@ final class ProtocolCompatibilityProbeTest {
                 () -> ProtocolCompatibilityProbe.validateTypedErrorCases(cases));
 
         assertTrue(failure.getMessage().contains("27 unique cases"));
+    }
+
+    @Test
+    void supportedSemanticCasesCoverMetadataV10ThroughV13AndEndpointErrors() {
+        var cases = ProtocolCompatibilityProbe.supportedSemanticCases();
+
+        assertEquals(
+                List.of(
+                        "metadata-request-error-v10",
+                        "metadata-request-error-v11",
+                        "metadata-request-error-v12",
+                        "metadata-request-error-v13",
+                        "metadata-uuid-set-semantics",
+                        "metadata-name-set-semantics",
+                        "describe-cluster-controller-endpoint",
+                        "describe-cluster-unknown-endpoint"),
+                cases.stream().map(ProtocolCompatibilityProbe.SupportedSemanticCase::name).toList());
+        assertEquals(
+                List.of((short) 10, (short) 11, (short) 12, (short) 13, (short) 13, (short) 13),
+                cases.stream()
+                        .filter(testCase -> testCase.apiKey() == ApiKeys.METADATA)
+                        .map(ProtocolCompatibilityProbe.SupportedSemanticCase::version)
+                        .toList());
+        assertEquals(
+                List.of((byte) 2, (byte) 99),
+                cases.stream()
+                        .filter(testCase -> testCase.apiKey() == ApiKeys.DESCRIBE_CLUSTER)
+                        .map(testCase -> testCase.request().data())
+                        .map(data -> ((org.apache.kafka.common.message.DescribeClusterRequestData) data)
+                                .endpointType())
+                        .toList());
+    }
+
+    @Test
+    void everySupportedSemanticRequestSerializesAtItsDeclaredVersion() {
+        for (var testCase : ProtocolCompatibilityProbe.supportedSemanticCases()) {
+            assertDoesNotThrow(
+                    () -> testCase.request().serializeWithHeader(new RequestHeader(
+                            testCase.apiKey(),
+                            testCase.version(),
+                            "test-client",
+                            testCase.correlationId())),
+                    testCase.name());
+        }
+    }
+
+    @Test
+    void metadataRequestErrorOracleUsesKafka431WireDefaultsAcrossSupportedVersions() {
+        for (short version = 10; version <= 13; version++) {
+            var request = ProtocolCompatibilityProbe.metadataRequestErrorOracle(version);
+            var expectedError = version <= 11
+                    ? Errors.INVALID_REQUEST
+                    : Errors.UNKNOWN_SERVER_ERROR;
+            var exception = version <= 11
+                    ? new InvalidRequestException("semantic oracle")
+                    : new NullPointerException("semantic oracle");
+            var response = request.getErrorResponse(0, exception);
+            var encoded = MessageUtil.toByteBufferAccessor(
+                            response.data(), version)
+                    .buffer();
+            var decoded = (MetadataResponseData) AbstractResponse.parseResponse(
+                            ApiKeys.METADATA,
+                            new ByteBufferAccessor(encoded),
+                            version)
+                    .data();
+
+            assertTrue(decoded.brokers().isEmpty(), "v" + version);
+            assertEquals(null, decoded.clusterId(), "v" + version);
+            assertEquals(-1, decoded.controllerId(), "v" + version);
+            assertEquals(Integer.MIN_VALUE, decoded.clusterAuthorizedOperations(), "v" + version);
+            var topics = new ArrayList<MetadataResponseData.MetadataResponseTopic>();
+            decoded.topics().forEach(topics::add);
+            assertEquals(2, topics.size(), "v" + version);
+            assertEquals("oracle-metadata-request-error", topics.get(0).name(), "v" + version);
+            assertEquals(
+                    new Uuid(0x1234567812345678L, 0x9abcdef012345678L),
+                    topics.get(0).topicId(),
+                    "v" + version);
+            assertEquals("", topics.get(1).name(), "v" + version);
+            assertEquals(Uuid.ZERO_UUID, topics.get(1).topicId(), "v" + version);
+            for (var topic : topics) {
+                assertEquals(expectedError.code(), topic.errorCode(), "v" + version);
+                assertEquals(Integer.MIN_VALUE, topic.topicAuthorizedOperations(), "v" + version);
+                assertTrue(topic.partitions().isEmpty(), "v" + version);
+            }
+            assertEquals(
+                    version == 13 ? expectedError.code() : Errors.NONE.code(),
+                    decoded.errorCode(),
+                    "v" + version);
+        }
+    }
+
+    @Test
+    void supportedSemanticNormalizationPreservesOrderAndExactMessages() {
+        var testCase = ProtocolCompatibilityProbe.supportedSemanticCases().stream()
+                .filter(candidate -> candidate.name().equals("describe-cluster-controller-endpoint"))
+                .findFirst()
+                .orElseThrow();
+        var response = new DescribeClusterResponseData()
+                .setErrorCode(Errors.MISMATCHED_ENDPOINT_TYPE.code())
+                .setErrorMessage("exact Kafka endpoint message");
+
+        var normalized = ProtocolCompatibilityProbe.normalizeSupportedResponse(
+                testCase,
+                new org.apache.kafka.common.requests.DescribeClusterResponse(response),
+                new ResponseHeader(
+                        testCase.correlationId(),
+                        testCase.apiKey().responseHeaderVersion(testCase.version())));
+
+        assertEquals(
+                "exact Kafka endpoint message",
+                normalized.at("/response/errorMessage").textValue());
     }
 
     @Test

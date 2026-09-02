@@ -87,11 +87,17 @@ pub(crate) async fn response(
         let metadata = match broker.topics().get(name).await {
             Ok(Some(metadata)) => metadata,
             Ok(None) => {
-                topics.push(error_topic(name, ResponseError::UnknownTopicOrPartition));
+                topics.push(resource_error_topic(
+                    name,
+                    ResponseError::UnknownTopicOrPartition,
+                ));
                 continue;
             }
             Err(TopicError::InvalidName) => {
-                topics.push(error_topic(name, ResponseError::InvalidTopicException));
+                topics.push(resource_error_topic(
+                    name,
+                    ResponseError::InvalidTopicException,
+                ));
                 continue;
             }
             Err(error) => unreachable!("topic lookup returned creation-only error: {error}"),
@@ -179,6 +185,10 @@ fn error_topic(name: &str, error: ResponseError) -> DescribeTopicPartitionsRespo
         .with_topic_id(Uuid::nil())
         .with_is_internal(false)
         .with_partitions(Vec::new())
+}
+
+fn resource_error_topic(name: &str, error: ResponseError) -> DescribeTopicPartitionsResponseTopic {
+    error_topic(name, error).with_topic_authorized_operations(TOPIC_AUTHORIZED_OPERATIONS)
 }
 
 fn cursor(name: &str, partition_index: usize) -> Cursor {
