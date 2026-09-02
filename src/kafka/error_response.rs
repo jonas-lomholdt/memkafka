@@ -4,8 +4,9 @@ use bytes::Bytes;
 use kafka_protocol::{
     ResponseError,
     messages::{
-        ApiKey, ApiVersionsResponse, BrokerId, CreateTopicsResponse, DescribeConfigsResponse,
-        DescribeGroupsResponse, FetchResponse, FindCoordinatorResponse, HeartbeatResponse,
+        ApiKey, ApiVersionsResponse, BrokerId, CreateTopicsResponse, DescribeClusterResponse,
+        DescribeConfigsResponse, DescribeGroupsResponse, DescribeTopicPartitionsRequest,
+        DescribeTopicPartitionsResponse, FetchResponse, FindCoordinatorResponse, HeartbeatResponse,
         InitProducerIdResponse, JoinGroupResponse, LeaveGroupResponse, ListGroupsResponse,
         ListOffsetsResponse, MetadataResponse, OffsetCommitResponse, OffsetFetchResponse,
         ProduceResponse, ProducerId, RequestKind, ResponseKind, SyncGroupResponse,
@@ -13,6 +14,7 @@ use kafka_protocol::{
         create_topics_response::CreatableTopicResult,
         describe_configs_response::DescribeConfigsResult,
         describe_groups_response::DescribedGroup,
+        describe_topic_partitions_response::DescribeTopicPartitionsResponseTopic,
         fetch_response::{FetchableTopicResponse, PartitionData},
         find_coordinator_response::Coordinator,
         list_offsets_response::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse},
@@ -28,6 +30,7 @@ use kafka_protocol::{
 };
 
 use super::codec::DecodedRequest;
+use uuid::Uuid;
 
 pub(crate) const ERROR_RESPONSE_API_KEYS: &[ApiKey] = &[
     ApiKey::Produce,
@@ -47,6 +50,8 @@ pub(crate) const ERROR_RESPONSE_API_KEYS: &[ApiKey] = &[
     ApiKey::CreateTopics,
     ApiKey::InitProducerId,
     ApiKey::DescribeConfigs,
+    ApiKey::DescribeCluster,
+    ApiKey::DescribeTopicPartitions,
 ];
 
 const UNSUPPORTED_VERSION_MESSAGE: &str = "The version of API is not supported.";
@@ -91,6 +96,12 @@ pub(crate) fn unsupported_version(
         (ApiKey::DescribeConfigs, RequestKind::DescribeConfigs(body)) => {
             Ok(unsupported_describe_configs(body).into())
         }
+        (ApiKey::DescribeCluster, RequestKind::DescribeCluster(_)) => {
+            Ok(unsupported_describe_cluster().into())
+        }
+        (ApiKey::DescribeTopicPartitions, RequestKind::DescribeTopicPartitions(body)) => {
+            Ok(unsupported_describe_topic_partitions(body).into())
+        }
         _ => Err(ErrorResponseError::BodyMismatch(request.api_key)),
     }
 }
@@ -132,6 +143,31 @@ impl Error for ErrorResponseError {}
 
 fn unsupported_code() -> i16 {
     ResponseError::UnsupportedVersion.code()
+}
+
+fn unsupported_describe_cluster() -> DescribeClusterResponse {
+    DescribeClusterResponse::default()
+        .with_error_code(unsupported_code())
+        .with_error_message(Some(StrBytes::from_static_str(UNSUPPORTED_VERSION_MESSAGE)))
+}
+
+fn unsupported_describe_topic_partitions(
+    request: &DescribeTopicPartitionsRequest,
+) -> DescribeTopicPartitionsResponse {
+    DescribeTopicPartitionsResponse::default().with_topics(
+        request
+            .topics
+            .iter()
+            .map(|topic| {
+                DescribeTopicPartitionsResponseTopic::default()
+                    .with_error_code(unsupported_code())
+                    .with_name(Some(topic.name.clone()))
+                    .with_topic_id(Uuid::nil())
+                    .with_is_internal(false)
+                    .with_partitions(Vec::new())
+            })
+            .collect(),
+    )
 }
 
 fn unsupported_produce(
@@ -549,14 +585,15 @@ mod tests {
     use kafka_protocol::{
         ResponseError,
         messages::{
-            ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeConfigsRequest,
-            DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest,
-            InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
-            ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
-            ProduceRequest, ProducerId, RequestHeader, RequestKind, ResponseHeader, ResponseKind,
-            SyncGroupRequest, TopicName,
+            ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeClusterRequest,
+            DescribeConfigsRequest, DescribeGroupsRequest, DescribeTopicPartitionsRequest,
+            FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest, InitProducerIdRequest,
+            JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest,
+            MetadataRequest, OffsetCommitRequest, OffsetFetchRequest, ProduceRequest, ProducerId,
+            RequestHeader, RequestKind, ResponseHeader, ResponseKind, SyncGroupRequest, TopicName,
             create_topics_request::CreatableTopic,
             describe_configs_request::DescribeConfigsResource,
+            describe_topic_partitions_request::TopicRequest,
             fetch_request::{FetchPartition, FetchTopic},
             leave_group_request::MemberIdentity,
             list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
@@ -636,6 +673,44 @@ mod tests {
     }
 
     #[test]
+    fn constructed_describe_topic_partitions_error_preserves_raw_names_and_duplicates() {
+        let request = DecodedRequest {
+            header: RequestHeader::default()
+                .with_request_api_key(ApiKey::DescribeTopicPartitions as i16)
+                .with_request_api_version(0),
+            api_key: ApiKey::DescribeTopicPartitions,
+            body: RequestKind::DescribeTopicPartitions(
+                DescribeTopicPartitionsRequest::default().with_topics(vec![
+                    TopicRequest::default().with_name(topic_name("bravo")),
+                    TopicRequest::default().with_name(topic_name("alpha")),
+                    TopicRequest::default().with_name(topic_name("bravo")),
+                ]),
+            ),
+        };
+
+        let response = unsupported_version(&request).expect("build constructed error response");
+        let ResponseKind::DescribeTopicPartitions(response) = response else {
+            panic!("expected DescribeTopicPartitions response");
+        };
+        assert_eq!(response.topics.len(), 3);
+        assert_eq!(response.next_cursor, None);
+        assert_eq!(
+            response
+                .topics
+                .iter()
+                .map(|topic| topic.name.as_ref().expect("raw name").as_str())
+                .collect::<Vec<_>>(),
+            vec!["bravo", "alpha", "bravo"]
+        );
+        for topic in response.topics {
+            assert_eq!(topic.error_code, ResponseError::UnsupportedVersion.code());
+            assert!(topic.topic_id.is_nil());
+            assert!(!topic.is_internal);
+            assert!(topic.partitions.is_empty());
+        }
+    }
+
+    #[test]
     fn error_response_reports_api_and_body_mismatches() {
         let mismatch = DecodedRequest {
             header: RequestHeader::default().with_request_api_version(3),
@@ -699,7 +774,7 @@ mod tests {
         assert!(!request.expects_response());
     }
 
-    fn cases() -> [ErrorResponseCase; 17] {
+    fn cases() -> [ErrorResponseCase; 18] {
         [
             ErrorResponseCase {
                 api_key: ApiKey::Produce,
@@ -802,6 +877,12 @@ mod tests {
                 request_for: describe_configs_request,
                 extra_versions: &[4],
                 assert_shape: assert_describe_configs,
+            },
+            ErrorResponseCase {
+                api_key: ApiKey::DescribeCluster,
+                request_for: describe_cluster_request,
+                extra_versions: &[0],
+                assert_shape: assert_describe_cluster,
             },
         ]
     }
@@ -1155,6 +1236,10 @@ mod tests {
                 .with_resource_type(4)
                 .with_resource_name(StrBytes::from_static_str("configured-broker")),
         ]))
+    }
+
+    fn describe_cluster_request(_: i16) -> RequestKind {
+        RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1))
     }
 
     fn assert_produce(response: &ResponseKind, version: i16) {
@@ -1578,6 +1663,23 @@ mod tests {
             assert_eq!(result.resource_name.as_str(), expected_name);
             assert!(result.configs.is_empty());
         }
+    }
+
+    fn assert_describe_cluster(response: &ResponseKind, _: i16) {
+        let ResponseKind::DescribeCluster(response) = response else {
+            panic!("expected DescribeCluster response, got {response:?}");
+        };
+        assert_eq!(response.throttle_time_ms, 0);
+        assert_unsupported(response.error_code);
+        assert_eq!(
+            response.error_message.as_ref().map(StrBytes::as_str),
+            Some(UNSUPPORTED_VERSION_MESSAGE)
+        );
+        assert_eq!(response.endpoint_type, 1);
+        assert!(response.cluster_id.is_empty());
+        assert_eq!(response.controller_id, BrokerId::from(-1));
+        assert!(response.brokers.is_empty());
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
     }
 
     fn assert_unsupported(error_code: i16) {

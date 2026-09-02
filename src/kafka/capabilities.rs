@@ -67,7 +67,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::Metadata,
         name: "Metadata",
-        supported: VersionWindow { min: 4, max: 9 },
+        supported: VersionWindow { min: 4, max: 13 },
         kafka_4_3: VersionWindow { min: 0, max: 13 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -166,7 +166,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::CreateTopics,
         name: "CreateTopics",
-        supported: VersionWindow { min: 4, max: 6 },
+        supported: VersionWindow { min: 4, max: 7 },
         kafka_4_3: VersionWindow { min: 2, max: 7 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -189,6 +189,20 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
         supported: VersionWindow { min: 1, max: 1 },
         kafka_4_3: VersionWindow { min: 1, max: 4 },
         proof_scenarios: &["kafbat-1.5.0"],
+    },
+    ApiCapability {
+        api_key: ApiKey::DescribeCluster,
+        name: "DescribeCluster",
+        supported: VersionWindow { min: 2, max: 2 },
+        kafka_4_3: VersionWindow { min: 0, max: 2 },
+        proof_scenarios: &["apache-kafka-java-4.3.1"],
+    },
+    ApiCapability {
+        api_key: ApiKey::DescribeTopicPartitions,
+        name: "DescribeTopicPartitions",
+        supported: VersionWindow { min: 0, max: 0 },
+        kafka_4_3: VersionWindow { min: 0, max: 0 },
+        proof_scenarios: &["apache-kafka-java-4.3.1"],
     },
 ];
 
@@ -245,7 +259,7 @@ mod tests {
 
     #[test]
     fn registry_is_sorted_unique_and_has_nonempty_contained_windows() {
-        assert_eq!(CAPABILITIES.len(), 17);
+        assert_eq!(CAPABILITIES.len(), 19);
         assert!(
             CAPABILITIES
                 .windows(2)
@@ -429,6 +443,18 @@ mod tests {
                     (1, 4),
                     &["kafbat-1.5.0",][..]
                 ),
+                (
+                    ApiKey::DescribeCluster,
+                    "DescribeCluster",
+                    (0, 2),
+                    &["apache-kafka-java-4.3.1",][..]
+                ),
+                (
+                    ApiKey::DescribeTopicPartitions,
+                    "DescribeTopicPartitions",
+                    (0, 0),
+                    &["apache-kafka-java-4.3.1",][..]
+                ),
             ]
         );
     }
@@ -462,7 +488,7 @@ mod tests {
                 (ApiKey::Produce, 7, 7),
                 (ApiKey::Fetch, 4, 4),
                 (ApiKey::ListOffsets, 3, 3),
-                (ApiKey::Metadata, 4, 9),
+                (ApiKey::Metadata, 4, 13),
                 (ApiKey::OffsetCommit, 7, 7),
                 (ApiKey::OffsetFetch, 5, 5),
                 (ApiKey::FindCoordinator, 2, 2),
@@ -473,9 +499,11 @@ mod tests {
                 (ApiKey::DescribeGroups, 0, 0),
                 (ApiKey::ListGroups, 0, 0),
                 (ApiKey::ApiVersions, 3, 4),
-                (ApiKey::CreateTopics, 4, 6),
+                (ApiKey::CreateTopics, 4, 7),
                 (ApiKey::InitProducerId, 0, 0),
                 (ApiKey::DescribeConfigs, 1, 1),
+                (ApiKey::DescribeCluster, 2, 2),
+                (ApiKey::DescribeTopicPartitions, 0, 0),
             ]
         );
     }
@@ -552,7 +580,7 @@ mod tests {
         assert!(first.ends_with('\n'));
         assert_eq!(document["schemaVersion"], 1);
         assert_eq!(document["kafkaBaseline"], "4.3");
-        assert_eq!(document["apis"].as_array().map(Vec::len), Some(17));
+        assert_eq!(document["apis"].as_array().map(Vec::len), Some(19));
         assert_eq!(document["apis"][0]["apiKey"], 0);
         assert_eq!(document["apis"][0]["name"], "Produce");
         assert_eq!(document["apis"][0]["supported"]["min"], 7);

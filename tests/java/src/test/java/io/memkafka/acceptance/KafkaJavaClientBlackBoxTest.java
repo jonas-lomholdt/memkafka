@@ -3,6 +3,7 @@ package io.memkafka.acceptance;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.time.Duration;
@@ -11,9 +12,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.DescribeTopicsOptions;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.TopicListing;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -21,6 +25,7 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.errors.InvalidReplicationFactorException;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -30,6 +35,8 @@ import org.junit.jupiter.api.Test;
 final class KafkaJavaClientBlackBoxTest {
     private static final String BOOTSTRAP_SERVERS = System.getenv().getOrDefault(
             "MEMKAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092");
+    private static final String EXPECTED_CLUSTER_ID = System.getenv().getOrDefault(
+            "MEMKAFKA_EXPECTED_CLUSTER_ID", "memkafka");
 
     @Test
     void producerMetadataAutoCreatesTwoPartitions() {
@@ -54,6 +61,48 @@ final class KafkaJavaClientBlackBoxTest {
                     .get(5, SECONDS)
                     .get(topic);
             assertEquals(6, description.partitions().size());
+        }
+    }
+
+    @Test
+    void adminDiscoversClusterAndStableTopicIdsThroughPagination() throws Exception {
+        var first = uniqueTopic("java-discovery-a");
+        var second = uniqueTopic("java-discovery-b");
+
+        try (var admin = Admin.create(adminConfiguration())) {
+            var cluster = admin.describeCluster();
+            assertEquals(EXPECTED_CLUSTER_ID, cluster.clusterId().get(5, SECONDS));
+            var controller = cluster.controller().get(5, SECONDS);
+            var nodes = cluster.nodes().get(5, SECONDS);
+            assertEquals(1, nodes.size());
+            assertEquals(controller.id(), nodes.iterator().next().id());
+
+            var create = admin.createTopics(List.of(
+                    new NewTopic(first, 3, (short) 1),
+                    new NewTopic(second, 2, (short) 1)));
+            create.all().get(5, SECONDS);
+            var createdFirstId = create.topicId(first).get(5, SECONDS);
+            var createdSecondId = create.topicId(second).get(5, SECONDS);
+            assertNotEquals(org.apache.kafka.common.Uuid.ZERO_UUID, createdFirstId);
+            assertNotEquals(org.apache.kafka.common.Uuid.ZERO_UUID, createdSecondId);
+
+            var options = new DescribeTopicsOptions().partitionSizeLimitPerResponse(2);
+            var described = admin.describeTopics(List.of(second, first), options)
+                    .allTopicNames()
+                    .get(5, SECONDS);
+            var listings = admin.listTopics().listings().get(5, SECONDS).stream()
+                    .collect(Collectors.toMap(TopicListing::name, TopicListing::topicId));
+
+            assertEquals(createdFirstId, described.get(first).topicId());
+            assertEquals(createdSecondId, described.get(second).topicId());
+            assertEquals(createdFirstId, listings.get(first));
+            assertEquals(createdSecondId, listings.get(second));
+            assertEquals(List.of(0, 1, 2), described.get(first).partitions().stream()
+                    .map(TopicPartitionInfo::partition)
+                    .toList());
+            assertEquals(List.of(0, 1), described.get(second).partitions().stream()
+                    .map(TopicPartitionInfo::partition)
+                    .toList());
         }
     }
 

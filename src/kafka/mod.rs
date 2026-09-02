@@ -4,8 +4,11 @@ pub mod capabilities;
 pub mod codec;
 pub mod connection;
 mod create_topics;
+mod describe_cluster;
 mod describe_configs;
 mod describe_groups;
+mod describe_topic_partitions;
+mod discovery;
 pub mod dispatcher;
 #[allow(dead_code)] // ERROR_RESPONSE_API_KEYS is a test-enforced coverage declaration.
 mod error_response;

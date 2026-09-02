@@ -66,7 +66,7 @@
       "name": "Metadata",
       "supported": {
         "min": 4,
-        "max": 9
+        "max": 13
       },
       "kafka43": {
         "min": 0,
@@ -249,7 +249,7 @@
       "name": "CreateTopics",
       "supported": {
         "min": 4,
-        "max": 6
+        "max": 7
       },
       "kafka43": {
         "min": 2,
@@ -292,6 +292,36 @@
       },
       "proofScenarios": [
         "kafbat-1.5.0"
+      ]
+    },
+    {
+      "apiKey": 60,
+      "name": "DescribeCluster",
+      "supported": {
+        "min": 2,
+        "max": 2
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 2
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1"
+      ]
+    },
+    {
+      "apiKey": 75,
+      "name": "DescribeTopicPartitions",
+      "supported": {
+        "min": 0,
+        "max": 0
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 0
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1"
       ]
     }
   ]

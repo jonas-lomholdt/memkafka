@@ -81,7 +81,9 @@ case "${1:-} ${2:-}" in
     output=$(probe_output_name "$@")
     mkdir -p "${results}"
     if contains typed-errors "$@"; then
-      printf '{"schemaVersion":1,"caseCount":28,"cases":[]}\n' >"${results}/${output}"
+      printf '{"schemaVersion":1,"caseCount":27,"cases":[]}\n' >"${results}/${output}"
+    elif contains supported-semantics "$@"; then
+      printf '{"schemaVersion":1,"caseCount":8,"cases":[]}\n' >"${results}/${output}"
     else
       version=5
       if [[ "${output}" == *32767* ]]; then

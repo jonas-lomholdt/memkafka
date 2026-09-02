@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.ApiVersionsRequestData;
 import org.apache.kafka.common.message.ApiVersionsResponseData;
@@ -34,6 +35,9 @@ import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopic;
 import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopicCollection;
 import org.apache.kafka.common.message.CreateTopicsResponseData;
 import org.apache.kafka.common.message.CreateTopicsResponseDataJsonConverter;
+import org.apache.kafka.common.message.DescribeClusterRequestData;
+import org.apache.kafka.common.message.DescribeClusterResponseData;
+import org.apache.kafka.common.message.DescribeClusterResponseDataJsonConverter;
 import org.apache.kafka.common.message.DescribeConfigsRequestData;
 import org.apache.kafka.common.message.DescribeConfigsRequestData.DescribeConfigsResource;
 import org.apache.kafka.common.message.DescribeConfigsResponseData;
@@ -104,6 +108,7 @@ import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
 import org.apache.kafka.common.requests.CreateTopicsRequest;
+import org.apache.kafka.common.requests.DescribeClusterRequest;
 import org.apache.kafka.common.requests.DescribeConfigsRequest;
 import org.apache.kafka.common.requests.DescribeGroupsRequest;
 import org.apache.kafka.common.requests.FetchRequest;
@@ -128,15 +133,16 @@ public final class ProtocolCompatibilityProbe {
     private static final int READ_TIMEOUT_MS = 5_000;
     private static final int API_VERSIONS_CORRELATION_ID = 1234;
     private static final int FIRST_TYPED_CORRELATION_ID = 10_000;
-    private static final int EXPECTED_TYPED_CASES = 28;
+    private static final int FIRST_SUPPORTED_SEMANTIC_CORRELATION_ID = 20_000;
+    private static final int EXPECTED_TYPED_CASES = 27;
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String CLIENT_ID = "memkafka-protocol-compatibility";
     private static final String ORACLE_ERROR_MESSAGE = "MemKafka compatibility oracle";
     private static final List<String> EXPECTED_CASE_KEYS = List.of(
-            "0:6", "0:8", "1:5", "2:2", "2:4", "3:3", "3:10",
+            "0:6", "0:8", "1:5", "2:2", "2:4", "3:3",
             "8:6", "8:8", "9:4", "9:6", "10:1", "10:3", "11:4", "11:6",
             "12:2", "12:4", "13:0", "13:4", "14:2", "14:4", "15:1",
-            "16:1", "18:2", "19:3", "19:7", "22:1", "32:2");
+            "16:1", "18:2", "19:3", "22:1", "32:2", "60:1");
 
     private ProtocolCompatibilityProbe() {}
 
@@ -145,6 +151,8 @@ public final class ProtocolCompatibilityProbe {
             var command = parseCommandLine(arguments);
             if (command.subcommand() == Subcommand.TYPED_ERRORS) {
                 runTypedErrors(command);
+            } else if (command.subcommand() == Subcommand.SUPPORTED_SEMANTICS) {
+                runSupportedSemantics(command);
             } else {
                 runApiVersions(command);
             }
@@ -156,10 +164,12 @@ public final class ProtocolCompatibilityProbe {
 
     static CommandLine parseCommandLine(String[] arguments) {
         if (arguments.length == 0) {
-            throw new IllegalArgumentException("expected typed-errors or api-versions");
+            throw new IllegalArgumentException(
+                    "expected typed-errors, supported-semantics, or api-versions");
         }
         var subcommand = switch (arguments[0]) {
             case "typed-errors" -> Subcommand.TYPED_ERRORS;
+            case "supported-semantics" -> Subcommand.SUPPORTED_SEMANTICS;
             case "api-versions" -> Subcommand.API_VERSIONS;
             default -> throw new IllegalArgumentException("unknown subcommand: " + arguments[0]);
         };
@@ -177,9 +187,9 @@ public final class ProtocolCompatibilityProbe {
                 throw new IllegalArgumentException("duplicate argument: " + name);
             }
         }
-        var allowed = subcommand == Subcommand.TYPED_ERRORS
-                ? Set.of("--bootstrap-server", "--output")
-                : Set.of("--bootstrap-server", "--version", "--output");
+        var allowed = subcommand == Subcommand.API_VERSIONS
+                ? Set.of("--bootstrap-server", "--version", "--output")
+                : Set.of("--bootstrap-server", "--output");
         for (var name : values.keySet()) {
             if (!allowed.contains(name)) {
                 throw new IllegalArgumentException("unknown argument: " + name);
@@ -210,6 +220,117 @@ public final class ProtocolCompatibilityProbe {
             }
         }
         return new CommandLine(subcommand, bootstrap, version, output);
+    }
+
+    static List<SupportedSemanticCase> supportedSemanticCases() {
+        var cases = new ArrayList<SupportedSemanticCase>();
+        for (short version = 10; version <= 13; version++) {
+            cases.add(new SupportedSemanticCase(
+                    "metadata-request-error-v" + version,
+                    ApiKeys.METADATA,
+                    version,
+                    FIRST_SUPPORTED_SEMANTIC_CORRELATION_ID + cases.size(),
+                    supportedMetadataErrorRequest(version)));
+        }
+        cases.add(new SupportedSemanticCase(
+                "metadata-uuid-set-semantics",
+                ApiKeys.METADATA,
+                (short) 13,
+                FIRST_SUPPORTED_SEMANTIC_CORRELATION_ID + cases.size(),
+                supportedMetadataUuidSetRequest()));
+        cases.add(new SupportedSemanticCase(
+                "metadata-name-set-semantics",
+                ApiKeys.METADATA,
+                (short) 13,
+                FIRST_SUPPORTED_SEMANTIC_CORRELATION_ID + cases.size(),
+                supportedMetadataNameSetRequest()));
+        cases.add(new SupportedSemanticCase(
+                "describe-cluster-controller-endpoint",
+                ApiKeys.DESCRIBE_CLUSTER,
+                (short) 2,
+                FIRST_SUPPORTED_SEMANTIC_CORRELATION_ID + cases.size(),
+                new DescribeClusterRequest(
+                        new DescribeClusterRequestData()
+                                .setEndpointType((byte) 2)
+                                .setIncludeClusterAuthorizedOperations(true),
+                        (short) 2)));
+        cases.add(new SupportedSemanticCase(
+                "describe-cluster-unknown-endpoint",
+                ApiKeys.DESCRIBE_CLUSTER,
+                (short) 2,
+                FIRST_SUPPORTED_SEMANTIC_CORRELATION_ID + cases.size(),
+                new DescribeClusterRequest(
+                        new DescribeClusterRequestData()
+                                .setEndpointType((byte) 99)
+                                .setIncludeClusterAuthorizedOperations(true),
+                        (short) 2)));
+        return List.copyOf(cases);
+    }
+
+    private static MetadataRequest supportedMetadataErrorRequest(short version) {
+        var data = new MetadataRequestData()
+                .setAllowAutoTopicCreation(true)
+                .setIncludeClusterAuthorizedOperations(version == 10)
+                .setIncludeTopicAuthorizedOperations(true);
+        if (version <= 11) {
+            data.setTopics(List.of(
+                    new MetadataRequestTopic()
+                            .setName("oracle-metadata-request-error-a")
+                            .setTopicId(new Uuid(0x1234567812345678L, 0x9abcdef012345678L)),
+                    new MetadataRequestTopic()
+                            .setName("oracle-metadata-request-error-b")
+                            .setTopicId(new Uuid(0x8765432143218765L, 0xcba9876543210fedL))));
+        } else {
+            data.setTopics(List.of(
+                    new MetadataRequestTopic().setName(null).setTopicId(Uuid.ZERO_UUID),
+                    new MetadataRequestTopic()
+                            .setName("oracle-metadata-must-not-resolve")
+                            .setTopicId(Uuid.ZERO_UUID)));
+        }
+        return new MetadataRequest(data, version);
+    }
+
+    private static MetadataRequest supportedMetadataUuidSetRequest() {
+        var first = new Uuid(0x1111111111111111L, 0x1111111111111111L);
+        var second = new Uuid(0x2222222222222222L, 0x2222222222222222L);
+        return new MetadataRequest(new MetadataRequestData()
+                .setTopics(List.of(
+                        new MetadataRequestTopic().setName(null).setTopicId(first),
+                        new MetadataRequestTopic()
+                                .setName("oracle-zero-id-name-only")
+                                .setTopicId(Uuid.ZERO_UUID),
+                        new MetadataRequestTopic().setName(null).setTopicId(first),
+                        new MetadataRequestTopic().setName(null).setTopicId(second),
+                        new MetadataRequestTopic()
+                                .setName("oracle-second-zero-id")
+                                .setTopicId(Uuid.ZERO_UUID)))
+                .setAllowAutoTopicCreation(true)
+                .setIncludeTopicAuthorizedOperations(true), (short) 13);
+    }
+
+    private static MetadataRequest supportedMetadataNameSetRequest() {
+        return new MetadataRequest(new MetadataRequestData()
+                .setTopics(List.of(
+                        new MetadataRequestTopic().setName("oracle-duplicate-name"),
+                        new MetadataRequestTopic().setName("oracle-duplicate-name"),
+                        new MetadataRequestTopic().setName("oracle-duplicate-name")))
+                .setAllowAutoTopicCreation(false)
+                .setIncludeTopicAuthorizedOperations(true), (short) 13);
+    }
+
+    static MetadataRequest metadataRequestErrorOracle(short version) {
+        return new MetadataRequest(new MetadataRequestData()
+                .setTopics(List.of(
+                        new MetadataRequestTopic()
+                                .setName("oracle-metadata-request-error")
+                                .setTopicId(new Uuid(
+                                        0x1234567812345678L, 0x9abcdef012345678L)),
+                        new MetadataRequestTopic()
+                                .setName(null)
+                                .setTopicId(Uuid.ZERO_UUID)))
+                .setAllowAutoTopicCreation(true)
+                .setIncludeClusterAuthorizedOperations(true)
+                .setIncludeTopicAuthorizedOperations(true), version);
     }
 
     private static HostPort parseHostPort(String value) {
@@ -269,14 +390,14 @@ public final class ProtocolCompatibilityProbe {
                 || unique.size() != EXPECTED_TYPED_CASES
                 || !actual.equals(EXPECTED_CASE_KEYS)) {
             throw new IllegalStateException(
-                    "typed-errors requires exactly 28 unique cases in API-key/version order; got " + actual);
+                    "typed-errors requires exactly 27 unique cases in API-key/version order; got " + actual);
         }
-        if (cases.stream().map(TypedErrorCase::apiKey).distinct().count() != 17) {
-            throw new IllegalStateException("typed-errors requires exactly 17 unique APIs");
+        if (cases.stream().map(TypedErrorCase::apiKey).distinct().count() != 18) {
+            throw new IllegalStateException("typed-errors requires exactly 18 unique APIs");
         }
     }
 
-    private static AbstractRequest buildTypedRequest(ApiKeys apiKey, short version) {
+    static AbstractRequest buildTypedRequest(ApiKeys apiKey, short version) {
         return switch (apiKey) {
             case PRODUCE -> produceRequest(version);
             case FETCH -> fetchRequest(version);
@@ -299,6 +420,8 @@ public final class ProtocolCompatibilityProbe {
                             .setTransactionTimeoutMs(10_000))
                     .build(version);
             case DESCRIBE_CONFIGS -> describeConfigsRequest(version);
+            case DESCRIBE_CLUSTER -> new DescribeClusterRequest(
+                    new DescribeClusterRequestData().setEndpointType((byte) 1), version);
             default -> throw new IllegalArgumentException("unexpected typed API: " + apiKey);
         };
     }
@@ -519,21 +642,91 @@ public final class ProtocolCompatibilityProbe {
         writeJson(command.output(), output);
     }
 
+    private static void runSupportedSemantics(CommandLine command) throws Exception {
+        var cases = supportedSemanticCases();
+        var output = JSON.createObjectNode();
+        output.put("schemaVersion", 1);
+        output.put("kafkaClientsVersion", "4.3.1");
+        output.put("caseCount", cases.size());
+        var normalizedCases = output.putArray("cases");
+
+        for (var testCase : cases) {
+            var header = new RequestHeader(
+                    testCase.apiKey(),
+                    testCase.version(),
+                    CLIENT_ID,
+                    testCase.correlationId());
+            var requestBytes = testCase.request().serializeWithHeader(header);
+            var responseBytes = exchange(command.bootstrapServer(), requestBytes);
+            var actualEnvelope = parseResponse(
+                    testCase.apiKey(),
+                    testCase.version(),
+                    testCase.correlationId(),
+                    responseBytes);
+            normalizedCases.add(normalizeSupportedResponse(
+                    testCase, actualEnvelope.response(), actualEnvelope.header()));
+        }
+        writeJson(command.output(), output);
+    }
+
     private static ParsedResponse parseTypedResponse(TypedErrorCase testCase, byte[] bytes) {
+        return parseResponse(
+                testCase.apiKey(), testCase.version(), testCase.correlationId(), bytes);
+    }
+
+    private static ParsedResponse parseResponse(
+            ApiKeys apiKey, short version, int correlationId, byte[] bytes) {
         var buffer = ByteBuffer.wrap(bytes);
-        var headerVersion = testCase.apiKey().responseHeaderVersion(testCase.version());
+        var headerVersion = apiKey.responseHeaderVersion(version);
         var header = ResponseHeader.parse(buffer, headerVersion);
-        if (header.correlationId() != testCase.correlationId()) {
-            throw new IllegalStateException(testCase.apiKey() + " v" + testCase.version()
+        if (header.correlationId() != correlationId) {
+            throw new IllegalStateException(apiKey + " v" + version
                     + " wrong correlation ID: " + header.correlationId());
         }
         var response = AbstractResponse.parseResponse(
-                testCase.apiKey(), new ByteBufferAccessor(buffer), testCase.version());
+                apiKey, new ByteBufferAccessor(buffer), version);
         if (buffer.hasRemaining()) {
-            throw new IllegalStateException(testCase.apiKey() + " v" + testCase.version()
+            throw new IllegalStateException(apiKey + " v" + version
                     + " response has " + buffer.remaining() + " trailing byte(s)");
         }
         return new ParsedResponse(header, response);
+    }
+
+    static ObjectNode normalizeSupportedResponse(
+            SupportedSemanticCase testCase, AbstractResponse response, ResponseHeader header) {
+        var normalized = JSON.createObjectNode();
+        normalized.put("case", testCase.name());
+        normalized.put("apiKey", testCase.apiKey().id);
+        normalized.put("apiName", testCase.apiKey().name);
+        normalized.put("requestVersion", testCase.version());
+        normalized.put("correlationId", header.correlationId());
+        normalized.put("responseHeaderVersion", header.headerVersion());
+        normalized.set("response", normalizeSupportedResponseData(testCase, response));
+        var taggedFields = normalized.putObject("taggedFields");
+        taggedFields.set("responseHeader", rawTags(header.data().unknownTaggedFields()));
+        taggedFields.set("response", rawTags(response.data().unknownTaggedFields()));
+        taggedFields.set(
+                "nestedResponse", nestedResponseTags(response, testCase.version()));
+        return normalized;
+    }
+
+    private static JsonNode normalizeSupportedResponseData(
+            SupportedSemanticCase testCase, AbstractResponse response) {
+        var generated = responseJson(response, testCase.version());
+        if (!testCase.name().equals("metadata-uuid-set-semantics")
+                && !testCase.name().equals("metadata-name-set-semantics")) {
+            return generated;
+        }
+
+        var normalized = (ObjectNode) generated.deepCopy();
+        normalized.put("clusterId", "<target-cluster-id>");
+        for (var broker : normalized.path("brokers")) {
+            if (broker instanceof ObjectNode brokerNode) {
+                brokerNode.put("host", "<target-advertised-host>");
+                brokerNode.put("port", 0);
+            }
+        }
+        return normalized;
     }
 
     static ObjectNode normalizeTypedResponse(
@@ -775,6 +968,8 @@ public final class ProtocolCompatibilityProbe {
                     (InitProducerIdResponseData) response.data(), version, false);
             case DESCRIBE_CONFIGS -> DescribeConfigsResponseDataJsonConverter.write(
                     (DescribeConfigsResponseData) response.data(), version, false);
+            case DESCRIBE_CLUSTER -> DescribeClusterResponseDataJsonConverter.write(
+                    (DescribeClusterResponseData) response.data(), version, false);
             default -> throw new IllegalArgumentException("unexpected response API: " + response.apiKey());
         };
     }
@@ -1028,13 +1223,20 @@ public final class ProtocolCompatibilityProbe {
                 StandardOpenOption.WRITE);
     }
 
-    enum Subcommand { TYPED_ERRORS, API_VERSIONS }
+    enum Subcommand { TYPED_ERRORS, SUPPORTED_SEMANTICS, API_VERSIONS }
 
     record HostPort(String host, int port) {}
 
     record CommandLine(Subcommand subcommand, HostPort bootstrapServer, Short version, Path output) {}
 
     record TypedErrorCase(ApiKeys apiKey, short version, int correlationId, AbstractRequest request) {}
+
+    record SupportedSemanticCase(
+            String name,
+            ApiKeys apiKey,
+            short version,
+            int correlationId,
+            AbstractRequest request) {}
 
     record ParsedResponse(ResponseHeader header, AbstractResponse response) {}
 

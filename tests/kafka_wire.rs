@@ -5,16 +5,21 @@ use clap::Parser;
 use kafka_protocol::{
     ResponseError,
     messages::{
-        ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeConfigsRequest,
-        DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest,
-        InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
-        ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
-        ProduceRequest, ProducerId, RequestHeader, RequestKind, ResponseHeader, ResponseKind,
-        SyncGroupRequest, TopicName, TransactionalId,
+        ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeClusterRequest,
+        DescribeClusterResponse, DescribeConfigsRequest, DescribeGroupsRequest,
+        DescribeTopicPartitionsRequest, DescribeTopicPartitionsResponse, FetchRequest,
+        FindCoordinatorRequest, GroupId, HeartbeatRequest, InitProducerIdRequest, JoinGroupRequest,
+        LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest, MetadataRequest,
+        OffsetCommitRequest, OffsetFetchRequest, ProduceRequest, ProducerId, RequestHeader,
+        RequestKind, ResponseHeader, ResponseKind, SyncGroupRequest, TopicName, TransactionalId,
         api_versions_response::{ApiVersion, ApiVersionsResponse},
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
         describe_configs_request::DescribeConfigsResource,
+        describe_topic_partitions_request::{
+            Cursor as DescribeTopicPartitionsRequestCursor, TopicRequest,
+        },
+        describe_topic_partitions_response::DescribeTopicPartitionsResponseTopic,
         fetch_request::{FetchPartition, FetchTopic},
         fetch_response::FetchResponse,
         join_group_request::JoinGroupRequestProtocol,
@@ -58,6 +63,7 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
+use uuid::Uuid;
 
 const API_VERSIONS_VERSION: i16 = 3;
 
@@ -386,10 +392,10 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
 
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
-    assert_eq!(response.api_keys.len(), 17);
-    assert_api_range(&response, ApiKey::Metadata, 4, 9);
+    assert_eq!(response.api_keys.len(), 19);
+    assert_api_range(&response, ApiKey::Metadata, 4, 13);
     assert_api_range(&response, ApiKey::ApiVersions, 3, 4);
-    assert_api_range(&response, ApiKey::CreateTopics, 4, 6);
+    assert_api_range(&response, ApiKey::CreateTopics, 4, 7);
     assert_api_range(&response, ApiKey::Produce, 7, 7);
     assert_api_range(&response, ApiKey::ListOffsets, 3, 3);
     assert_api_range(&response, ApiKey::Fetch, 4, 4);
@@ -404,6 +410,8 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_api_range(&response, ApiKey::DescribeGroups, 0, 0);
     assert_api_range(&response, ApiKey::InitProducerId, 0, 0);
     assert_api_range(&response, ApiKey::DescribeConfigs, 1, 1);
+    assert_api_range(&response, ApiKey::DescribeCluster, 2, 2);
+    assert_api_range(&response, ApiKey::DescribeTopicPartitions, 0, 0);
 }
 
 #[tokio::test]
@@ -469,10 +477,10 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         let (header, body) = decode_api_versions_response(response);
 
         assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(body.api_keys.len(), 17);
-        assert_api_range(&body, ApiKey::Metadata, 4, 9);
+        assert_eq!(body.api_keys.len(), 19);
+        assert_api_range(&body, ApiKey::Metadata, 4, 13);
         assert_api_range(&body, ApiKey::ApiVersions, 3, 4);
-        assert_api_range(&body, ApiKey::CreateTopics, 4, 6);
+        assert_api_range(&body, ApiKey::CreateTopics, 4, 7);
         assert_api_range(&body, ApiKey::Produce, 7, 7);
         assert_api_range(&body, ApiKey::ListOffsets, 3, 3);
         assert_api_range(&body, ApiKey::Fetch, 4, 4);
@@ -487,6 +495,8 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         assert_api_range(&body, ApiKey::DescribeGroups, 0, 0);
         assert_api_range(&body, ApiKey::InitProducerId, 0, 0);
         assert_api_range(&body, ApiKey::DescribeConfigs, 1, 1);
+        assert_api_range(&body, ApiKey::DescribeCluster, 2, 2);
+        assert_api_range(&body, ApiKey::DescribeTopicPartitions, 0, 0);
     }
 
     shutdown_tx.send(()).expect("request server shutdown");
@@ -560,7 +570,7 @@ async fn same_connection_survives_a_typed_unsupported_version_response() {
         panic!("expected ApiVersions response");
     };
     assert_eq!(response.error_code, 0);
-    assert_eq!(response.api_keys.len(), 17);
+    assert_eq!(response.api_keys.len(), 19);
 
     shutdown_tx.send(()).expect("request server shutdown");
     timeout(Duration::from_secs(1), server)
@@ -655,6 +665,9 @@ async fn advertised_api_same_connection_matrix() {
 
     for case in &cases {
         let capability = boundary_capability(&manifest, case.api_key);
+        if adjacent_unsupported_versions(capability).is_empty() {
+            continue;
+        }
         let requested_direction = scheduled_boundary_direction(case.api_key);
         let (version, actual_direction) =
             scheduled_same_connection_version(capability, requested_direction);
@@ -696,6 +709,11 @@ async fn advertised_api_same_connection_matrix() {
     assert_eq!(
         one_neighbor_exceptions,
         vec![
+            (
+                ApiKey::Metadata,
+                BoundaryDirection::Upper,
+                BoundaryDirection::Lower
+            ),
             (
                 ApiKey::ListGroups,
                 BoundaryDirection::Lower,
@@ -764,7 +782,6 @@ async fn tagged_field_boundary_rejections_remain_decodable() {
         (ApiKey::Produce, 9, 101, 201),
         (ApiKey::Fetch, 12, 102, 202),
         (ApiKey::OffsetFetch, 6, 103, 203),
-        (ApiKey::CreateTopics, 7, 104, 204),
     ]
     .into_iter()
     .enumerate()
@@ -2088,6 +2105,32 @@ async fn every_kafka_listener_advertises_its_own_address() {
     assert_ne!(listeners[0].listen(), listeners[1].listen());
     assert_eq!(endpoints.kafka(), listeners[0].listen());
 
+    let mut setup_connection = TcpStream::connect(listeners[0].listen())
+        .await
+        .expect("connect to primary Kafka listener");
+    let created = request_kind_over_tcp(
+        &mut setup_connection,
+        ApiKey::CreateTopics,
+        7,
+        1_999,
+        RequestKind::CreateTopics(
+            CreateTopicsRequest::default()
+                .with_topics(vec![creatable_topic("listener-identity", 3, 1)])
+                .with_timeout_ms(1_000),
+        ),
+        "CreateTopics v7",
+    )
+    .await;
+    let ResponseKind::CreateTopics(created) = created else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(created.topics[0].error_code, 0);
+    let topic_id = created.topics[0].topic_id;
+    assert!(!topic_id.is_nil());
+
+    let mut metadata_responses = Vec::new();
+    let mut cluster_responses = Vec::new();
+
     for (index, (expected_host, expected_port)) in
         [("host-clients", 19_092), ("container-clients", 19_093)]
             .into_iter()
@@ -2101,20 +2144,260 @@ async fn every_kafka_listener_advertises_its_own_address() {
         let mut connection = TcpStream::connect(listener.listen())
             .await
             .expect("connect to Kafka listener");
+        let metadata = request_kind_over_tcp(
+            &mut connection,
+            ApiKey::Metadata,
+            13,
+            correlation_id,
+            RequestKind::Metadata(
+                MetadataRequest::default()
+                    .with_topics(Some(vec![
+                        MetadataRequestTopic::default()
+                            .with_name(Some(topic_name("listener-identity"))),
+                    ]))
+                    .with_allow_auto_topic_creation(false),
+            ),
+            "Metadata v13",
+        )
+        .await;
+        let ResponseKind::Metadata(metadata) = metadata else {
+            panic!("expected Metadata response");
+        };
+        let cluster = request_kind_over_tcp(
+            &mut connection,
+            ApiKey::DescribeCluster,
+            2,
+            correlation_id + 100,
+            RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1)),
+            "DescribeCluster v2",
+        )
+        .await;
+        let ResponseKind::DescribeCluster(cluster) = cluster else {
+            panic!("expected DescribeCluster response");
+        };
+
+        assert_eq!(metadata.error_code, 0);
+        assert_eq!(metadata.brokers.len(), 1);
+        assert_eq!(metadata.brokers[0].node_id, 1);
+        assert_eq!(metadata.brokers[0].host.as_str(), expected_host);
+        assert_eq!(metadata.brokers[0].port, i32::from(expected_port));
+        assert_eq!(metadata.topics.len(), 1);
+        assert_eq!(metadata.topics[0].error_code, 0);
+        assert_eq!(metadata.topics[0].topic_id, topic_id);
+        assert_eq!(
+            metadata.topics[0]
+                .partitions
+                .iter()
+                .map(|partition| partition.partition_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+
+        assert_eq!(cluster.error_code, 0);
+        assert_eq!(cluster.brokers.len(), 1);
+        assert_eq!(cluster.brokers[0].host.as_str(), expected_host);
+        assert_eq!(cluster.brokers[0].port, i32::from(expected_port));
+        assert_eq!(
+            metadata.cluster_id.as_ref().map(StrBytes::as_str),
+            Some(cluster.cluster_id.as_str())
+        );
+        assert_eq!(metadata.controller_id, cluster.controller_id);
+        assert_eq!(metadata.brokers[0].node_id, cluster.brokers[0].broker_id);
+
+        metadata_responses.push(metadata);
+        cluster_responses.push(cluster);
+    }
+
+    assert_eq!(
+        metadata_responses[0].cluster_id,
+        metadata_responses[1].cluster_id
+    );
+    assert_eq!(
+        metadata_responses[0].controller_id,
+        metadata_responses[1].controller_id
+    );
+    assert_eq!(
+        metadata_responses[0].brokers[0].node_id,
+        metadata_responses[1].brokers[0].node_id
+    );
+    assert_eq!(
+        metadata_responses[0].topics, metadata_responses[1].topics,
+        "listeners must report identical complete topic and partition metadata"
+    );
+    assert_eq!(
+        cluster_responses[0].cluster_id,
+        cluster_responses[1].cluster_id
+    );
+    assert_eq!(
+        cluster_responses[0].controller_id,
+        cluster_responses[1].controller_id
+    );
+    assert_eq!(
+        cluster_responses[0].brokers[0].broker_id,
+        cluster_responses[1].brokers[0].broker_id
+    );
+
+    shutdown_tx.send(()).expect("request server shutdown");
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server shutdown timed out")
+        .expect("server task panicked")
+        .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn describe_cluster_v2_returns_the_configured_unfenced_broker() {
+    let broker = BrokerState::new(
+        23,
+        true,
+        false,
+        NonZeroU32::new(2).expect("nonzero literal"),
+    );
+    let dispatcher = Dispatcher::new(
+        broker,
+        AdvertisedAddress::new("broker.test", 19_192).expect("valid test address"),
+    );
+
+    let response = dispatch_describe_cluster(
+        &dispatcher,
+        2,
+        DescribeClusterRequest::default().with_endpoint_type(1),
+    )
+    .await;
+
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.error_message, None);
+    assert_eq!(response.endpoint_type, 1);
+    assert_eq!(response.cluster_id.as_str(), "memkafka");
+    assert_eq!(response.controller_id, BrokerId::from(23));
+    assert_eq!(response.cluster_authorized_operations, i32::MIN);
+    assert_eq!(response.brokers.len(), 1);
+    let broker = &response.brokers[0];
+    assert_eq!(broker.broker_id, BrokerId::from(23));
+    assert_eq!(broker.host.as_str(), "broker.test");
+    assert_eq!(broker.port, 19_192);
+    assert_eq!(broker.rack, None);
+    assert!(!broker.is_fenced);
+}
+
+#[tokio::test]
+async fn describe_cluster_v2_optionally_returns_cluster_authorized_operations() {
+    let response = dispatch_describe_cluster(
+        &test_dispatcher(),
+        2,
+        DescribeClusterRequest::default()
+            .with_endpoint_type(1)
+            .with_include_cluster_authorized_operations(true),
+    )
+    .await;
+
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.cluster_authorized_operations, 8_096);
+}
+
+#[tokio::test]
+async fn describe_cluster_v2_rejects_controller_and_unknown_endpoint_types() {
+    let dispatcher = test_dispatcher();
+
+    for (endpoint_type, expected_error, expected_message) in [
+        (
+            2,
+            ResponseError::MismatchedEndpointType,
+            "The request was sent to an endpoint of type BROKER, but we wanted an endpoint of type CONTROLLER",
+        ),
+        (
+            3,
+            ResponseError::UnsupportedEndpointType,
+            "Unsupported endpoint type 3",
+        ),
+        (
+            -1,
+            ResponseError::UnsupportedEndpointType,
+            "Unsupported endpoint type -1",
+        ),
+    ] {
+        let response = dispatch_describe_cluster(
+            &dispatcher,
+            2,
+            DescribeClusterRequest::default()
+                .with_endpoint_type(endpoint_type)
+                .with_include_cluster_authorized_operations(true),
+        )
+        .await;
+
+        assert_eq!(response.error_code, expected_error.code());
+        assert_eq!(
+            response.error_message.as_ref().map(StrBytes::as_str),
+            Some(expected_message)
+        );
+        assert_eq!(response.endpoint_type, 1);
+        assert!(response.cluster_id.is_empty());
+        assert_eq!(response.controller_id, BrokerId::from(-1));
+        assert!(response.brokers.is_empty());
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
+    }
+}
+
+#[tokio::test]
+async fn describe_cluster_v2_uses_each_listener_advertised_address() {
+    let config = Config::from(
+        Cli::try_parse_from([
+            "memkafka",
+            "--kafka-listener",
+            "listen=127.0.0.1:0,advertised=host-clients:19092",
+            "--kafka-listener",
+            "listen=127.0.0.1:0,advertised=container-clients:19093",
+            "--schema-registry-listen",
+            "127.0.0.1:0",
+        ])
+        .expect("parse the two-listener configuration"),
+    );
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut server = tokio::spawn(serve(config, ready_tx, async {
+        let _ = shutdown_rx.await;
+    }));
+    let endpoints = match timeout(Duration::from_secs(1), ready_rx).await {
+        Ok(Ok(endpoints)) => endpoints,
+        ready_result => {
+            let server_result = timeout(Duration::from_secs(1), &mut server).await;
+            panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
+        }
+    };
+
+    for (index, (expected_host, expected_port)) in
+        [("host-clients", 19_092), ("container-clients", 19_093)]
+            .into_iter()
+            .enumerate()
+    {
+        let listener = &endpoints.kafka_listeners()[index];
+        let correlation_id = 2_100 + i32::try_from(index).expect("listener index fits");
+        let mut connection = TcpStream::connect(listener.listen())
+            .await
+            .expect("connect to Kafka listener");
+        let request =
+            RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1));
         write_frame(
             &mut connection,
-            &encode_metadata_request(correlation_id, "events", true),
+            &encode_request_kind(ApiKey::DescribeCluster, 2, correlation_id, request),
         )
         .await
-        .expect("write Metadata frame");
-        let (header, response) =
-            decode_metadata_response(read_response(&mut connection, "Metadata").await);
+        .expect("write DescribeCluster frame");
+        let (header, response) = decode_response_kind(
+            ApiKey::DescribeCluster,
+            2,
+            read_response(&mut connection, "DescribeCluster").await,
+        );
+        let ResponseKind::DescribeCluster(response) = response else {
+            panic!("expected DescribeCluster response");
+        };
 
         assert_eq!(header.correlation_id, correlation_id);
+        assert_eq!(response.error_code, 0);
         assert_eq!(response.brokers.len(), 1);
-        assert_eq!(response.brokers[0].node_id, 1);
         assert_eq!(response.brokers[0].host.as_str(), expected_host);
-        assert_eq!(response.brokers[0].port, i32::from(expected_port));
+        assert_eq!(response.brokers[0].port, expected_port);
     }
 
     shutdown_tx.send(()).expect("request server shutdown");
@@ -2123,6 +2406,292 @@ async fn every_kafka_listener_advertises_its_own_address() {
         .expect("server shutdown timed out")
         .expect("server task panicked")
         .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn describe_cluster_v1_returns_typed_unsupported_version() {
+    let response = dispatch_describe_cluster(
+        &test_dispatcher(),
+        1,
+        DescribeClusterRequest::default().with_endpoint_type(1),
+    )
+    .await;
+
+    assert_eq!(
+        response.error_code,
+        ResponseError::UnsupportedVersion.code()
+    );
+    assert_eq!(
+        response.error_message.as_ref().map(StrBytes::as_str),
+        Some("The version of API is not supported.")
+    );
+    assert!(response.brokers.is_empty());
+}
+
+#[tokio::test]
+async fn describe_topic_partitions_v0_uses_exact_partition_counted_pagination_over_tcp() {
+    struct Case {
+        label: &'static str,
+        request: DescribeTopicPartitionsRequest,
+        expected_topics: Vec<(&'static str, i16, Vec<i32>)>,
+        expected_cursor: Option<(&'static str, i32)>,
+    }
+
+    let broker = test_broker_state(false);
+    let alpha = broker
+        .topics()
+        .create_explicit("alpha", 3, 1)
+        .await
+        .expect("create alpha");
+    let bravo = broker
+        .topics()
+        .create_explicit("bravo", 2, 1)
+        .await
+        .expect("create bravo");
+    let charlie = broker
+        .topics()
+        .create_explicit("charlie", 1, 1)
+        .await
+        .expect("create charlie");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let cases = vec![
+        Case {
+            label: "all topics within alpha",
+            request: describe_topic_partitions_request(&[], 2, None),
+            expected_topics: vec![("alpha", 0, vec![0, 1])],
+            expected_cursor: Some(("alpha", 2)),
+        },
+        Case {
+            label: "cursor crosses from alpha to bravo",
+            request: describe_topic_partitions_request(&[], 2, Some(("alpha", 2))),
+            expected_topics: vec![("alpha", 0, vec![2]), ("bravo", 0, vec![0])],
+            expected_cursor: Some(("bravo", 1)),
+        },
+        Case {
+            label: "cursor at topic end emits empty success then continues",
+            request: describe_topic_partitions_request(&[], 1, Some(("bravo", 2))),
+            expected_topics: vec![("bravo", 0, vec![]), ("charlie", 0, vec![0])],
+            expected_cursor: None,
+        },
+        Case {
+            label: "explicit duplicates sort and deduplicate before exact-limit cursor",
+            request: describe_topic_partitions_request(
+                &["bravo", "alpha", "bravo", "alpha"],
+                3,
+                None,
+            ),
+            expected_topics: vec![("alpha", 0, vec![0, 1, 2])],
+            expected_cursor: Some(("bravo", 0)),
+        },
+        Case {
+            label: "zero limit clamps to one partition",
+            request: describe_topic_partitions_request(&[], 0, None),
+            expected_topics: vec![("alpha", 0, vec![0])],
+            expected_cursor: Some(("alpha", 1)),
+        },
+        Case {
+            label: "missing topic envelope does not consume partition limit",
+            request: describe_topic_partitions_request(&["alpha", "aardvark"], 1, None),
+            expected_topics: vec![
+                (
+                    "aardvark",
+                    ResponseError::UnknownTopicOrPartition.code(),
+                    vec![],
+                ),
+                ("alpha", 0, vec![0]),
+            ],
+            expected_cursor: Some(("alpha", 1)),
+        },
+        Case {
+            label: "invalid topic envelope does not consume partition limit",
+            request: describe_topic_partitions_request(&["alpha", "a/b"], 1, None),
+            expected_topics: vec![
+                ("a/b", ResponseError::InvalidTopicException.code(), vec![]),
+                ("alpha", 0, vec![0]),
+            ],
+            expected_cursor: Some(("alpha", 1)),
+        },
+        Case {
+            label: "cursor beyond topic end emits empty success then continues",
+            request: describe_topic_partitions_request(&[], 1, Some(("alpha", 4))),
+            expected_topics: vec![("alpha", 0, vec![]), ("bravo", 0, vec![0])],
+            expected_cursor: Some(("bravo", 1)),
+        },
+    ];
+
+    for case in cases {
+        let response = dispatch_describe_topic_partitions(&dispatcher, case.request.clone()).await;
+        assert_eq!(response.throttle_time_ms, 0, "{} throttle", case.label);
+        assert_eq!(
+            response.topics.len(),
+            case.expected_topics.len(),
+            "{} topic count",
+            case.label
+        );
+
+        for (actual, (name, error_code, partitions)) in
+            response.topics.iter().zip(&case.expected_topics)
+        {
+            assert_eq!(
+                actual.error_code, *error_code,
+                "{} {name} error",
+                case.label
+            );
+            if *error_code == 0 {
+                let expected_id = match *name {
+                    "alpha" => alpha.id,
+                    "bravo" => bravo.id,
+                    "charlie" => charlie.id,
+                    _ => panic!("unexpected successful topic {name}"),
+                };
+                assert_describe_topic_partitions_success(
+                    actual,
+                    name,
+                    expected_id,
+                    partitions,
+                    broker.broker_id(),
+                );
+            } else {
+                assert_describe_topic_partitions_resource_error(actual, name, *error_code);
+            }
+        }
+
+        assert_describe_topic_partitions_cursor(
+            response.next_cursor.as_ref(),
+            case.expected_cursor,
+            case.label,
+        );
+    }
+
+    assert_eq!(broker.topics().list().await, vec![alpha, bravo, charlie]);
+}
+
+#[tokio::test]
+async fn describe_topic_partitions_v0_continuation_covers_every_partition_once_in_order() {
+    let broker = test_broker_state(false);
+    for (name, partitions) in [("alpha", 3), ("bravo", 2), ("charlie", 1)] {
+        broker
+            .topics()
+            .create_explicit(name, partitions, 1)
+            .await
+            .unwrap_or_else(|error| panic!("create {name}: {error}"));
+    }
+    let dispatcher = test_dispatcher_for(broker);
+    let mut cursor = None;
+    let mut seen = Vec::new();
+
+    for page in 0..3 {
+        let response = dispatch_describe_topic_partitions(
+            &dispatcher,
+            DescribeTopicPartitionsRequest::default()
+                .with_response_partition_limit(2)
+                .with_cursor(cursor),
+        )
+        .await;
+        for topic in response.topics {
+            let name = topic.name.expect("successful topic name");
+            for partition in topic.partitions {
+                seen.push((name.as_str().to_owned(), partition.partition_index));
+            }
+        }
+        cursor = response.next_cursor.map(|cursor| {
+            DescribeTopicPartitionsRequestCursor::default()
+                .with_topic_name(cursor.topic_name)
+                .with_partition_index(cursor.partition_index)
+        });
+        if page < 2 {
+            assert!(cursor.is_some(), "page {page} must continue");
+        }
+    }
+
+    assert_eq!(
+        seen,
+        vec![
+            ("alpha".to_owned(), 0),
+            ("alpha".to_owned(), 1),
+            ("alpha".to_owned(), 2),
+            ("bravo".to_owned(), 0),
+            ("bravo".to_owned(), 1),
+            ("charlie".to_owned(), 0),
+        ]
+    );
+    assert_eq!(cursor, None);
+}
+
+#[tokio::test]
+async fn describe_topic_partitions_v0_invalid_cursors_preserve_raw_request_entries() {
+    let broker = test_broker_state(true);
+    broker
+        .topics()
+        .create_explicit("alpha", 3, 1)
+        .await
+        .expect("create alpha");
+    let dispatcher = test_dispatcher_for(broker.clone());
+    let before = broker.topics().list().await;
+
+    let cases = [
+        describe_topic_partitions_request(
+            &["alpha", "missing", "alpha"],
+            2,
+            Some(("not-selected", 0)),
+        ),
+        describe_topic_partitions_request(&["alpha", "missing", "alpha"], 2, Some(("alpha", -1))),
+    ];
+
+    for request in cases {
+        let raw_names = request
+            .topics
+            .iter()
+            .map(|topic| topic.name.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let response = dispatch_describe_topic_partitions(&dispatcher, request).await;
+
+        assert_eq!(response.topics.len(), raw_names.len());
+        for (topic, raw_name) in response.topics.iter().zip(raw_names) {
+            assert_describe_topic_partitions_request_error(
+                topic,
+                &raw_name,
+                ResponseError::InvalidRequest.code(),
+            );
+        }
+        assert_eq!(response.next_cursor, None);
+    }
+
+    let all_topics_negative_cursor = dispatch_describe_topic_partitions(
+        &dispatcher,
+        describe_topic_partitions_request(&[], 2, Some(("alpha", -1))),
+    )
+    .await;
+    assert!(all_topics_negative_cursor.topics.is_empty());
+    assert_eq!(all_topics_negative_cursor.next_cursor, None);
+    assert_eq!(broker.topics().list().await, before);
+}
+
+#[tokio::test]
+async fn describe_topic_partitions_v0_reports_invalid_and_missing_names_without_mutation() {
+    let broker = test_broker_state(true);
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let response = dispatch_describe_topic_partitions(
+        &dispatcher,
+        describe_topic_partitions_request(&["missing", "bad/name", "missing"], 2, None),
+    )
+    .await;
+
+    assert_eq!(response.topics.len(), 2);
+    assert_describe_topic_partitions_resource_error(
+        &response.topics[0],
+        "bad/name",
+        ResponseError::InvalidTopicException.code(),
+    );
+    assert_describe_topic_partitions_resource_error(
+        &response.topics[1],
+        "missing",
+        ResponseError::UnknownTopicOrPartition.code(),
+    );
+    assert_eq!(response.next_cursor, None);
+    assert!(broker.topics().list().await.is_empty());
 }
 
 #[tokio::test]
@@ -2250,6 +2819,431 @@ async fn metadata_maps_invalid_names_to_code_17_without_mutating() {
     assert_eq!(response.topics[0].error_code, 17);
     assert!(response.topics[0].partitions.is_empty());
     assert!(broker.topics().list().await.is_empty());
+}
+
+#[tokio::test]
+async fn metadata_v4_through_v9_preserve_name_based_behavior() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("legacy-name", 3, 1)
+        .await
+        .expect("create legacy topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    for version in 4..=9 {
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("legacy-name"))),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("legacy-missing"))),
+                    MetadataRequestTopic::default().with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        )
+        .await;
+
+        assert_eq!(
+            response.error_code, 0,
+            "Metadata v{version} top-level error"
+        );
+        assert_eq!(response.topics.len(), 3, "Metadata v{version} topics");
+        assert_eq!(response.topics[0].error_code, 0, "Metadata v{version} hit");
+        assert_eq!(response.topics[0].partitions.len(), 3);
+        assert!(response.topics[0].topic_id.is_nil());
+        assert_eq!(
+            response.topics[1].error_code,
+            ResponseError::UnknownTopicOrPartition.code(),
+            "Metadata v{version} miss"
+        );
+        assert!(response.topics[1].topic_id.is_nil());
+        assert_eq!(
+            response.topics[2].error_code,
+            ResponseError::InvalidTopicException.code(),
+            "Metadata v{version} null-name behavior"
+        );
+        assert_eq!(response.topics[2].name, None);
+        assert!(response.topics[2].topic_id.is_nil());
+        assert!(response.topics[2].partitions.is_empty());
+    }
+
+    assert_eq!(broker.topics().list().await.len(), 1);
+}
+
+#[tokio::test]
+async fn metadata_v13_resolves_names_and_metadata_v12_v13_use_kafka_uuid_set_semantics() {
+    let broker = test_broker_state(false);
+    let created = broker
+        .topics()
+        .create_explicit("identified", 2, 1)
+        .await
+        .expect("create identified topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let by_name = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name("identified"))),
+            ]))
+            .with_allow_auto_topic_creation(false),
+    )
+    .await;
+    assert_eq!(by_name.error_code, 0);
+    assert_eq!(by_name.topics[0].topic_id, created.id);
+
+    let unknown_id = Uuid::new_v4();
+    for version in [12, 13] {
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_topic_id(created.id)
+                        .with_name(None),
+                    MetadataRequestTopic::default()
+                        .with_name(Some(topic_name("zero-id-name-only"))),
+                    MetadataRequestTopic::default()
+                        .with_topic_id(unknown_id)
+                        .with_name(None),
+                    MetadataRequestTopic::default()
+                        .with_topic_id(created.id)
+                        .with_name(None),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("another-zero-id"))),
+                    MetadataRequestTopic::default()
+                        .with_topic_id(unknown_id)
+                        .with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true)
+                .with_include_topic_authorized_operations(true),
+        )
+        .await;
+
+        assert_eq!(
+            response.error_code, 0,
+            "Metadata v{version} top-level error"
+        );
+        assert_eq!(response.topics.len(), 2, "Metadata v{version} topic set");
+        assert_eq!(
+            response.topics[0].error_code,
+            ResponseError::UnknownTopicId.code()
+        );
+        assert_eq!(response.topics[0].topic_id, unknown_id);
+        assert_eq!(response.topics[0].name, None);
+        assert!(response.topics[0].partitions.is_empty());
+        assert_eq!(response.topics[0].topic_authorized_operations, i32::MIN);
+        assert_eq!(response.topics[1].error_code, 0);
+        assert_eq!(response.topics[1].topic_id, created.id);
+        assert_eq!(
+            response.topics[1].name.as_ref().map(|name| name.as_str()),
+            Some("identified")
+        );
+        assert_eq!(response.topics[1].partitions.len(), 2);
+        assert_eq!(response.topics[1].topic_authorized_operations, 3_576);
+    }
+
+    assert_eq!(broker.topics().list().await.len(), 1);
+}
+
+#[tokio::test]
+async fn metadata_v12_v13_omit_name_only_entries_in_request_wide_uuid_mode() {
+    let broker = test_broker_state(true);
+    let identified = broker
+        .topics()
+        .create_explicit("identified", 1, 1)
+        .await
+        .expect("create identified topic");
+    broker
+        .topics()
+        .create_explicit("name-only", 1, 1)
+        .await
+        .expect("create name-only topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    for version in [12, 13] {
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_topic_id(identified.id)
+                        .with_name(None),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("name-only"))),
+                    MetadataRequestTopic::default()
+                        .with_name(Some(topic_name("must-not-auto-create"))),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        )
+        .await;
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(response.topics.len(), 1);
+        assert_eq!(response.topics[0].topic_id, identified.id);
+    }
+
+    assert!(
+        broker
+            .topics()
+            .get("must-not-auto-create")
+            .await
+            .expect("valid topic name")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn metadata_name_mode_deduplicates_requested_names_without_mutation() {
+    let broker = test_broker_state(false);
+    let existing = broker
+        .topics()
+        .create_explicit("deduplicated", 1, 1)
+        .await
+        .expect("create deduplicated topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    for version in [4, 10, 13] {
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("deduplicated"))),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("deduplicated"))),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("deduplicated"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        )
+        .await;
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(response.topics.len(), 1, "Metadata v{version} name set");
+        assert_eq!(
+            response.topics[0].topic_id,
+            if version >= 10 {
+                existing.id
+            } else {
+                Uuid::nil()
+            }
+        );
+    }
+
+    assert_eq!(broker.topics().list().await, vec![existing]);
+}
+
+#[tokio::test]
+async fn metadata_v13_distinguishes_null_and_empty_topic_lists() {
+    let broker = test_broker_state(false);
+    let zebra = broker
+        .topics()
+        .create_explicit("zebra-id", 1, 1)
+        .await
+        .expect("create zebra");
+    let alpha = broker
+        .topics()
+        .create_explicit("alpha-id", 2, 1)
+        .await
+        .expect("create alpha");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let all = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default().with_topics(None),
+    )
+    .await;
+    assert_eq!(all.error_code, 0);
+    assert_eq!(
+        all.topics
+            .iter()
+            .map(|topic| (
+                topic.name.as_ref().expect("listed topic name").as_str(),
+                topic.topic_id,
+            ))
+            .collect::<Vec<_>>(),
+        vec![("alpha-id", alpha.id), ("zebra-id", zebra.id)]
+    );
+
+    let none = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default().with_topics(Some(Vec::new())),
+    )
+    .await;
+    assert_eq!(none.error_code, 0);
+    assert!(none.topics.is_empty());
+    assert_eq!(broker.topics().list().await.len(), 2);
+}
+
+#[tokio::test]
+async fn metadata_modern_name_mode_preserves_errors_and_authorization_flags() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("authorized", 1, 1)
+        .await
+        .expect("create authorized topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let authorized = dispatch_metadata_kind(
+        &dispatcher,
+        10,
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name("authorized"))),
+            ]))
+            .with_allow_auto_topic_creation(false)
+            .with_include_cluster_authorized_operations(true)
+            .with_include_topic_authorized_operations(true),
+    )
+    .await;
+    assert_eq!(authorized.cluster_authorized_operations, 8096);
+    assert_eq!(authorized.topics[0].topic_authorized_operations, 3576);
+
+    let errors = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name("missing"))),
+                MetadataRequestTopic::default().with_name(Some(topic_name("bad/name"))),
+            ]))
+            .with_allow_auto_topic_creation(true)
+            .with_include_topic_authorized_operations(true),
+    )
+    .await;
+    assert_eq!(errors.error_code, 0);
+    assert_eq!(
+        errors.topics[0].error_code,
+        ResponseError::UnknownTopicOrPartition.code()
+    );
+    assert_eq!(
+        errors.topics[1].error_code,
+        ResponseError::InvalidTopicException.code()
+    );
+    assert!(errors.topics.iter().all(|topic| topic.topic_id.is_nil()));
+    assert!(
+        errors
+            .topics
+            .iter()
+            .all(|topic| topic.topic_authorized_operations == 3576)
+    );
+    assert_eq!(errors.cluster_authorized_operations, i32::MIN);
+    assert_eq!(broker.topics().list().await.len(), 1);
+}
+
+#[tokio::test]
+async fn metadata_v10_v11_reject_uuid_or_null_name_without_mutation() {
+    for version in [10, 11] {
+        let broker = test_broker_state(true);
+        let existing = broker
+            .topics()
+            .create_explicit("existing", 1, 1)
+            .await
+            .expect("create existing topic");
+        let dispatcher = test_dispatcher_for(broker.clone());
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("existing"))),
+                    MetadataRequestTopic::default()
+                        .with_topic_id(existing.id)
+                        .with_name(None),
+                    MetadataRequestTopic::default().with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true)
+                .with_include_cluster_authorized_operations(version == 10)
+                .with_include_topic_authorized_operations(true),
+        )
+        .await;
+
+        assert_eq!(response.error_code, 0);
+        assert!(response.brokers.is_empty());
+        assert_eq!(response.cluster_id, None);
+        assert_eq!(response.controller_id, BrokerId::from(-1));
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
+        assert_eq!(response.topics.len(), 3);
+        assert_eq!(
+            response
+                .topics
+                .iter()
+                .map(|topic| topic.name.as_ref().map(|name| name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![Some("existing"), Some(""), Some("")]
+        );
+        assert_eq!(
+            response
+                .topics
+                .iter()
+                .map(|topic| topic.topic_id)
+                .collect::<Vec<_>>(),
+            vec![Uuid::nil(), existing.id, Uuid::nil()]
+        );
+        assert!(response.topics.iter().all(|topic| {
+            topic.error_code == ResponseError::InvalidRequest.code()
+                && topic.topic_authorized_operations == i32::MIN
+                && topic.partitions.is_empty()
+        }));
+        assert_eq!(broker.topics().list().await, vec![existing]);
+    }
+}
+
+#[tokio::test]
+async fn metadata_v12_v13_match_kafka_unknown_server_request_error_envelope() {
+    for version in [12, 13] {
+        let broker = test_broker_state(true);
+        broker
+            .topics()
+            .create_explicit("existing", 1, 1)
+            .await
+            .expect("create existing topic");
+        let response = dispatch_metadata_kind(
+            &test_dispatcher_for(broker.clone()),
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("must-not-resolve"))),
+                    MetadataRequestTopic::default().with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true)
+                .with_include_topic_authorized_operations(true),
+        )
+        .await;
+
+        assert!(response.brokers.is_empty());
+        assert_eq!(response.cluster_id, None);
+        assert_eq!(response.controller_id, BrokerId::from(-1));
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
+        assert_eq!(
+            response
+                .topics
+                .iter()
+                .map(|topic| topic.name.as_ref().map(|name| name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![Some("must-not-resolve"), Some("")]
+        );
+        assert!(response.topics.iter().all(|topic| {
+            topic.error_code == ResponseError::UnknownServerError.code()
+                && topic.topic_id.is_nil()
+                && topic.topic_authorized_operations == i32::MIN
+                && topic.partitions.is_empty()
+        }));
+        assert_eq!(
+            response.error_code,
+            if version == 13 {
+                ResponseError::UnknownServerError.code()
+            } else {
+                0
+            }
+        );
+        assert_eq!(broker.topics().list().await.len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -2398,6 +3392,458 @@ async fn create_topics_validate_only_reports_success_without_mutating() {
     assert_eq!(response.topics[0].num_partitions, 4);
     assert_eq!(response.topics[0].replication_factor, 1);
     assert!(broker.topics().list().await.is_empty());
+}
+
+#[tokio::test]
+async fn create_topics_v7_returns_non_nil_id_used_by_metadata_v10_through_v13() {
+    let broker = test_broker_state(false);
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let created = dispatch_create_topics_kind(
+        &dispatcher,
+        7,
+        CreateTopicsRequest::default()
+            .with_topics(vec![creatable_topic("modern-create", 4, 1)])
+            .with_timeout_ms(1_000),
+    )
+    .await;
+    let created_id = created.topics[0].topic_id;
+    assert_eq!(created.topics[0].error_code, 0);
+    assert!(!created_id.is_nil());
+    assert_eq!(broker.topics().list().await[0].id, created_id);
+
+    for version in 10..=13 {
+        let metadata = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("modern-create"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        )
+        .await;
+        assert_eq!(metadata.topics[0].error_code, 0, "Metadata v{version}");
+        assert_eq!(
+            metadata.topics[0].topic_id, created_id,
+            "Metadata v{version}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_topics_v7_validate_only_and_errors_return_nil_ids() {
+    let broker = test_broker_state(false);
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let validation = dispatch_create_topics_kind(
+        &dispatcher,
+        7,
+        CreateTopicsRequest::default()
+            .with_topics(vec![creatable_topic("preview-v7", 2, 1)])
+            .with_validate_only(true),
+    )
+    .await;
+    assert_eq!(validation.topics[0].error_code, 0);
+    assert!(validation.topics[0].topic_id.is_nil());
+
+    let metadata = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name("preview-v7"))),
+            ]))
+            .with_allow_auto_topic_creation(false),
+    )
+    .await;
+    assert_eq!(
+        metadata.topics[0].error_code,
+        ResponseError::UnknownTopicOrPartition.code()
+    );
+    assert!(metadata.topics[0].topic_id.is_nil());
+
+    let errors = dispatch_create_topics_kind(
+        &dispatcher,
+        7,
+        CreateTopicsRequest::default().with_topics(vec![
+            creatable_topic("bad/name", 2, 1),
+            creatable_topic("bad-replication", 2, 2),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        errors
+            .topics
+            .iter()
+            .map(|topic| topic.error_code)
+            .collect::<Vec<_>>(),
+        vec![
+            ResponseError::InvalidTopicException.code(),
+            ResponseError::InvalidReplicationFactor.code(),
+        ]
+    );
+    assert!(errors.topics.iter().all(|topic| topic.topic_id.is_nil()));
+    assert!(broker.topics().list().await.is_empty());
+}
+
+#[tokio::test]
+async fn modern_discovery_uses_one_topic_identity_across_apis() {
+    // This catches any split catalog or response-local UUID generation across modern APIs.
+    let server = SpawnedServer::start(ephemeral_config()).await;
+    let mut connection = server.connect().await;
+
+    let created = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::CreateTopics,
+        7,
+        12_700,
+        RequestKind::CreateTopics(
+            CreateTopicsRequest::default()
+                .with_topics(vec![creatable_topic("identity-topic", 4, 1)])
+                .with_timeout_ms(1_000),
+        ),
+        "CreateTopics v7",
+    )
+    .await;
+    let ResponseKind::CreateTopics(created) = created else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(created.topics.len(), 1);
+    assert_eq!(created.topics[0].error_code, 0);
+    assert_eq!(created.topics[0].name.as_str(), "identity-topic");
+    let topic_id = created.topics[0].topic_id;
+    assert!(!topic_id.is_nil());
+
+    let by_name = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_701,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("identity-topic"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        ),
+        "Metadata v13 by name",
+    )
+    .await;
+    let ResponseKind::Metadata(by_name) = by_name else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(by_name.error_code, 0);
+    assert_eq!(by_name.topics.len(), 1);
+    assert_eq!(by_name.topics[0].error_code, 0);
+    assert_eq!(by_name.topics[0].topic_id, topic_id);
+    assert_eq!(
+        by_name.topics[0].name.as_ref().map(|name| name.as_str()),
+        Some("identity-topic")
+    );
+    assert_eq!(
+        by_name.topics[0]
+            .partitions
+            .iter()
+            .map(|partition| partition.partition_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+
+    let by_id = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_702,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_topic_id(topic_id)
+                        .with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        ),
+        "Metadata v13 by topic ID",
+    )
+    .await;
+    let ResponseKind::Metadata(by_id) = by_id else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(by_id.error_code, 0);
+    assert_eq!(by_id.topics.len(), 1);
+    assert_eq!(by_id.topics[0].error_code, 0);
+    assert_eq!(by_id.topics[0].topic_id, topic_id);
+    assert_eq!(
+        by_id.topics[0].name.as_ref().map(|name| name.as_str()),
+        Some("identity-topic")
+    );
+    assert_eq!(by_id.topics[0].partitions, by_name.topics[0].partitions);
+
+    let described = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::DescribeTopicPartitions,
+        0,
+        12_703,
+        RequestKind::DescribeTopicPartitions(describe_topic_partitions_request(
+            &["identity-topic"],
+            i32::MAX,
+            None,
+        )),
+        "DescribeTopicPartitions v0",
+    )
+    .await;
+    let ResponseKind::DescribeTopicPartitions(described) = described else {
+        panic!("expected DescribeTopicPartitions response");
+    };
+    assert_eq!(described.topics.len(), 1);
+    assert_describe_topic_partitions_success(
+        &described.topics[0],
+        "identity-topic",
+        topic_id,
+        &[0, 1, 2, 3],
+        1,
+    );
+    assert_eq!(described.next_cursor, None);
+
+    let unknown_id = Uuid::new_v4();
+    assert_ne!(unknown_id, topic_id);
+    let unknown = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_704,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_topic_id(unknown_id)
+                        .with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        ),
+        "Metadata v13 unknown topic ID",
+    )
+    .await;
+    let ResponseKind::Metadata(unknown) = unknown else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(unknown.error_code, 0);
+    assert_eq!(unknown.topics.len(), 1);
+    assert_eq!(
+        unknown.topics[0].error_code,
+        ResponseError::UnknownTopicId.code()
+    );
+    assert_eq!(unknown.topics[0].name, None);
+    assert_eq!(unknown.topics[0].topic_id, unknown_id);
+    assert!(unknown.topics[0].partitions.is_empty());
+
+    let catalog = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_705,
+        RequestKind::Metadata(MetadataRequest::default().with_topics(None)),
+        "Metadata v13 catalog",
+    )
+    .await;
+    let ResponseKind::Metadata(catalog) = catalog else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(
+        catalog.topics.len(),
+        1,
+        "unknown ID must not mutate catalog"
+    );
+    assert_eq!(
+        catalog.topics[0], by_name.topics[0],
+        "unknown ID lookup must preserve complete existing topic and partition metadata"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn topic_identity_survives_data_requests_and_duplicate_create_over_tcp() {
+    // This catches replacement or UUID drift caused by log traffic or failed duplicate creation.
+    let server = SpawnedServer::start(ephemeral_config()).await;
+    let mut connection = server.connect().await;
+
+    let created = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::CreateTopics,
+        7,
+        12_710,
+        RequestKind::CreateTopics(
+            CreateTopicsRequest::default()
+                .with_topics(vec![creatable_topic("stable-identity", 3, 1)])
+                .with_timeout_ms(1_000),
+        ),
+        "CreateTopics v7",
+    )
+    .await;
+    let ResponseKind::CreateTopics(created) = created else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(created.topics[0].error_code, 0);
+    let topic_id = created.topics[0].topic_id;
+    assert!(!topic_id.is_nil());
+
+    let produced = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Produce,
+        7,
+        12_711,
+        RequestKind::Produce(
+            ProduceRequest::default()
+                .with_acks(-1)
+                .with_timeout_ms(1_000)
+                .with_topic_data(vec![produce_topic(
+                    "stable-identity",
+                    vec![produce_partition(0, record_batch(&["identity-stays-put"]))],
+                )]),
+        ),
+        "Produce v7",
+    )
+    .await;
+    let ResponseKind::Produce(produced) = produced else {
+        panic!("expected Produce response");
+    };
+    assert_eq!(produced.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(produced.responses[0].partition_responses[0].base_offset, 0);
+
+    let fetched = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Fetch,
+        4,
+        12_712,
+        RequestKind::Fetch(
+            FetchRequest::default()
+                .with_replica_id(BrokerId::from(-1))
+                .with_max_wait_ms(0)
+                .with_min_bytes(1)
+                .with_max_bytes(i32::MAX)
+                .with_isolation_level(0)
+                .with_topics(vec![fetch_topic("stable-identity", vec![(0, 0, i32::MAX)])]),
+        ),
+        "Fetch v4",
+    )
+    .await;
+    let ResponseKind::Fetch(fetched) = fetched else {
+        panic!("expected Fetch response");
+    };
+    assert_eq!(fetched.responses[0].partitions[0].error_code, 0);
+    let records = decode_records(
+        fetched.responses[0].partitions[0]
+            .records
+            .clone()
+            .expect("fetched record bytes"),
+    );
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].value,
+        Some(Bytes::from_static(b"identity-stays-put"))
+    );
+
+    let metadata_before_duplicate = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_713,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("stable-identity"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        ),
+        "Metadata v13 before duplicate",
+    )
+    .await;
+    let ResponseKind::Metadata(metadata_before_duplicate) = metadata_before_duplicate else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(metadata_before_duplicate.topics[0].error_code, 0);
+    assert_eq!(metadata_before_duplicate.topics[0].topic_id, topic_id);
+
+    let duplicate = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::CreateTopics,
+        7,
+        12_714,
+        RequestKind::CreateTopics(
+            CreateTopicsRequest::default()
+                .with_topics(vec![creatable_topic("stable-identity", 1, 1)])
+                .with_timeout_ms(1_000),
+        ),
+        "duplicate CreateTopics v7",
+    )
+    .await;
+    let ResponseKind::CreateTopics(duplicate) = duplicate else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(
+        duplicate.topics[0].error_code,
+        ResponseError::TopicAlreadyExists.code()
+    );
+    assert!(duplicate.topics[0].topic_id.is_nil());
+
+    let metadata_after_duplicate = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_715,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("stable-identity"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        ),
+        "Metadata v13 after duplicate",
+    )
+    .await;
+    let ResponseKind::Metadata(metadata_after_duplicate) = metadata_after_duplicate else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(metadata_after_duplicate.topics[0].error_code, 0);
+    assert_eq!(metadata_after_duplicate.topics[0].topic_id, topic_id);
+    assert_eq!(
+        metadata_after_duplicate.topics[0]
+            .partitions
+            .iter()
+            .map(|partition| partition.partition_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "duplicate create must not replace the topic"
+    );
+
+    let described = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::DescribeTopicPartitions,
+        0,
+        12_716,
+        RequestKind::DescribeTopicPartitions(describe_topic_partitions_request(
+            &["stable-identity"],
+            i32::MAX,
+            None,
+        )),
+        "DescribeTopicPartitions v0",
+    )
+    .await;
+    let ResponseKind::DescribeTopicPartitions(described) = described else {
+        panic!("expected DescribeTopicPartitions response");
+    };
+    assert_describe_topic_partitions_success(
+        &described.topics[0],
+        "stable-identity",
+        topic_id,
+        &[0, 1, 2],
+        1,
+    );
+    assert_eq!(described.next_cursor, None);
+
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -2913,7 +4359,7 @@ async fn fetch_v4_honors_byte_limits_but_returns_the_first_oversized_batch() {
     );
 }
 
-fn boundary_cases() -> [BoundaryCase; 17] {
+fn boundary_cases() -> [BoundaryCase; 19] {
     [
         BoundaryCase {
             api_key: ApiKey::Produce,
@@ -3017,6 +4463,18 @@ fn boundary_cases() -> [BoundaryCase; 17] {
             assert_supported: assert_describe_configs_supported,
             assert_error: assert_describe_configs_unsupported,
         },
+        BoundaryCase {
+            api_key: ApiKey::DescribeCluster,
+            request_for: describe_cluster_boundary_request,
+            assert_supported: assert_describe_cluster_supported,
+            assert_error: assert_describe_cluster_unsupported,
+        },
+        BoundaryCase {
+            api_key: ApiKey::DescribeTopicPartitions,
+            request_for: describe_topic_partitions_boundary_request,
+            assert_supported: assert_describe_topic_partitions_supported,
+            assert_error: assert_describe_topic_partitions_unsupported,
+        },
     ]
 }
 
@@ -3028,8 +4486,8 @@ fn boundary_manifest() -> BoundaryManifest {
 }
 
 fn assert_boundary_coverage(cases: &[BoundaryCase], manifest: &BoundaryManifest) {
-    assert_eq!(cases.len(), 17, "boundary table must cover 17 APIs exactly");
-    assert_eq!(manifest.apis.len(), 17, "manifest must advertise 17 APIs");
+    assert_eq!(cases.len(), 19, "boundary table must cover 19 APIs exactly");
+    assert_eq!(manifest.apis.len(), 19, "manifest must advertise 19 APIs");
     assert!(
         cases
             .windows(2)
@@ -3097,7 +4555,8 @@ fn scheduled_boundary_direction(api_key: ApiKey) -> BoundaryDirection {
         | ApiKey::SyncGroup
         | ApiKey::ListGroups
         | ApiKey::CreateTopics
-        | ApiKey::DescribeConfigs => BoundaryDirection::Lower,
+        | ApiKey::DescribeConfigs
+        | ApiKey::DescribeCluster => BoundaryDirection::Lower,
         ApiKey::Fetch
         | ApiKey::Metadata
         | ApiKey::OffsetFetch
@@ -3416,6 +4875,18 @@ fn describe_configs_boundary_request(_: i16) -> RequestKind {
     ]))
 }
 
+fn describe_cluster_boundary_request(_: i16) -> RequestKind {
+    RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1))
+}
+
+fn describe_topic_partitions_boundary_request(_: i16) -> RequestKind {
+    RequestKind::DescribeTopicPartitions(describe_topic_partitions_request(
+        &["boundary-describe-topic-a", "boundary-describe-topic-b"],
+        i32::MAX,
+        None,
+    ))
+}
+
 fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
     match api_key {
         ApiKey::Produce => RequestKind::Produce(produce_request(2)),
@@ -3505,6 +4976,12 @@ fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
             InitProducerIdRequest::default().with_transactional_id(None),
         ),
         ApiKey::DescribeConfigs => describe_configs_boundary_request(version),
+        ApiKey::DescribeCluster => RequestKind::DescribeCluster(
+            DescribeClusterRequest::default()
+                .with_endpoint_type(1)
+                .with_include_cluster_authorized_operations(true),
+        ),
+        ApiKey::DescribeTopicPartitions => describe_topic_partitions_boundary_request(version),
         _ => panic!("supported boundary fixture is missing {api_key:?}"),
     }
 }
@@ -3788,6 +5265,26 @@ fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: 
                 }
             }
         }
+        ResponseKind::DescribeCluster(response) if api_key == ApiKey::DescribeCluster => {
+            assert_no_tags!(response);
+            for broker in &response.brokers {
+                assert_no_tags!(broker);
+            }
+        }
+        ResponseKind::DescribeTopicPartitions(response)
+            if api_key == ApiKey::DescribeTopicPartitions =>
+        {
+            assert_no_tags!(response);
+            for topic in &response.topics {
+                assert_no_tags!(topic);
+                for partition in &topic.partitions {
+                    assert_no_tags!(partition);
+                }
+            }
+            if let Some(cursor) = &response.next_cursor {
+                assert_no_tags!(cursor);
+            }
+        }
         _ => panic!("missing flexible response tag audit for {api_key:?} v{version}"),
     }
 }
@@ -3911,7 +5408,7 @@ async fn assert_api_versions_v4_success(connection: &mut TcpStream, correlation_
         panic!("expected ApiVersions success response");
     };
     assert_eq!(response.error_code, 0);
-    assert_eq!(response.api_keys.len(), 17);
+    assert_eq!(response.api_keys.len(), 19);
 }
 
 fn assert_produce_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
@@ -4364,6 +5861,56 @@ fn assert_describe_configs_supported(request: &RequestKind, response: &ResponseK
     }
 }
 
+fn assert_describe_cluster_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::DescribeCluster(request) = request else {
+        panic!("expected supported DescribeCluster fixture");
+    };
+    let ResponseKind::DescribeCluster(response) = response else {
+        panic!("expected supported DescribeCluster response");
+    };
+    assert_eq!(request.endpoint_type, 1);
+    assert!(request.include_cluster_authorized_operations);
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.error_message, None);
+    assert_eq!(response.endpoint_type, 1);
+    assert_eq!(response.cluster_id.as_str(), "memkafka");
+    assert_eq!(response.controller_id, BrokerId::from(1));
+    assert_eq!(response.cluster_authorized_operations, 8_096);
+    assert_eq!(response.brokers.len(), 1);
+    assert_eq!(response.brokers[0].broker_id, BrokerId::from(1));
+    assert_eq!(response.brokers[0].host.as_str(), "127.0.0.1");
+    assert_eq!(response.brokers[0].port, 19_092);
+    assert_eq!(response.brokers[0].rack, None);
+    assert!(!response.brokers[0].is_fenced);
+}
+
+fn assert_describe_topic_partitions_supported(
+    request: &RequestKind,
+    response: &ResponseKind,
+    _: i16,
+) {
+    let RequestKind::DescribeTopicPartitions(request) = request else {
+        panic!("expected supported DescribeTopicPartitions fixture");
+    };
+    let ResponseKind::DescribeTopicPartitions(response) = response else {
+        panic!("expected supported DescribeTopicPartitions response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.topics.len(), request.topics.len());
+    for (actual, expected) in response.topics.iter().zip(&request.topics) {
+        assert_eq!(
+            actual.error_code,
+            ResponseError::UnknownTopicOrPartition.code()
+        );
+        assert_eq!(actual.name.as_ref(), Some(&expected.name));
+        assert!(actual.topic_id.is_nil());
+        assert!(!actual.is_internal);
+        assert!(actual.partitions.is_empty());
+    }
+    assert_eq!(response.next_cursor, None);
+}
+
 fn assert_unsupported(error_code: i16) {
     assert_eq!(error_code, ResponseError::UnsupportedVersion.code());
 }
@@ -4802,7 +6349,7 @@ fn assert_api_versions_supported(request: &RequestKind, response: &ResponseKind,
             (ApiKey::Produce as i16, 7, 7),
             (ApiKey::Fetch as i16, 4, 4),
             (ApiKey::ListOffsets as i16, 3, 3),
-            (ApiKey::Metadata as i16, 4, 9),
+            (ApiKey::Metadata as i16, 4, 13),
             (ApiKey::OffsetCommit as i16, 7, 7),
             (ApiKey::OffsetFetch as i16, 5, 5),
             (ApiKey::FindCoordinator as i16, 2, 2),
@@ -4813,9 +6360,11 @@ fn assert_api_versions_supported(request: &RequestKind, response: &ResponseKind,
             (ApiKey::DescribeGroups as i16, 0, 0),
             (ApiKey::ListGroups as i16, 0, 0),
             (ApiKey::ApiVersions as i16, 3, 4),
-            (ApiKey::CreateTopics as i16, 4, 6),
+            (ApiKey::CreateTopics as i16, 4, 7),
             (ApiKey::InitProducerId as i16, 0, 0),
             (ApiKey::DescribeConfigs as i16, 1, 1),
+            (ApiKey::DescribeCluster as i16, 2, 2),
+            (ApiKey::DescribeTopicPartitions as i16, 0, 0),
         ],
         "exact capability advertisement mismatch"
     );
@@ -4910,6 +6459,50 @@ fn assert_describe_configs_unsupported(request: &RequestKind, response: &Respons
     }
 }
 
+fn assert_describe_cluster_unsupported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::DescribeCluster(request) = request else {
+        panic!("expected DescribeCluster request fixture");
+    };
+    let ResponseKind::DescribeCluster(response) = response else {
+        panic!("expected DescribeCluster response");
+    };
+    assert_eq!(request.endpoint_type, 1);
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_unsupported(response.error_code);
+    assert_eq!(
+        response.error_message.as_ref().map(StrBytes::as_str),
+        Some("The version of API is not supported.")
+    );
+    assert_eq!(response.endpoint_type, 1);
+    assert!(response.cluster_id.is_empty());
+    assert_eq!(response.controller_id, BrokerId::from(-1));
+    assert!(response.brokers.is_empty());
+    assert_eq!(response.cluster_authorized_operations, i32::MIN);
+}
+
+fn assert_describe_topic_partitions_unsupported(
+    request: &RequestKind,
+    response: &ResponseKind,
+    _: i16,
+) {
+    let RequestKind::DescribeTopicPartitions(request) = request else {
+        panic!("expected DescribeTopicPartitions request fixture");
+    };
+    let ResponseKind::DescribeTopicPartitions(response) = response else {
+        panic!("expected DescribeTopicPartitions response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.topics.len(), request.topics.len());
+    for (actual, expected) in response.topics.iter().zip(&request.topics) {
+        assert_unsupported(actual.error_code);
+        assert_eq!(actual.name.as_ref(), Some(&expected.name));
+        assert!(actual.topic_id.is_nil());
+        assert!(!actual.is_internal);
+        assert!(actual.partitions.is_empty());
+    }
+    assert_eq!(response.next_cursor, None);
+}
+
 fn ephemeral_config() -> Config {
     Config::from(
         Cli::try_parse_from([
@@ -4993,6 +6586,26 @@ async fn read_response(connection: &mut TcpStream, context: &str) -> Bytes {
         .unwrap_or_else(|_| panic!("{context} response timed out"))
         .unwrap_or_else(|error| panic!("read {context} response: {error}"))
         .unwrap_or_else(|| panic!("connection closed before {context} response"))
+}
+
+async fn request_kind_over_tcp(
+    connection: &mut TcpStream,
+    api_key: ApiKey,
+    version: i16,
+    correlation_id: i32,
+    request: RequestKind,
+    context: &str,
+) -> ResponseKind {
+    write_frame(
+        connection,
+        &encode_request_kind(api_key, version, correlation_id, request),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("write {context} request: {error}"));
+    let (header, response) =
+        decode_response_kind(api_key, version, read_response(connection, context).await);
+    assert_eq!(header.correlation_id, correlation_id, "{context}");
+    response
 }
 
 fn test_dispatcher() -> Dispatcher {
@@ -5240,6 +6853,42 @@ async fn dispatch_metadata_request(
     .await;
     let (header, response) = decode_metadata_response(encoded);
     assert_eq!(header.correlation_id, correlation_id);
+    response
+}
+
+async fn dispatch_metadata_kind(
+    dispatcher: &Dispatcher,
+    version: i16,
+    request: MetadataRequest,
+) -> MetadataResponse {
+    let response = dispatch_kind(
+        dispatcher,
+        ApiKey::Metadata,
+        version,
+        RequestKind::Metadata(request),
+    )
+    .await;
+    let ResponseKind::Metadata(response) = response else {
+        panic!("expected Metadata response");
+    };
+    response
+}
+
+async fn dispatch_describe_cluster(
+    dispatcher: &Dispatcher,
+    version: i16,
+    request: DescribeClusterRequest,
+) -> DescribeClusterResponse {
+    let response = dispatch_kind(
+        dispatcher,
+        ApiKey::DescribeCluster,
+        version,
+        RequestKind::DescribeCluster(request),
+    )
+    .await;
+    let ResponseKind::DescribeCluster(response) = response else {
+        panic!("expected DescribeCluster response");
+    };
     response
 }
 
@@ -5563,6 +7212,145 @@ async fn dispatch_create_topics_request(
     let (header, response) = decode_create_topics_response(encoded);
     assert_eq!(header.correlation_id, correlation_id);
     response
+}
+
+async fn dispatch_create_topics_kind(
+    dispatcher: &Dispatcher,
+    version: i16,
+    request: CreateTopicsRequest,
+) -> CreateTopicsResponse {
+    let response = dispatch_kind(
+        dispatcher,
+        ApiKey::CreateTopics,
+        version,
+        RequestKind::CreateTopics(request),
+    )
+    .await;
+    let ResponseKind::CreateTopics(response) = response else {
+        panic!("expected CreateTopics response");
+    };
+    response
+}
+
+fn describe_topic_partitions_request(
+    topics: &[&str],
+    response_partition_limit: i32,
+    cursor: Option<(&str, i32)>,
+) -> DescribeTopicPartitionsRequest {
+    DescribeTopicPartitionsRequest::default()
+        .with_topics(
+            topics
+                .iter()
+                .map(|name| {
+                    TopicRequest::default()
+                        .with_name(TopicName::from(StrBytes::from_string((*name).to_owned())))
+                })
+                .collect(),
+        )
+        .with_response_partition_limit(response_partition_limit)
+        .with_cursor(cursor.map(|(name, partition_index)| {
+            DescribeTopicPartitionsRequestCursor::default()
+                .with_topic_name(TopicName::from(StrBytes::from_string(name.to_owned())))
+                .with_partition_index(partition_index)
+        }))
+}
+
+async fn dispatch_describe_topic_partitions(
+    dispatcher: &Dispatcher,
+    request: DescribeTopicPartitionsRequest,
+) -> DescribeTopicPartitionsResponse {
+    let response = dispatch_kind(
+        dispatcher,
+        ApiKey::DescribeTopicPartitions,
+        0,
+        RequestKind::DescribeTopicPartitions(request),
+    )
+    .await;
+    let ResponseKind::DescribeTopicPartitions(response) = response else {
+        panic!("expected DescribeTopicPartitions response");
+    };
+    response
+}
+
+fn assert_describe_topic_partitions_success(
+    topic: &DescribeTopicPartitionsResponseTopic,
+    expected_name: &str,
+    expected_id: Uuid,
+    expected_partitions: &[i32],
+    broker_id: i32,
+) {
+    assert_eq!(topic.error_code, 0, "{expected_name} topic error");
+    assert_eq!(
+        topic.name.as_ref().map(|name| name.as_str()),
+        Some(expected_name)
+    );
+    assert_eq!(topic.topic_id, expected_id);
+    assert!(!topic.topic_id.is_nil());
+    assert!(!topic.is_internal);
+    assert_eq!(topic.topic_authorized_operations, 3_576);
+    assert_eq!(
+        topic
+            .partitions
+            .iter()
+            .map(|partition| partition.partition_index)
+            .collect::<Vec<_>>(),
+        expected_partitions
+    );
+    for partition in &topic.partitions {
+        assert_eq!(partition.error_code, 0);
+        assert_eq!(partition.leader_id, BrokerId::from(broker_id));
+        assert_eq!(partition.leader_epoch, 0);
+        assert_eq!(partition.replica_nodes, vec![BrokerId::from(broker_id)]);
+        assert_eq!(partition.isr_nodes, vec![BrokerId::from(broker_id)]);
+        assert_eq!(partition.eligible_leader_replicas, Some(Vec::new()));
+        assert_eq!(partition.last_known_elr, Some(Vec::new()));
+        assert!(partition.offline_replicas.is_empty());
+    }
+}
+
+fn assert_describe_topic_partitions_resource_error(
+    topic: &DescribeTopicPartitionsResponseTopic,
+    expected_name: &str,
+    expected_error_code: i16,
+) {
+    assert_describe_topic_partitions_error_fields(topic, expected_name, expected_error_code);
+    assert_eq!(topic.topic_authorized_operations, 3_576);
+}
+
+fn assert_describe_topic_partitions_request_error(
+    topic: &DescribeTopicPartitionsResponseTopic,
+    expected_name: &str,
+    expected_error_code: i16,
+) {
+    assert_describe_topic_partitions_error_fields(topic, expected_name, expected_error_code);
+    assert_eq!(topic.topic_authorized_operations, i32::MIN);
+}
+
+fn assert_describe_topic_partitions_error_fields(
+    topic: &DescribeTopicPartitionsResponseTopic,
+    expected_name: &str,
+    expected_error_code: i16,
+) {
+    assert_eq!(topic.error_code, expected_error_code);
+    assert_eq!(
+        topic.name.as_ref().map(|name| name.as_str()),
+        Some(expected_name)
+    );
+    assert!(topic.topic_id.is_nil());
+    assert!(!topic.is_internal);
+    assert!(topic.partitions.is_empty());
+}
+
+fn assert_describe_topic_partitions_cursor(
+    actual: Option<&kafka_protocol::messages::describe_topic_partitions_response::Cursor>,
+    expected: Option<(&str, i32)>,
+    label: &str,
+) {
+    assert_eq!(
+        actual.map(|cursor| (cursor.topic_name.as_str(), cursor.partition_index)),
+        expected,
+        "{label} cursor"
+    );
 }
 
 fn decode_api_versions_response(

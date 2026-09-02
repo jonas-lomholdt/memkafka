@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, HashMap},
     error::Error,
     fmt,
     num::NonZeroU32,
@@ -7,11 +7,13 @@ use std::{
 };
 
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use super::partition::PartitionLog;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TopicMetadata {
+    pub id: Uuid,
     pub name: String,
     pub partition_count: u32,
 }
@@ -40,7 +42,13 @@ impl Error for TopicError {}
 #[derive(Clone, Debug)]
 pub struct TopicCatalog {
     default_partitions: NonZeroU32,
-    topics: Arc<RwLock<BTreeMap<String, TopicEntry>>>,
+    state: Arc<RwLock<CatalogState>>,
+}
+
+#[derive(Debug, Default)]
+struct CatalogState {
+    topics_by_name: BTreeMap<String, TopicEntry>,
+    names_by_id: HashMap<Uuid, String>,
 }
 
 #[derive(Debug)]
@@ -65,7 +73,7 @@ impl TopicCatalog {
     pub fn new(default_partitions: NonZeroU32) -> Self {
         Self {
             default_partitions,
-            topics: Arc::new(RwLock::new(BTreeMap::new())),
+            state: Arc::new(RwLock::new(CatalogState::default())),
         }
     }
 
@@ -75,15 +83,12 @@ impl TopicCatalog {
         partitions: i32,
         replication_factor: i16,
     ) -> Result<TopicMetadata, TopicError> {
-        let metadata = validate_explicit_metadata(name, partitions, replication_factor)?;
-        let mut topics = self.topics.write().await;
-        match topics.entry(name.to_owned()) {
-            Entry::Vacant(entry) => {
-                entry.insert(TopicEntry::new(metadata.clone()));
-                Ok(metadata)
-            }
-            Entry::Occupied(_) => Err(TopicError::AlreadyExists),
+        let mut state = self.state.write().await;
+        let partition_count = validate_explicit_definition(name, partitions, replication_factor)?;
+        if state.topics_by_name.contains_key(name) {
+            return Err(TopicError::AlreadyExists);
         }
+        Ok(insert_topic(&mut state, name, partition_count))
     }
 
     pub async fn validate_explicit(
@@ -91,13 +96,33 @@ impl TopicCatalog {
         name: &str,
         partitions: i32,
         replication_factor: i16,
-    ) -> Result<TopicMetadata, TopicError> {
-        let metadata = validate_explicit_metadata(name, partitions, replication_factor)?;
-        if self.topics.read().await.contains_key(name) {
+    ) -> Result<(), TopicError> {
+        validate_explicit_definition(name, partitions, replication_factor)?;
+        if self.state.read().await.topics_by_name.contains_key(name) {
             Err(TopicError::AlreadyExists)
         } else {
-            Ok(metadata)
+            Ok(())
         }
+    }
+
+    pub async fn get(&self, name: &str) -> Result<Option<TopicMetadata>, TopicError> {
+        validate_name(name)?;
+        Ok(self
+            .state
+            .read()
+            .await
+            .topics_by_name
+            .get(name)
+            .map(|entry| entry.metadata.clone()))
+    }
+
+    pub async fn get_by_id(&self, id: Uuid) -> Option<TopicMetadata> {
+        let state = self.state.read().await;
+        let name = state.names_by_id.get(&id)?;
+        state
+            .topics_by_name
+            .get(name)
+            .map(|entry| entry.metadata.clone())
     }
 
     pub async fn get_or_auto_create(
@@ -107,29 +132,26 @@ impl TopicCatalog {
     ) -> Result<Option<TopicMetadata>, TopicError> {
         validate_name(name)?;
 
-        if let Some(entry) = self.topics.read().await.get(name) {
+        if let Some(entry) = self.state.read().await.topics_by_name.get(name) {
             return Ok(Some(entry.metadata.clone()));
         }
         if !allow_auto_create {
             return Ok(None);
         }
 
-        let mut topics = self.topics.write().await;
-        if let Some(entry) = topics.get(name) {
+        let mut state = self.state.write().await;
+        if let Some(entry) = state.topics_by_name.get(name) {
             return Ok(Some(entry.metadata.clone()));
         }
-        let metadata = TopicMetadata {
-            name: name.to_owned(),
-            partition_count: self.default_partitions.get(),
-        };
-        topics.insert(name.to_owned(), TopicEntry::new(metadata.clone()));
+        let metadata = insert_topic(&mut state, name, self.default_partitions.get());
         Ok(Some(metadata))
     }
 
     pub async fn list(&self) -> Vec<TopicMetadata> {
-        self.topics
+        self.state
             .read()
             .await
+            .topics_by_name
             .values()
             .map(|entry| entry.metadata.clone())
             .collect()
@@ -137,9 +159,10 @@ impl TopicCatalog {
 
     pub(crate) async fn partition(&self, topic: &str, partition: i32) -> Option<Arc<PartitionLog>> {
         let partition = usize::try_from(partition).ok()?;
-        self.topics
+        self.state
             .read()
             .await
+            .topics_by_name
             .get(topic)?
             .partitions
             .get(partition)
@@ -147,11 +170,11 @@ impl TopicCatalog {
     }
 }
 
-fn validate_explicit_metadata(
+fn validate_explicit_definition(
     name: &str,
     partitions: i32,
     replication_factor: i16,
-) -> Result<TopicMetadata, TopicError> {
+) -> Result<u32, TopicError> {
     validate_name(name)?;
     let partition_count = u32::try_from(partitions).map_err(|_| TopicError::InvalidPartitions)?;
     if partition_count == 0 {
@@ -161,10 +184,29 @@ fn validate_explicit_metadata(
         return Err(TopicError::InvalidReplicationFactor);
     }
 
-    Ok(TopicMetadata {
+    Ok(partition_count)
+}
+
+fn insert_topic(state: &mut CatalogState, name: &str, partition_count: u32) -> TopicMetadata {
+    let metadata = TopicMetadata {
+        id: next_topic_id(state),
         name: name.to_owned(),
         partition_count,
-    })
+    };
+    state
+        .topics_by_name
+        .insert(name.to_owned(), TopicEntry::new(metadata.clone()));
+    state.names_by_id.insert(metadata.id, name.to_owned());
+    metadata
+}
+
+fn next_topic_id(state: &CatalogState) -> Uuid {
+    loop {
+        let candidate = Uuid::new_v4();
+        if !candidate.is_nil() && !state.names_by_id.contains_key(&candidate) {
+            return candidate;
+        }
+    }
 }
 
 fn validate_name(name: &str) -> Result<(), TopicError> {
@@ -189,7 +231,7 @@ mod tests {
 
     use tokio::task::JoinSet;
 
-    use super::{TopicCatalog, TopicError, TopicMetadata};
+    use super::{TopicCatalog, TopicError};
 
     #[tokio::test]
     async fn duplicate_explicit_creation_preserves_original_metadata() {
@@ -201,15 +243,48 @@ mod tests {
             .expect("create topic");
         let duplicate = catalog.create_explicit("events", 3, 1).await;
 
-        assert_eq!(
-            created,
-            TopicMetadata {
-                name: "events".to_owned(),
-                partition_count: 6,
-            }
-        );
+        assert_eq!(created.name, "events");
+        assert_eq!(created.partition_count, 6);
         assert_eq!(duplicate, Err(TopicError::AlreadyExists));
+        assert_eq!(catalog.get("events").await, Ok(Some(created.clone())));
+        assert_eq!(catalog.get_by_id(created.id).await, Some(created.clone()));
         assert_eq!(catalog.list().await, vec![created]);
+    }
+
+    #[tokio::test]
+    async fn created_topic_has_one_stable_non_nil_id_in_both_indexes() {
+        let catalog = catalog_with_two_defaults();
+        let created = catalog
+            .create_explicit("events", 3, 1)
+            .await
+            .expect("create topic");
+
+        assert!(!created.id.is_nil());
+        assert_eq!(catalog.get("events").await, Ok(Some(created.clone())));
+        assert_eq!(catalog.get_by_id(created.id).await, Some(created.clone()));
+        assert_eq!(catalog.list().await, vec![created]);
+    }
+
+    #[tokio::test]
+    async fn separate_topics_receive_distinct_ids() {
+        let catalog = catalog_with_two_defaults();
+        let first = catalog.create_explicit("a", 1, 1).await.expect("first");
+        let second = catalog.create_explicit("b", 1, 1).await.expect("second");
+
+        assert_ne!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn validation_and_failed_creation_do_not_mutate_identity_indexes() {
+        let catalog = catalog_with_two_defaults();
+
+        assert_eq!(catalog.validate_explicit("valid", 2, 1).await, Ok(()));
+        assert_eq!(
+            catalog.create_explicit("invalid", 0, 1).await,
+            Err(TopicError::InvalidPartitions)
+        );
+        assert!(catalog.list().await.is_empty());
+        assert_eq!(catalog.get("valid").await, Ok(None));
     }
 
     #[tokio::test]
@@ -246,6 +321,7 @@ mod tests {
     async fn concurrent_auto_creation_inserts_one_default_topic() {
         let catalog = catalog_with_two_defaults();
         let mut tasks = JoinSet::new();
+        let mut created = Vec::new();
 
         for _ in 0..32 {
             let catalog = catalog.clone();
@@ -258,21 +334,22 @@ mod tests {
         }
 
         while let Some(result) = tasks.join_next().await {
-            assert_eq!(
-                result.expect("auto-create task panicked"),
-                Some(TopicMetadata {
-                    name: "events".to_owned(),
-                    partition_count: 2,
-                })
+            created.push(
+                result
+                    .expect("auto-create task panicked")
+                    .expect("auto-created topic"),
             );
         }
-        assert_eq!(
-            catalog.list().await,
-            vec![TopicMetadata {
-                name: "events".to_owned(),
-                partition_count: 2,
-            }]
+        let id = created.first().expect("at least one result").id;
+        assert!(!id.is_nil());
+        assert_eq!(created.len(), 32);
+        assert!(created.iter().all(|metadata| metadata.id == id));
+        assert!(
+            created
+                .iter()
+                .all(|metadata| metadata.name == "events" && metadata.partition_count == 2)
         );
+        assert_eq!(catalog.list().await, vec![created[0].clone()]);
     }
 
     #[tokio::test]
