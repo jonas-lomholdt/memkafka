@@ -151,8 +151,8 @@ fn success_topic(
                         .with_leader_epoch(0)
                         .with_replica_nodes(vec![BrokerId::from(broker_id)])
                         .with_isr_nodes(vec![BrokerId::from(broker_id)])
-                        .with_eligible_leader_replicas(None)
-                        .with_last_known_elr(None)
+                        .with_eligible_leader_replicas(Some(Vec::new()))
+                        .with_last_known_elr(Some(Vec::new()))
                         .with_offline_replicas(Vec::new())
                 })
                 .collect(),

@@ -9,6 +9,7 @@ cd "${REPOSITORY_ROOT}"
 readonly EVIDENCE_FILE="${REPOSITORY_ROOT}/docs/compatibility/kafka-4.3-client-requests.json"
 readonly BOUNDED_COMMAND="${SCRIPT_DIRECTORY}/bounded-command.py"
 readonly KAFKA_IMAGE="apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
+readonly KAFKA_CLUSTER_ID="5L6g3nShT-eMCtK--X86sw"
 readonly KAFBAT_IMAGE="ghcr.io/kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1"
 readonly MAVEN_IMAGE="maven:3.9.11-eclipse-temurin-25"
 readonly PROXY_IMAGE="${MEMKAFKA_API_VERSION_PROXY_IMAGE:-memkafka-api-version-proxy:test}"
@@ -510,7 +511,9 @@ run_java_scenario() {
     run_bounded \
       "${JAVA_MAVEN_SCENARIO_TIMEOUT_SECONDS}" \
       "Apache Kafka Java 4.3.1 Maven scenario" \
-      -- env MEMKAFKA_BOOTSTRAP_SERVERS="${ADVERTISED_ADDRESS}" \
+      -- env \
+      MEMKAFKA_BOOTSTRAP_SERVERS="${ADVERTISED_ADDRESS}" \
+      MEMKAFKA_EXPECTED_CLUSTER_ID="${KAFKA_CLUSTER_ID}" \
       mvn --batch-mode --file tests/java/pom.xml test
     return
   fi
@@ -563,6 +566,7 @@ run_java_scenario() {
     --workdir /workspace \
     --env MAVEN_CONFIG=/tmp/maven-config \
     --env "MEMKAFKA_BOOTSTRAP_SERVERS=${ADVERTISED_ADDRESS}" \
+    --env "MEMKAFKA_EXPECTED_CLUSTER_ID=${KAFKA_CLUSTER_ID}" \
     "${MAVEN_IMAGE}" \
     mvn -Dmaven.repo.local=/maven-repository \
     --batch-mode \
@@ -744,6 +748,7 @@ run_bounded "${INFRASTRUCTURE_TIMEOUT_SECONDS}" "start Kafka 4.3.1 container" --
   --network-alias kafka \
   --publish "127.0.0.1:${KAFKA_PORT}:19092" \
   --env KAFKA_NODE_ID=1 \
+  --env "CLUSTER_ID=${KAFKA_CLUSTER_ID}" \
   --env KAFKA_PROCESS_ROLES=broker,controller \
   --env KAFKA_LISTENERS=PLAINTEXT://:19092,CONTROLLER://:19093 \
   --env "KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://${ADVERTISED_ADDRESS}" \

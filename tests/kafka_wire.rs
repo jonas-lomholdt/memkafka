@@ -7193,8 +7193,8 @@ fn assert_describe_topic_partitions_success(
         assert_eq!(partition.leader_epoch, 0);
         assert_eq!(partition.replica_nodes, vec![BrokerId::from(broker_id)]);
         assert_eq!(partition.isr_nodes, vec![BrokerId::from(broker_id)]);
-        assert_eq!(partition.eligible_leader_replicas, None);
-        assert_eq!(partition.last_known_elr, None);
+        assert_eq!(partition.eligible_leader_replicas, Some(Vec::new()));
+        assert_eq!(partition.last_known_elr, Some(Vec::new()));
         assert!(partition.offline_replicas.is_empty());
     }
 }
