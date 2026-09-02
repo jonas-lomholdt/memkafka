@@ -2105,6 +2105,32 @@ async fn every_kafka_listener_advertises_its_own_address() {
     assert_ne!(listeners[0].listen(), listeners[1].listen());
     assert_eq!(endpoints.kafka(), listeners[0].listen());
 
+    let mut setup_connection = TcpStream::connect(listeners[0].listen())
+        .await
+        .expect("connect to primary Kafka listener");
+    let created = request_kind_over_tcp(
+        &mut setup_connection,
+        ApiKey::CreateTopics,
+        7,
+        1_999,
+        RequestKind::CreateTopics(
+            CreateTopicsRequest::default()
+                .with_topics(vec![creatable_topic("listener-identity", 3, 1)])
+                .with_timeout_ms(1_000),
+        ),
+        "CreateTopics v7",
+    )
+    .await;
+    let ResponseKind::CreateTopics(created) = created else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(created.topics[0].error_code, 0);
+    let topic_id = created.topics[0].topic_id;
+    assert!(!topic_id.is_nil());
+
+    let mut metadata_responses = Vec::new();
+    let mut cluster_responses = Vec::new();
+
     for (index, (expected_host, expected_port)) in
         [("host-clients", 19_092), ("container-clients", 19_093)]
             .into_iter()
@@ -2118,21 +2144,110 @@ async fn every_kafka_listener_advertises_its_own_address() {
         let mut connection = TcpStream::connect(listener.listen())
             .await
             .expect("connect to Kafka listener");
-        write_frame(
+        let metadata = request_kind_over_tcp(
             &mut connection,
-            &encode_metadata_request(correlation_id, "events", true),
+            ApiKey::Metadata,
+            13,
+            correlation_id,
+            RequestKind::Metadata(
+                MetadataRequest::default()
+                    .with_topics(Some(vec![
+                        MetadataRequestTopic::default()
+                            .with_name(Some(topic_name("listener-identity"))),
+                    ]))
+                    .with_allow_auto_topic_creation(false),
+            ),
+            "Metadata v13",
         )
-        .await
-        .expect("write Metadata frame");
-        let (header, response) =
-            decode_metadata_response(read_response(&mut connection, "Metadata").await);
+        .await;
+        let ResponseKind::Metadata(metadata) = metadata else {
+            panic!("expected Metadata response");
+        };
+        let cluster = request_kind_over_tcp(
+            &mut connection,
+            ApiKey::DescribeCluster,
+            2,
+            correlation_id + 100,
+            RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1)),
+            "DescribeCluster v2",
+        )
+        .await;
+        let ResponseKind::DescribeCluster(cluster) = cluster else {
+            panic!("expected DescribeCluster response");
+        };
 
-        assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(response.brokers.len(), 1);
-        assert_eq!(response.brokers[0].node_id, 1);
-        assert_eq!(response.brokers[0].host.as_str(), expected_host);
-        assert_eq!(response.brokers[0].port, i32::from(expected_port));
+        assert_eq!(metadata.error_code, 0);
+        assert_eq!(metadata.brokers.len(), 1);
+        assert_eq!(metadata.brokers[0].node_id, 1);
+        assert_eq!(metadata.brokers[0].host.as_str(), expected_host);
+        assert_eq!(metadata.brokers[0].port, i32::from(expected_port));
+        assert_eq!(metadata.topics.len(), 1);
+        assert_eq!(metadata.topics[0].error_code, 0);
+        assert_eq!(metadata.topics[0].topic_id, topic_id);
+        assert_eq!(
+            metadata.topics[0]
+                .partitions
+                .iter()
+                .map(|partition| partition.partition_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+
+        assert_eq!(cluster.error_code, 0);
+        assert_eq!(cluster.brokers.len(), 1);
+        assert_eq!(cluster.brokers[0].host.as_str(), expected_host);
+        assert_eq!(cluster.brokers[0].port, i32::from(expected_port));
+        assert_eq!(
+            metadata.cluster_id.as_ref().map(StrBytes::as_str),
+            Some(cluster.cluster_id.as_str())
+        );
+        assert_eq!(metadata.controller_id, cluster.controller_id);
+        assert_eq!(metadata.brokers[0].node_id, cluster.brokers[0].broker_id);
+
+        metadata_responses.push(metadata);
+        cluster_responses.push(cluster);
     }
+
+    assert_eq!(
+        metadata_responses[0].cluster_id,
+        metadata_responses[1].cluster_id
+    );
+    assert_eq!(
+        metadata_responses[0].controller_id,
+        metadata_responses[1].controller_id
+    );
+    assert_eq!(
+        metadata_responses[0].brokers[0].node_id,
+        metadata_responses[1].brokers[0].node_id
+    );
+    assert_eq!(
+        metadata_responses[0].topics[0].topic_id,
+        metadata_responses[1].topics[0].topic_id
+    );
+    assert_eq!(
+        metadata_responses[0].topics[0]
+            .partitions
+            .iter()
+            .map(|partition| partition.partition_index)
+            .collect::<Vec<_>>(),
+        metadata_responses[1].topics[0]
+            .partitions
+            .iter()
+            .map(|partition| partition.partition_index)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cluster_responses[0].cluster_id,
+        cluster_responses[1].cluster_id
+    );
+    assert_eq!(
+        cluster_responses[0].controller_id,
+        cluster_responses[1].controller_id
+    );
+    assert_eq!(
+        cluster_responses[0].brokers[0].broker_id,
+        cluster_responses[1].brokers[0].broker_id
+    );
 
     shutdown_tx.send(()).expect("request server shutdown");
     timeout(Duration::from_secs(1), server)
@@ -3276,6 +3391,366 @@ async fn create_topics_v7_validate_only_and_errors_return_nil_ids() {
     );
     assert!(errors.topics.iter().all(|topic| topic.topic_id.is_nil()));
     assert!(broker.topics().list().await.is_empty());
+}
+
+#[tokio::test]
+async fn modern_discovery_uses_one_topic_identity_across_apis() {
+    // This catches any split catalog or response-local UUID generation across modern APIs.
+    let server = SpawnedServer::start(ephemeral_config()).await;
+    let mut connection = server.connect().await;
+
+    let created = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::CreateTopics,
+        7,
+        12_700,
+        RequestKind::CreateTopics(
+            CreateTopicsRequest::default()
+                .with_topics(vec![creatable_topic("identity-topic", 4, 1)])
+                .with_timeout_ms(1_000),
+        ),
+        "CreateTopics v7",
+    )
+    .await;
+    let ResponseKind::CreateTopics(created) = created else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(created.topics.len(), 1);
+    assert_eq!(created.topics[0].error_code, 0);
+    assert_eq!(created.topics[0].name.as_str(), "identity-topic");
+    let topic_id = created.topics[0].topic_id;
+    assert!(!topic_id.is_nil());
+
+    let by_name = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_701,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("identity-topic"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        ),
+        "Metadata v13 by name",
+    )
+    .await;
+    let ResponseKind::Metadata(by_name) = by_name else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(by_name.error_code, 0);
+    assert_eq!(by_name.topics.len(), 1);
+    assert_eq!(by_name.topics[0].error_code, 0);
+    assert_eq!(by_name.topics[0].topic_id, topic_id);
+    assert_eq!(
+        by_name.topics[0].name.as_ref().map(|name| name.as_str()),
+        Some("identity-topic")
+    );
+    assert_eq!(
+        by_name.topics[0]
+            .partitions
+            .iter()
+            .map(|partition| partition.partition_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+
+    let by_id = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_702,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_topic_id(topic_id)
+                        .with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        ),
+        "Metadata v13 by topic ID",
+    )
+    .await;
+    let ResponseKind::Metadata(by_id) = by_id else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(by_id.error_code, 0);
+    assert_eq!(by_id.topics.len(), 1);
+    assert_eq!(by_id.topics[0].error_code, 0);
+    assert_eq!(by_id.topics[0].topic_id, topic_id);
+    assert_eq!(
+        by_id.topics[0].name.as_ref().map(|name| name.as_str()),
+        Some("identity-topic")
+    );
+    assert_eq!(by_id.topics[0].partitions, by_name.topics[0].partitions);
+
+    let described = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::DescribeTopicPartitions,
+        0,
+        12_703,
+        RequestKind::DescribeTopicPartitions(describe_topic_partitions_request(
+            &["identity-topic"],
+            i32::MAX,
+            None,
+        )),
+        "DescribeTopicPartitions v0",
+    )
+    .await;
+    let ResponseKind::DescribeTopicPartitions(described) = described else {
+        panic!("expected DescribeTopicPartitions response");
+    };
+    assert_eq!(described.topics.len(), 1);
+    assert_describe_topic_partitions_success(
+        &described.topics[0],
+        "identity-topic",
+        topic_id,
+        &[0, 1, 2, 3],
+        1,
+    );
+    assert_eq!(described.next_cursor, None);
+
+    let unknown_id = Uuid::new_v4();
+    assert_ne!(unknown_id, topic_id);
+    let unknown = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_704,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_topic_id(unknown_id)
+                        .with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        ),
+        "Metadata v13 unknown topic ID",
+    )
+    .await;
+    let ResponseKind::Metadata(unknown) = unknown else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(unknown.error_code, 0);
+    assert_eq!(unknown.topics.len(), 1);
+    assert_eq!(
+        unknown.topics[0].error_code,
+        ResponseError::UnknownTopicId.code()
+    );
+    assert_eq!(unknown.topics[0].name, None);
+    assert_eq!(unknown.topics[0].topic_id, unknown_id);
+    assert!(unknown.topics[0].partitions.is_empty());
+
+    let catalog = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_705,
+        RequestKind::Metadata(MetadataRequest::default().with_topics(None)),
+        "Metadata v13 catalog",
+    )
+    .await;
+    let ResponseKind::Metadata(catalog) = catalog else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(
+        catalog.topics.len(),
+        1,
+        "unknown ID must not mutate catalog"
+    );
+    assert_eq!(catalog.topics[0].topic_id, topic_id);
+    assert_eq!(
+        catalog.topics[0].name.as_ref().map(|name| name.as_str()),
+        Some("identity-topic")
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn topic_identity_survives_data_requests_and_duplicate_create_over_tcp() {
+    // This catches replacement or UUID drift caused by log traffic or failed duplicate creation.
+    let server = SpawnedServer::start(ephemeral_config()).await;
+    let mut connection = server.connect().await;
+
+    let created = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::CreateTopics,
+        7,
+        12_710,
+        RequestKind::CreateTopics(
+            CreateTopicsRequest::default()
+                .with_topics(vec![creatable_topic("stable-identity", 3, 1)])
+                .with_timeout_ms(1_000),
+        ),
+        "CreateTopics v7",
+    )
+    .await;
+    let ResponseKind::CreateTopics(created) = created else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(created.topics[0].error_code, 0);
+    let topic_id = created.topics[0].topic_id;
+    assert!(!topic_id.is_nil());
+
+    let produced = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Produce,
+        7,
+        12_711,
+        RequestKind::Produce(
+            ProduceRequest::default()
+                .with_acks(-1)
+                .with_timeout_ms(1_000)
+                .with_topic_data(vec![produce_topic(
+                    "stable-identity",
+                    vec![produce_partition(0, record_batch(&["identity-stays-put"]))],
+                )]),
+        ),
+        "Produce v7",
+    )
+    .await;
+    let ResponseKind::Produce(produced) = produced else {
+        panic!("expected Produce response");
+    };
+    assert_eq!(produced.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(produced.responses[0].partition_responses[0].base_offset, 0);
+
+    let fetched = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Fetch,
+        4,
+        12_712,
+        RequestKind::Fetch(
+            FetchRequest::default()
+                .with_replica_id(BrokerId::from(-1))
+                .with_max_wait_ms(0)
+                .with_min_bytes(1)
+                .with_max_bytes(i32::MAX)
+                .with_isolation_level(0)
+                .with_topics(vec![fetch_topic("stable-identity", vec![(0, 0, i32::MAX)])]),
+        ),
+        "Fetch v4",
+    )
+    .await;
+    let ResponseKind::Fetch(fetched) = fetched else {
+        panic!("expected Fetch response");
+    };
+    assert_eq!(fetched.responses[0].partitions[0].error_code, 0);
+    let records = decode_records(
+        fetched.responses[0].partitions[0]
+            .records
+            .clone()
+            .expect("fetched record bytes"),
+    );
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].value,
+        Some(Bytes::from_static(b"identity-stays-put"))
+    );
+
+    let metadata_before_duplicate = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_713,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("stable-identity"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        ),
+        "Metadata v13 before duplicate",
+    )
+    .await;
+    let ResponseKind::Metadata(metadata_before_duplicate) = metadata_before_duplicate else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(metadata_before_duplicate.topics[0].error_code, 0);
+    assert_eq!(metadata_before_duplicate.topics[0].topic_id, topic_id);
+
+    let duplicate = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::CreateTopics,
+        7,
+        12_714,
+        RequestKind::CreateTopics(
+            CreateTopicsRequest::default()
+                .with_topics(vec![creatable_topic("stable-identity", 1, 1)])
+                .with_timeout_ms(1_000),
+        ),
+        "duplicate CreateTopics v7",
+    )
+    .await;
+    let ResponseKind::CreateTopics(duplicate) = duplicate else {
+        panic!("expected CreateTopics response");
+    };
+    assert_eq!(
+        duplicate.topics[0].error_code,
+        ResponseError::TopicAlreadyExists.code()
+    );
+    assert!(duplicate.topics[0].topic_id.is_nil());
+
+    let metadata_after_duplicate = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::Metadata,
+        13,
+        12_715,
+        RequestKind::Metadata(
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("stable-identity"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        ),
+        "Metadata v13 after duplicate",
+    )
+    .await;
+    let ResponseKind::Metadata(metadata_after_duplicate) = metadata_after_duplicate else {
+        panic!("expected Metadata response");
+    };
+    assert_eq!(metadata_after_duplicate.topics[0].error_code, 0);
+    assert_eq!(metadata_after_duplicate.topics[0].topic_id, topic_id);
+    assert_eq!(
+        metadata_after_duplicate.topics[0]
+            .partitions
+            .iter()
+            .map(|partition| partition.partition_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "duplicate create must not replace the topic"
+    );
+
+    let described = request_kind_over_tcp(
+        &mut connection,
+        ApiKey::DescribeTopicPartitions,
+        0,
+        12_716,
+        RequestKind::DescribeTopicPartitions(describe_topic_partitions_request(
+            &["stable-identity"],
+            i32::MAX,
+            None,
+        )),
+        "DescribeTopicPartitions v0",
+    )
+    .await;
+    let ResponseKind::DescribeTopicPartitions(described) = described else {
+        panic!("expected DescribeTopicPartitions response");
+    };
+    assert_describe_topic_partitions_success(
+        &described.topics[0],
+        "stable-identity",
+        topic_id,
+        &[0, 1, 2],
+        1,
+    );
+    assert_eq!(described.next_cursor, None);
+
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -6015,6 +6490,26 @@ async fn read_response(connection: &mut TcpStream, context: &str) -> Bytes {
         .unwrap_or_else(|_| panic!("{context} response timed out"))
         .unwrap_or_else(|error| panic!("read {context} response: {error}"))
         .unwrap_or_else(|| panic!("connection closed before {context} response"))
+}
+
+async fn request_kind_over_tcp(
+    connection: &mut TcpStream,
+    api_key: ApiKey,
+    version: i16,
+    correlation_id: i32,
+    request: RequestKind,
+    context: &str,
+) -> ResponseKind {
+    write_frame(
+        connection,
+        &encode_request_kind(api_key, version, correlation_id, request),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("write {context} request: {error}"));
+    let (header, response) =
+        decode_response_kind(api_key, version, read_response(connection, context).await);
+    assert_eq!(header.correlation_id, correlation_id, "{context}");
+    response
 }
 
 fn test_dispatcher() -> Dispatcher {
