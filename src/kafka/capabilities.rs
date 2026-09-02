@@ -190,6 +190,13 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
         kafka_4_3: VersionWindow { min: 1, max: 4 },
         proof_scenarios: &["kafbat-1.5.0"],
     },
+    ApiCapability {
+        api_key: ApiKey::DescribeCluster,
+        name: "DescribeCluster",
+        supported: VersionWindow { min: 2, max: 2 },
+        kafka_4_3: VersionWindow { min: 0, max: 2 },
+        proof_scenarios: &["apache-kafka-java-4.3.1"],
+    },
 ];
 
 pub(crate) fn capability(api_key: ApiKey) -> Option<&'static ApiCapability> {
@@ -245,7 +252,7 @@ mod tests {
 
     #[test]
     fn registry_is_sorted_unique_and_has_nonempty_contained_windows() {
-        assert_eq!(CAPABILITIES.len(), 17);
+        assert_eq!(CAPABILITIES.len(), 18);
         assert!(
             CAPABILITIES
                 .windows(2)
@@ -429,6 +436,12 @@ mod tests {
                     (1, 4),
                     &["kafbat-1.5.0",][..]
                 ),
+                (
+                    ApiKey::DescribeCluster,
+                    "DescribeCluster",
+                    (0, 2),
+                    &["apache-kafka-java-4.3.1",][..]
+                ),
             ]
         );
     }
@@ -476,6 +489,7 @@ mod tests {
                 (ApiKey::CreateTopics, 4, 7),
                 (ApiKey::InitProducerId, 0, 0),
                 (ApiKey::DescribeConfigs, 1, 1),
+                (ApiKey::DescribeCluster, 2, 2),
             ]
         );
     }
@@ -552,7 +566,7 @@ mod tests {
         assert!(first.ends_with('\n'));
         assert_eq!(document["schemaVersion"], 1);
         assert_eq!(document["kafkaBaseline"], "4.3");
-        assert_eq!(document["apis"].as_array().map(Vec::len), Some(17));
+        assert_eq!(document["apis"].as_array().map(Vec::len), Some(18));
         assert_eq!(document["apis"][0]["apiKey"], 0);
         assert_eq!(document["apis"][0]["name"], "Produce");
         assert_eq!(document["apis"][0]["supported"]["min"], 7);

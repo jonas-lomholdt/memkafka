@@ -4,6 +4,7 @@ pub mod capabilities;
 pub mod codec;
 pub mod connection;
 mod create_topics;
+mod describe_cluster;
 mod describe_configs;
 mod describe_groups;
 mod discovery;

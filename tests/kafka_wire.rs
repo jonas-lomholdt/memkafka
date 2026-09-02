@@ -5,12 +5,12 @@ use clap::Parser;
 use kafka_protocol::{
     ResponseError,
     messages::{
-        ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeConfigsRequest,
-        DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest,
-        InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
-        ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
-        ProduceRequest, ProducerId, RequestHeader, RequestKind, ResponseHeader, ResponseKind,
-        SyncGroupRequest, TopicName, TransactionalId,
+        ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeClusterRequest,
+        DescribeClusterResponse, DescribeConfigsRequest, DescribeGroupsRequest, FetchRequest,
+        FindCoordinatorRequest, GroupId, HeartbeatRequest, InitProducerIdRequest, JoinGroupRequest,
+        LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest, MetadataRequest,
+        OffsetCommitRequest, OffsetFetchRequest, ProduceRequest, ProducerId, RequestHeader,
+        RequestKind, ResponseHeader, ResponseKind, SyncGroupRequest, TopicName, TransactionalId,
         api_versions_response::{ApiVersion, ApiVersionsResponse},
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
@@ -387,7 +387,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
 
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
-    assert_eq!(response.api_keys.len(), 17);
+    assert_eq!(response.api_keys.len(), 18);
     assert_api_range(&response, ApiKey::Metadata, 4, 13);
     assert_api_range(&response, ApiKey::ApiVersions, 3, 4);
     assert_api_range(&response, ApiKey::CreateTopics, 4, 7);
@@ -405,6 +405,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_api_range(&response, ApiKey::DescribeGroups, 0, 0);
     assert_api_range(&response, ApiKey::InitProducerId, 0, 0);
     assert_api_range(&response, ApiKey::DescribeConfigs, 1, 1);
+    assert_api_range(&response, ApiKey::DescribeCluster, 2, 2);
 }
 
 #[tokio::test]
@@ -470,7 +471,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         let (header, body) = decode_api_versions_response(response);
 
         assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(body.api_keys.len(), 17);
+        assert_eq!(body.api_keys.len(), 18);
         assert_api_range(&body, ApiKey::Metadata, 4, 13);
         assert_api_range(&body, ApiKey::ApiVersions, 3, 4);
         assert_api_range(&body, ApiKey::CreateTopics, 4, 7);
@@ -488,6 +489,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         assert_api_range(&body, ApiKey::DescribeGroups, 0, 0);
         assert_api_range(&body, ApiKey::InitProducerId, 0, 0);
         assert_api_range(&body, ApiKey::DescribeConfigs, 1, 1);
+        assert_api_range(&body, ApiKey::DescribeCluster, 2, 2);
     }
 
     shutdown_tx.send(()).expect("request server shutdown");
@@ -561,7 +563,7 @@ async fn same_connection_survives_a_typed_unsupported_version_response() {
         panic!("expected ApiVersions response");
     };
     assert_eq!(response.error_code, 0);
-    assert_eq!(response.api_keys.len(), 17);
+    assert_eq!(response.api_keys.len(), 18);
 
     shutdown_tx.send(()).expect("request server shutdown");
     timeout(Duration::from_secs(1), server)
@@ -2131,6 +2133,166 @@ async fn every_kafka_listener_advertises_its_own_address() {
 }
 
 #[tokio::test]
+async fn describe_cluster_v2_returns_the_configured_unfenced_broker() {
+    let broker = BrokerState::new(
+        23,
+        true,
+        false,
+        NonZeroU32::new(2).expect("nonzero literal"),
+    );
+    let dispatcher = Dispatcher::new(
+        broker,
+        AdvertisedAddress::new("broker.test", 19_192).expect("valid test address"),
+    );
+
+    let response = dispatch_describe_cluster(
+        &dispatcher,
+        2,
+        DescribeClusterRequest::default().with_endpoint_type(1),
+    )
+    .await;
+
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.error_message, None);
+    assert_eq!(response.endpoint_type, 1);
+    assert_eq!(response.cluster_id.as_str(), "memkafka");
+    assert_eq!(response.controller_id, BrokerId::from(23));
+    assert_eq!(response.cluster_authorized_operations, i32::MIN);
+    assert_eq!(response.brokers.len(), 1);
+    let broker = &response.brokers[0];
+    assert_eq!(broker.broker_id, BrokerId::from(23));
+    assert_eq!(broker.host.as_str(), "broker.test");
+    assert_eq!(broker.port, 19_192);
+    assert_eq!(broker.rack, None);
+    assert!(!broker.is_fenced);
+}
+
+#[tokio::test]
+async fn describe_cluster_v2_optionally_returns_cluster_authorized_operations() {
+    let response = dispatch_describe_cluster(
+        &test_dispatcher(),
+        2,
+        DescribeClusterRequest::default()
+            .with_endpoint_type(1)
+            .with_include_cluster_authorized_operations(true),
+    )
+    .await;
+
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.cluster_authorized_operations, 8_096);
+}
+
+#[tokio::test]
+async fn describe_cluster_v2_rejects_controller_and_unknown_endpoint_types() {
+    let dispatcher = test_dispatcher();
+
+    for (endpoint_type, expected_error) in [
+        (2, ResponseError::MismatchedEndpointType),
+        (3, ResponseError::UnsupportedEndpointType),
+        (-1, ResponseError::UnsupportedEndpointType),
+    ] {
+        let response = dispatch_describe_cluster(
+            &dispatcher,
+            2,
+            DescribeClusterRequest::default().with_endpoint_type(endpoint_type),
+        )
+        .await;
+
+        assert_eq!(response.error_code, expected_error.code());
+        assert_eq!(response.endpoint_type, endpoint_type);
+        assert!(response.cluster_id.is_empty());
+        assert_eq!(response.controller_id, BrokerId::from(-1));
+        assert!(response.brokers.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn describe_cluster_v2_uses_each_listener_advertised_address() {
+    let config = Config::from(
+        Cli::try_parse_from([
+            "memkafka",
+            "--kafka-listener",
+            "listen=127.0.0.1:0,advertised=host-clients:19092",
+            "--kafka-listener",
+            "listen=127.0.0.1:0,advertised=container-clients:19093",
+            "--schema-registry-listen",
+            "127.0.0.1:0",
+        ])
+        .expect("parse the two-listener configuration"),
+    );
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut server = tokio::spawn(serve(config, ready_tx, async {
+        let _ = shutdown_rx.await;
+    }));
+    let endpoints = match timeout(Duration::from_secs(1), ready_rx).await {
+        Ok(Ok(endpoints)) => endpoints,
+        ready_result => {
+            let server_result = timeout(Duration::from_secs(1), &mut server).await;
+            panic!("server did not become ready: ready={ready_result:?}, server={server_result:?}");
+        }
+    };
+
+    for (index, (expected_host, expected_port)) in
+        [("host-clients", 19_092), ("container-clients", 19_093)]
+            .into_iter()
+            .enumerate()
+    {
+        let listener = &endpoints.kafka_listeners()[index];
+        let correlation_id = 2_100 + i32::try_from(index).expect("listener index fits");
+        let mut connection = TcpStream::connect(listener.listen())
+            .await
+            .expect("connect to Kafka listener");
+        let request =
+            RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1));
+        write_frame(
+            &mut connection,
+            &encode_request_kind(ApiKey::DescribeCluster, 2, correlation_id, request),
+        )
+        .await
+        .expect("write DescribeCluster frame");
+        let (header, response) = decode_response_kind(
+            ApiKey::DescribeCluster,
+            2,
+            read_response(&mut connection, "DescribeCluster").await,
+        );
+        let ResponseKind::DescribeCluster(response) = response else {
+            panic!("expected DescribeCluster response");
+        };
+
+        assert_eq!(header.correlation_id, correlation_id);
+        assert_eq!(response.error_code, 0);
+        assert_eq!(response.brokers.len(), 1);
+        assert_eq!(response.brokers[0].host.as_str(), expected_host);
+        assert_eq!(response.brokers[0].port, expected_port);
+    }
+
+    shutdown_tx.send(()).expect("request server shutdown");
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server shutdown timed out")
+        .expect("server task panicked")
+        .expect("server returned an error");
+}
+
+#[tokio::test]
+async fn describe_cluster_v1_returns_typed_unsupported_version() {
+    let response = dispatch_describe_cluster(
+        &test_dispatcher(),
+        1,
+        DescribeClusterRequest::default().with_endpoint_type(1),
+    )
+    .await;
+
+    assert_eq!(
+        response.error_code,
+        ResponseError::UnsupportedVersion.code()
+    );
+    assert!(response.brokers.is_empty());
+}
+
+#[tokio::test]
 async fn find_coordinator_v2_uses_the_listener_advertised_address() {
     let dispatcher = Dispatcher::new(
         test_broker_state(true),
@@ -3353,7 +3515,7 @@ async fn fetch_v4_honors_byte_limits_but_returns_the_first_oversized_batch() {
     );
 }
 
-fn boundary_cases() -> [BoundaryCase; 17] {
+fn boundary_cases() -> [BoundaryCase; 18] {
     [
         BoundaryCase {
             api_key: ApiKey::Produce,
@@ -3457,6 +3619,12 @@ fn boundary_cases() -> [BoundaryCase; 17] {
             assert_supported: assert_describe_configs_supported,
             assert_error: assert_describe_configs_unsupported,
         },
+        BoundaryCase {
+            api_key: ApiKey::DescribeCluster,
+            request_for: describe_cluster_boundary_request,
+            assert_supported: assert_describe_cluster_supported,
+            assert_error: assert_describe_cluster_unsupported,
+        },
     ]
 }
 
@@ -3468,8 +3636,8 @@ fn boundary_manifest() -> BoundaryManifest {
 }
 
 fn assert_boundary_coverage(cases: &[BoundaryCase], manifest: &BoundaryManifest) {
-    assert_eq!(cases.len(), 17, "boundary table must cover 17 APIs exactly");
-    assert_eq!(manifest.apis.len(), 17, "manifest must advertise 17 APIs");
+    assert_eq!(cases.len(), 18, "boundary table must cover 18 APIs exactly");
+    assert_eq!(manifest.apis.len(), 18, "manifest must advertise 18 APIs");
     assert!(
         cases
             .windows(2)
@@ -3537,7 +3705,8 @@ fn scheduled_boundary_direction(api_key: ApiKey) -> BoundaryDirection {
         | ApiKey::SyncGroup
         | ApiKey::ListGroups
         | ApiKey::CreateTopics
-        | ApiKey::DescribeConfigs => BoundaryDirection::Lower,
+        | ApiKey::DescribeConfigs
+        | ApiKey::DescribeCluster => BoundaryDirection::Lower,
         ApiKey::Fetch
         | ApiKey::Metadata
         | ApiKey::OffsetFetch
@@ -3856,6 +4025,10 @@ fn describe_configs_boundary_request(_: i16) -> RequestKind {
     ]))
 }
 
+fn describe_cluster_boundary_request(_: i16) -> RequestKind {
+    RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1))
+}
+
 fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
     match api_key {
         ApiKey::Produce => RequestKind::Produce(produce_request(2)),
@@ -3945,6 +4118,11 @@ fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
             InitProducerIdRequest::default().with_transactional_id(None),
         ),
         ApiKey::DescribeConfigs => describe_configs_boundary_request(version),
+        ApiKey::DescribeCluster => RequestKind::DescribeCluster(
+            DescribeClusterRequest::default()
+                .with_endpoint_type(1)
+                .with_include_cluster_authorized_operations(true),
+        ),
         _ => panic!("supported boundary fixture is missing {api_key:?}"),
     }
 }
@@ -4228,6 +4406,12 @@ fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: 
                 }
             }
         }
+        ResponseKind::DescribeCluster(response) if api_key == ApiKey::DescribeCluster => {
+            assert_no_tags!(response);
+            for broker in &response.brokers {
+                assert_no_tags!(broker);
+            }
+        }
         _ => panic!("missing flexible response tag audit for {api_key:?} v{version}"),
     }
 }
@@ -4351,7 +4535,7 @@ async fn assert_api_versions_v4_success(connection: &mut TcpStream, correlation_
         panic!("expected ApiVersions success response");
     };
     assert_eq!(response.error_code, 0);
-    assert_eq!(response.api_keys.len(), 17);
+    assert_eq!(response.api_keys.len(), 18);
 }
 
 fn assert_produce_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
@@ -4802,6 +4986,30 @@ fn assert_describe_configs_supported(request: &RequestKind, response: &ResponseK
         assert_eq!(actual_result.resource_name, expected_resource.resource_name);
         assert!(actual_result.configs.is_empty());
     }
+}
+
+fn assert_describe_cluster_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::DescribeCluster(request) = request else {
+        panic!("expected supported DescribeCluster fixture");
+    };
+    let ResponseKind::DescribeCluster(response) = response else {
+        panic!("expected supported DescribeCluster response");
+    };
+    assert_eq!(request.endpoint_type, 1);
+    assert!(request.include_cluster_authorized_operations);
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.error_message, None);
+    assert_eq!(response.endpoint_type, 1);
+    assert_eq!(response.cluster_id.as_str(), "memkafka");
+    assert_eq!(response.controller_id, BrokerId::from(1));
+    assert_eq!(response.cluster_authorized_operations, 8_096);
+    assert_eq!(response.brokers.len(), 1);
+    assert_eq!(response.brokers[0].broker_id, BrokerId::from(1));
+    assert_eq!(response.brokers[0].host.as_str(), "127.0.0.1");
+    assert_eq!(response.brokers[0].port, 19_092);
+    assert_eq!(response.brokers[0].rack, None);
+    assert!(!response.brokers[0].is_fenced);
 }
 
 fn assert_unsupported(error_code: i16) {
@@ -5256,6 +5464,7 @@ fn assert_api_versions_supported(request: &RequestKind, response: &ResponseKind,
             (ApiKey::CreateTopics as i16, 4, 7),
             (ApiKey::InitProducerId as i16, 0, 0),
             (ApiKey::DescribeConfigs as i16, 1, 1),
+            (ApiKey::DescribeCluster as i16, 2, 2),
         ],
         "exact capability advertisement mismatch"
     );
@@ -5348,6 +5557,24 @@ fn assert_describe_configs_unsupported(request: &RequestKind, response: &Respons
         );
         assert!(response_result.configs.is_empty());
     }
+}
+
+fn assert_describe_cluster_unsupported(request: &RequestKind, response: &ResponseKind, _: i16) {
+    let RequestKind::DescribeCluster(request) = request else {
+        panic!("expected DescribeCluster request fixture");
+    };
+    let ResponseKind::DescribeCluster(response) = response else {
+        panic!("expected DescribeCluster response");
+    };
+    assert_eq!(request.endpoint_type, 1);
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_unsupported(response.error_code);
+    assert_eq!(response.error_message, None);
+    assert_eq!(response.endpoint_type, 1);
+    assert!(response.cluster_id.is_empty());
+    assert_eq!(response.controller_id, BrokerId::from(-1));
+    assert!(response.brokers.is_empty());
+    assert_eq!(response.cluster_authorized_operations, i32::MIN);
 }
 
 fn ephemeral_config() -> Config {
@@ -5697,6 +5924,24 @@ async fn dispatch_metadata_kind(
     .await;
     let ResponseKind::Metadata(response) = response else {
         panic!("expected Metadata response");
+    };
+    response
+}
+
+async fn dispatch_describe_cluster(
+    dispatcher: &Dispatcher,
+    version: i16,
+    request: DescribeClusterRequest,
+) -> DescribeClusterResponse {
+    let response = dispatch_kind(
+        dispatcher,
+        ApiKey::DescribeCluster,
+        version,
+        RequestKind::DescribeCluster(request),
+    )
+    .await;
+    let ResponseKind::DescribeCluster(response) = response else {
+        panic!("expected DescribeCluster response");
     };
     response
 }

@@ -293,6 +293,21 @@
       "proofScenarios": [
         "kafbat-1.5.0"
       ]
+    },
+    {
+      "apiKey": 60,
+      "name": "DescribeCluster",
+      "supported": {
+        "min": 2,
+        "max": 2
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 2
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1"
+      ]
     }
   ]
 }

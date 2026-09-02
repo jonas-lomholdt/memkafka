@@ -5,9 +5,10 @@ use kafka_protocol::messages::{ApiKey, RequestKind, ResponseKind};
 use crate::{broker::BrokerState, config::AdvertisedAddress};
 
 use super::{
-    api_versions, create_topics, describe_configs, describe_groups, fetch, find_coordinator,
-    heartbeat, init_producer_id, join_group, leave_group, list_groups, list_offsets, metadata,
-    offset_commit, offset_fetch, produce, request_router::SupportedRequest, sync_group,
+    api_versions, create_topics, describe_cluster, describe_configs, describe_groups, fetch,
+    find_coordinator, heartbeat, init_producer_id, join_group, leave_group, list_groups,
+    list_offsets, metadata, offset_commit, offset_fetch, produce, request_router::SupportedRequest,
+    sync_group,
 };
 
 #[allow(dead_code)] // Kept as the exact capability/dispatcher/rejection coverage declaration.
@@ -29,6 +30,7 @@ pub(crate) const DISPATCHED_API_KEYS: &[ApiKey] = &[
     ApiKey::CreateTopics,
     ApiKey::InitProducerId,
     ApiKey::DescribeConfigs,
+    ApiKey::DescribeCluster,
 ];
 
 #[derive(Clone, Debug)]
@@ -163,6 +165,15 @@ impl Dispatcher {
             ApiKey::DescribeConfigs => match request.body() {
                 RequestKind::DescribeConfigs(body) => {
                     Ok(describe_configs::response(body, &self.broker).await.into())
+                }
+                _ => Err(DispatchError::BodyMismatch(request.api_key())),
+            },
+            ApiKey::DescribeCluster => match request.body() {
+                RequestKind::DescribeCluster(body) => {
+                    Ok(
+                        describe_cluster::response(body, &self.broker, &self.advertised_kafka)
+                            .into(),
+                    )
                 }
                 _ => Err(DispatchError::BodyMismatch(request.api_key())),
             },

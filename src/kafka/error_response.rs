@@ -4,11 +4,12 @@ use bytes::Bytes;
 use kafka_protocol::{
     ResponseError,
     messages::{
-        ApiKey, ApiVersionsResponse, BrokerId, CreateTopicsResponse, DescribeConfigsResponse,
-        DescribeGroupsResponse, FetchResponse, FindCoordinatorResponse, HeartbeatResponse,
-        InitProducerIdResponse, JoinGroupResponse, LeaveGroupResponse, ListGroupsResponse,
-        ListOffsetsResponse, MetadataResponse, OffsetCommitResponse, OffsetFetchResponse,
-        ProduceResponse, ProducerId, RequestKind, ResponseKind, SyncGroupResponse,
+        ApiKey, ApiVersionsResponse, BrokerId, CreateTopicsResponse, DescribeClusterResponse,
+        DescribeConfigsResponse, DescribeGroupsResponse, FetchResponse, FindCoordinatorResponse,
+        HeartbeatResponse, InitProducerIdResponse, JoinGroupResponse, LeaveGroupResponse,
+        ListGroupsResponse, ListOffsetsResponse, MetadataResponse, OffsetCommitResponse,
+        OffsetFetchResponse, ProduceResponse, ProducerId, RequestKind, ResponseKind,
+        SyncGroupResponse,
         api_versions_response::ApiVersion,
         create_topics_response::CreatableTopicResult,
         describe_configs_response::DescribeConfigsResult,
@@ -47,6 +48,7 @@ pub(crate) const ERROR_RESPONSE_API_KEYS: &[ApiKey] = &[
     ApiKey::CreateTopics,
     ApiKey::InitProducerId,
     ApiKey::DescribeConfigs,
+    ApiKey::DescribeCluster,
 ];
 
 const UNSUPPORTED_VERSION_MESSAGE: &str = "The version of API is not supported.";
@@ -91,6 +93,9 @@ pub(crate) fn unsupported_version(
         (ApiKey::DescribeConfigs, RequestKind::DescribeConfigs(body)) => {
             Ok(unsupported_describe_configs(body).into())
         }
+        (ApiKey::DescribeCluster, RequestKind::DescribeCluster(_)) => {
+            Ok(unsupported_describe_cluster().into())
+        }
         _ => Err(ErrorResponseError::BodyMismatch(request.api_key)),
     }
 }
@@ -132,6 +137,10 @@ impl Error for ErrorResponseError {}
 
 fn unsupported_code() -> i16 {
     ResponseError::UnsupportedVersion.code()
+}
+
+fn unsupported_describe_cluster() -> DescribeClusterResponse {
+    DescribeClusterResponse::default().with_error_code(unsupported_code())
 }
 
 fn unsupported_produce(
@@ -549,12 +558,12 @@ mod tests {
     use kafka_protocol::{
         ResponseError,
         messages::{
-            ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeConfigsRequest,
-            DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest, GroupId, HeartbeatRequest,
-            InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
-            ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetFetchRequest,
-            ProduceRequest, ProducerId, RequestHeader, RequestKind, ResponseHeader, ResponseKind,
-            SyncGroupRequest, TopicName,
+            ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeClusterRequest,
+            DescribeConfigsRequest, DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest,
+            GroupId, HeartbeatRequest, InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest,
+            ListGroupsRequest, ListOffsetsRequest, MetadataRequest, OffsetCommitRequest,
+            OffsetFetchRequest, ProduceRequest, ProducerId, RequestHeader, RequestKind,
+            ResponseHeader, ResponseKind, SyncGroupRequest, TopicName,
             create_topics_request::CreatableTopic,
             describe_configs_request::DescribeConfigsResource,
             fetch_request::{FetchPartition, FetchTopic},
@@ -699,7 +708,7 @@ mod tests {
         assert!(!request.expects_response());
     }
 
-    fn cases() -> [ErrorResponseCase; 17] {
+    fn cases() -> [ErrorResponseCase; 18] {
         [
             ErrorResponseCase {
                 api_key: ApiKey::Produce,
@@ -802,6 +811,12 @@ mod tests {
                 request_for: describe_configs_request,
                 extra_versions: &[4],
                 assert_shape: assert_describe_configs,
+            },
+            ErrorResponseCase {
+                api_key: ApiKey::DescribeCluster,
+                request_for: describe_cluster_request,
+                extra_versions: &[0],
+                assert_shape: assert_describe_cluster,
             },
         ]
     }
@@ -1155,6 +1170,10 @@ mod tests {
                 .with_resource_type(4)
                 .with_resource_name(StrBytes::from_static_str("configured-broker")),
         ]))
+    }
+
+    fn describe_cluster_request(_: i16) -> RequestKind {
+        RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1))
     }
 
     fn assert_produce(response: &ResponseKind, version: i16) {
@@ -1578,6 +1597,20 @@ mod tests {
             assert_eq!(result.resource_name.as_str(), expected_name);
             assert!(result.configs.is_empty());
         }
+    }
+
+    fn assert_describe_cluster(response: &ResponseKind, _: i16) {
+        let ResponseKind::DescribeCluster(response) = response else {
+            panic!("expected DescribeCluster response, got {response:?}");
+        };
+        assert_eq!(response.throttle_time_ms, 0);
+        assert_unsupported(response.error_code);
+        assert_eq!(response.error_message, None);
+        assert_eq!(response.endpoint_type, 1);
+        assert!(response.cluster_id.is_empty());
+        assert_eq!(response.controller_id, BrokerId::from(-1));
+        assert!(response.brokers.is_empty());
+        assert_eq!(response.cluster_authorized_operations, i32::MIN);
     }
 
     fn assert_unsupported(error_code: i16) {
