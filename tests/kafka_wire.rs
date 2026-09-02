@@ -6,7 +6,8 @@ use kafka_protocol::{
     ResponseError,
     messages::{
         ApiKey, ApiVersionsRequest, BrokerId, CreateTopicsRequest, DescribeClusterRequest,
-        DescribeClusterResponse, DescribeConfigsRequest, DescribeGroupsRequest, FetchRequest,
+        DescribeClusterResponse, DescribeConfigsRequest, DescribeGroupsRequest,
+        DescribeTopicPartitionsRequest, DescribeTopicPartitionsResponse, FetchRequest,
         FindCoordinatorRequest, GroupId, HeartbeatRequest, InitProducerIdRequest, JoinGroupRequest,
         LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest, MetadataRequest,
         OffsetCommitRequest, OffsetFetchRequest, ProduceRequest, ProducerId, RequestHeader,
@@ -15,6 +16,10 @@ use kafka_protocol::{
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig},
         create_topics_response::CreateTopicsResponse,
         describe_configs_request::DescribeConfigsResource,
+        describe_topic_partitions_request::{
+            Cursor as DescribeTopicPartitionsRequestCursor, TopicRequest,
+        },
+        describe_topic_partitions_response::DescribeTopicPartitionsResponseTopic,
         fetch_request::{FetchPartition, FetchTopic},
         fetch_response::FetchResponse,
         join_group_request::JoinGroupRequestProtocol,
@@ -387,7 +392,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
 
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
-    assert_eq!(response.api_keys.len(), 18);
+    assert_eq!(response.api_keys.len(), 19);
     assert_api_range(&response, ApiKey::Metadata, 4, 13);
     assert_api_range(&response, ApiKey::ApiVersions, 3, 4);
     assert_api_range(&response, ApiKey::CreateTopics, 4, 7);
@@ -406,6 +411,7 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_api_range(&response, ApiKey::InitProducerId, 0, 0);
     assert_api_range(&response, ApiKey::DescribeConfigs, 1, 1);
     assert_api_range(&response, ApiKey::DescribeCluster, 2, 2);
+    assert_api_range(&response, ApiKey::DescribeTopicPartitions, 0, 0);
 }
 
 #[tokio::test]
@@ -471,7 +477,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         let (header, body) = decode_api_versions_response(response);
 
         assert_eq!(header.correlation_id, correlation_id);
-        assert_eq!(body.api_keys.len(), 18);
+        assert_eq!(body.api_keys.len(), 19);
         assert_api_range(&body, ApiKey::Metadata, 4, 13);
         assert_api_range(&body, ApiKey::ApiVersions, 3, 4);
         assert_api_range(&body, ApiKey::CreateTopics, 4, 7);
@@ -490,6 +496,7 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
         assert_api_range(&body, ApiKey::InitProducerId, 0, 0);
         assert_api_range(&body, ApiKey::DescribeConfigs, 1, 1);
         assert_api_range(&body, ApiKey::DescribeCluster, 2, 2);
+        assert_api_range(&body, ApiKey::DescribeTopicPartitions, 0, 0);
     }
 
     shutdown_tx.send(()).expect("request server shutdown");
@@ -563,7 +570,7 @@ async fn same_connection_survives_a_typed_unsupported_version_response() {
         panic!("expected ApiVersions response");
     };
     assert_eq!(response.error_code, 0);
-    assert_eq!(response.api_keys.len(), 18);
+    assert_eq!(response.api_keys.len(), 19);
 
     shutdown_tx.send(()).expect("request server shutdown");
     timeout(Duration::from_secs(1), server)
@@ -658,6 +665,9 @@ async fn advertised_api_same_connection_matrix() {
 
     for case in &cases {
         let capability = boundary_capability(&manifest, case.api_key);
+        if adjacent_unsupported_versions(capability).is_empty() {
+            continue;
+        }
         let requested_direction = scheduled_boundary_direction(case.api_key);
         let (version, actual_direction) =
             scheduled_same_connection_version(capability, requested_direction);
@@ -2293,6 +2303,272 @@ async fn describe_cluster_v1_returns_typed_unsupported_version() {
 }
 
 #[tokio::test]
+async fn describe_topic_partitions_v0_uses_exact_partition_counted_pagination_over_tcp() {
+    struct Case {
+        label: &'static str,
+        request: DescribeTopicPartitionsRequest,
+        expected_topics: Vec<(&'static str, i16, Vec<i32>)>,
+        expected_cursor: Option<(&'static str, i32)>,
+    }
+
+    let broker = test_broker_state(false);
+    let alpha = broker
+        .topics()
+        .create_explicit("alpha", 3, 1)
+        .await
+        .expect("create alpha");
+    let bravo = broker
+        .topics()
+        .create_explicit("bravo", 2, 1)
+        .await
+        .expect("create bravo");
+    let charlie = broker
+        .topics()
+        .create_explicit("charlie", 1, 1)
+        .await
+        .expect("create charlie");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let cases = vec![
+        Case {
+            label: "all topics within alpha",
+            request: describe_topic_partitions_request(&[], 2, None),
+            expected_topics: vec![("alpha", 0, vec![0, 1])],
+            expected_cursor: Some(("alpha", 2)),
+        },
+        Case {
+            label: "cursor crosses from alpha to bravo",
+            request: describe_topic_partitions_request(&[], 2, Some(("alpha", 2))),
+            expected_topics: vec![("alpha", 0, vec![2]), ("bravo", 0, vec![0])],
+            expected_cursor: Some(("bravo", 1)),
+        },
+        Case {
+            label: "cursor at topic end emits empty success then continues",
+            request: describe_topic_partitions_request(&[], 1, Some(("bravo", 2))),
+            expected_topics: vec![("bravo", 0, vec![]), ("charlie", 0, vec![0])],
+            expected_cursor: None,
+        },
+        Case {
+            label: "explicit duplicates sort and deduplicate before exact-limit cursor",
+            request: describe_topic_partitions_request(
+                &["bravo", "alpha", "bravo", "alpha"],
+                3,
+                None,
+            ),
+            expected_topics: vec![("alpha", 0, vec![0, 1, 2])],
+            expected_cursor: Some(("bravo", 0)),
+        },
+        Case {
+            label: "zero limit clamps to one partition",
+            request: describe_topic_partitions_request(&[], 0, None),
+            expected_topics: vec![("alpha", 0, vec![0])],
+            expected_cursor: Some(("alpha", 1)),
+        },
+        Case {
+            label: "missing topic envelope does not consume partition limit",
+            request: describe_topic_partitions_request(&["alpha", "aardvark"], 1, None),
+            expected_topics: vec![
+                (
+                    "aardvark",
+                    ResponseError::UnknownTopicOrPartition.code(),
+                    vec![],
+                ),
+                ("alpha", 0, vec![0]),
+            ],
+            expected_cursor: Some(("alpha", 1)),
+        },
+        Case {
+            label: "invalid topic envelope does not consume partition limit",
+            request: describe_topic_partitions_request(&["alpha", "a/b"], 1, None),
+            expected_topics: vec![
+                ("a/b", ResponseError::InvalidTopicException.code(), vec![]),
+                ("alpha", 0, vec![0]),
+            ],
+            expected_cursor: Some(("alpha", 1)),
+        },
+        Case {
+            label: "cursor beyond topic end emits empty success then continues",
+            request: describe_topic_partitions_request(&[], 1, Some(("alpha", 4))),
+            expected_topics: vec![("alpha", 0, vec![]), ("bravo", 0, vec![0])],
+            expected_cursor: Some(("bravo", 1)),
+        },
+    ];
+
+    for case in cases {
+        let response = dispatch_describe_topic_partitions(&dispatcher, case.request.clone()).await;
+        assert_eq!(response.throttle_time_ms, 0, "{} throttle", case.label);
+        assert_eq!(
+            response.topics.len(),
+            case.expected_topics.len(),
+            "{} topic count",
+            case.label
+        );
+
+        for (actual, (name, error_code, partitions)) in
+            response.topics.iter().zip(&case.expected_topics)
+        {
+            assert_eq!(
+                actual.error_code, *error_code,
+                "{} {name} error",
+                case.label
+            );
+            if *error_code == 0 {
+                let expected_id = match *name {
+                    "alpha" => alpha.id,
+                    "bravo" => bravo.id,
+                    "charlie" => charlie.id,
+                    _ => panic!("unexpected successful topic {name}"),
+                };
+                assert_describe_topic_partitions_success(
+                    actual,
+                    name,
+                    expected_id,
+                    partitions,
+                    broker.broker_id(),
+                );
+            } else {
+                assert_describe_topic_partitions_error(actual, name, *error_code);
+            }
+        }
+
+        assert_describe_topic_partitions_cursor(
+            response.next_cursor.as_ref(),
+            case.expected_cursor,
+            case.label,
+        );
+    }
+
+    assert_eq!(broker.topics().list().await, vec![alpha, bravo, charlie]);
+}
+
+#[tokio::test]
+async fn describe_topic_partitions_v0_continuation_covers_every_partition_once_in_order() {
+    let broker = test_broker_state(false);
+    for (name, partitions) in [("alpha", 3), ("bravo", 2), ("charlie", 1)] {
+        broker
+            .topics()
+            .create_explicit(name, partitions, 1)
+            .await
+            .unwrap_or_else(|error| panic!("create {name}: {error}"));
+    }
+    let dispatcher = test_dispatcher_for(broker);
+    let mut cursor = None;
+    let mut seen = Vec::new();
+
+    for page in 0..3 {
+        let response = dispatch_describe_topic_partitions(
+            &dispatcher,
+            DescribeTopicPartitionsRequest::default()
+                .with_response_partition_limit(2)
+                .with_cursor(cursor),
+        )
+        .await;
+        for topic in response.topics {
+            let name = topic.name.expect("successful topic name");
+            for partition in topic.partitions {
+                seen.push((name.as_str().to_owned(), partition.partition_index));
+            }
+        }
+        cursor = response.next_cursor.map(|cursor| {
+            DescribeTopicPartitionsRequestCursor::default()
+                .with_topic_name(cursor.topic_name)
+                .with_partition_index(cursor.partition_index)
+        });
+        if page < 2 {
+            assert!(cursor.is_some(), "page {page} must continue");
+        }
+    }
+
+    assert_eq!(
+        seen,
+        vec![
+            ("alpha".to_owned(), 0),
+            ("alpha".to_owned(), 1),
+            ("alpha".to_owned(), 2),
+            ("bravo".to_owned(), 0),
+            ("bravo".to_owned(), 1),
+            ("charlie".to_owned(), 0),
+        ]
+    );
+    assert_eq!(cursor, None);
+}
+
+#[tokio::test]
+async fn describe_topic_partitions_v0_invalid_cursors_preserve_raw_request_entries() {
+    let broker = test_broker_state(true);
+    broker
+        .topics()
+        .create_explicit("alpha", 3, 1)
+        .await
+        .expect("create alpha");
+    let dispatcher = test_dispatcher_for(broker.clone());
+    let before = broker.topics().list().await;
+
+    let cases = [
+        describe_topic_partitions_request(
+            &["alpha", "missing", "alpha"],
+            2,
+            Some(("not-selected", 0)),
+        ),
+        describe_topic_partitions_request(&["alpha", "missing", "alpha"], 2, Some(("alpha", -1))),
+    ];
+
+    for request in cases {
+        let raw_names = request
+            .topics
+            .iter()
+            .map(|topic| topic.name.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let response = dispatch_describe_topic_partitions(&dispatcher, request).await;
+
+        assert_eq!(response.topics.len(), raw_names.len());
+        for (topic, raw_name) in response.topics.iter().zip(raw_names) {
+            assert_describe_topic_partitions_error(
+                topic,
+                &raw_name,
+                ResponseError::InvalidRequest.code(),
+            );
+        }
+        assert_eq!(response.next_cursor, None);
+    }
+
+    let all_topics_negative_cursor = dispatch_describe_topic_partitions(
+        &dispatcher,
+        describe_topic_partitions_request(&[], 2, Some(("alpha", -1))),
+    )
+    .await;
+    assert!(all_topics_negative_cursor.topics.is_empty());
+    assert_eq!(all_topics_negative_cursor.next_cursor, None);
+    assert_eq!(broker.topics().list().await, before);
+}
+
+#[tokio::test]
+async fn describe_topic_partitions_v0_reports_invalid_and_missing_names_without_mutation() {
+    let broker = test_broker_state(true);
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let response = dispatch_describe_topic_partitions(
+        &dispatcher,
+        describe_topic_partitions_request(&["missing", "bad/name", "missing"], 2, None),
+    )
+    .await;
+
+    assert_eq!(response.topics.len(), 2);
+    assert_describe_topic_partitions_error(
+        &response.topics[0],
+        "bad/name",
+        ResponseError::InvalidTopicException.code(),
+    );
+    assert_describe_topic_partitions_error(
+        &response.topics[1],
+        "missing",
+        ResponseError::UnknownTopicOrPartition.code(),
+    );
+    assert_eq!(response.next_cursor, None);
+    assert!(broker.topics().list().await.is_empty());
+}
+
+#[tokio::test]
 async fn find_coordinator_v2_uses_the_listener_advertised_address() {
     let dispatcher = Dispatcher::new(
         test_broker_state(true),
@@ -3515,7 +3791,7 @@ async fn fetch_v4_honors_byte_limits_but_returns_the_first_oversized_batch() {
     );
 }
 
-fn boundary_cases() -> [BoundaryCase; 18] {
+fn boundary_cases() -> [BoundaryCase; 19] {
     [
         BoundaryCase {
             api_key: ApiKey::Produce,
@@ -3625,6 +3901,12 @@ fn boundary_cases() -> [BoundaryCase; 18] {
             assert_supported: assert_describe_cluster_supported,
             assert_error: assert_describe_cluster_unsupported,
         },
+        BoundaryCase {
+            api_key: ApiKey::DescribeTopicPartitions,
+            request_for: describe_topic_partitions_boundary_request,
+            assert_supported: assert_describe_topic_partitions_supported,
+            assert_error: assert_describe_topic_partitions_unsupported,
+        },
     ]
 }
 
@@ -3636,8 +3918,8 @@ fn boundary_manifest() -> BoundaryManifest {
 }
 
 fn assert_boundary_coverage(cases: &[BoundaryCase], manifest: &BoundaryManifest) {
-    assert_eq!(cases.len(), 18, "boundary table must cover 18 APIs exactly");
-    assert_eq!(manifest.apis.len(), 18, "manifest must advertise 18 APIs");
+    assert_eq!(cases.len(), 19, "boundary table must cover 19 APIs exactly");
+    assert_eq!(manifest.apis.len(), 19, "manifest must advertise 19 APIs");
     assert!(
         cases
             .windows(2)
@@ -4029,6 +4311,14 @@ fn describe_cluster_boundary_request(_: i16) -> RequestKind {
     RequestKind::DescribeCluster(DescribeClusterRequest::default().with_endpoint_type(1))
 }
 
+fn describe_topic_partitions_boundary_request(_: i16) -> RequestKind {
+    RequestKind::DescribeTopicPartitions(describe_topic_partitions_request(
+        &["boundary-describe-topic-a", "boundary-describe-topic-b"],
+        i32::MAX,
+        None,
+    ))
+}
+
 fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
     match api_key {
         ApiKey::Produce => RequestKind::Produce(produce_request(2)),
@@ -4123,6 +4413,7 @@ fn supported_request_for(api_key: ApiKey, version: i16) -> RequestKind {
                 .with_endpoint_type(1)
                 .with_include_cluster_authorized_operations(true),
         ),
+        ApiKey::DescribeTopicPartitions => describe_topic_partitions_boundary_request(version),
         _ => panic!("supported boundary fixture is missing {api_key:?}"),
     }
 }
@@ -4412,6 +4703,20 @@ fn assert_flexible_response_tags_empty(api_key: ApiKey, version: i16, response: 
                 assert_no_tags!(broker);
             }
         }
+        ResponseKind::DescribeTopicPartitions(response)
+            if api_key == ApiKey::DescribeTopicPartitions =>
+        {
+            assert_no_tags!(response);
+            for topic in &response.topics {
+                assert_no_tags!(topic);
+                for partition in &topic.partitions {
+                    assert_no_tags!(partition);
+                }
+            }
+            if let Some(cursor) = &response.next_cursor {
+                assert_no_tags!(cursor);
+            }
+        }
         _ => panic!("missing flexible response tag audit for {api_key:?} v{version}"),
     }
 }
@@ -4535,7 +4840,7 @@ async fn assert_api_versions_v4_success(connection: &mut TcpStream, correlation_
         panic!("expected ApiVersions success response");
     };
     assert_eq!(response.error_code, 0);
-    assert_eq!(response.api_keys.len(), 18);
+    assert_eq!(response.api_keys.len(), 19);
 }
 
 fn assert_produce_supported(request: &RequestKind, response: &ResponseKind, _: i16) {
@@ -5012,6 +5317,32 @@ fn assert_describe_cluster_supported(request: &RequestKind, response: &ResponseK
     assert!(!response.brokers[0].is_fenced);
 }
 
+fn assert_describe_topic_partitions_supported(
+    request: &RequestKind,
+    response: &ResponseKind,
+    _: i16,
+) {
+    let RequestKind::DescribeTopicPartitions(request) = request else {
+        panic!("expected supported DescribeTopicPartitions fixture");
+    };
+    let ResponseKind::DescribeTopicPartitions(response) = response else {
+        panic!("expected supported DescribeTopicPartitions response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.topics.len(), request.topics.len());
+    for (actual, expected) in response.topics.iter().zip(&request.topics) {
+        assert_eq!(
+            actual.error_code,
+            ResponseError::UnknownTopicOrPartition.code()
+        );
+        assert_eq!(actual.name.as_ref(), Some(&expected.name));
+        assert!(actual.topic_id.is_nil());
+        assert!(!actual.is_internal);
+        assert!(actual.partitions.is_empty());
+    }
+    assert_eq!(response.next_cursor, None);
+}
+
 fn assert_unsupported(error_code: i16) {
     assert_eq!(error_code, ResponseError::UnsupportedVersion.code());
 }
@@ -5465,6 +5796,7 @@ fn assert_api_versions_supported(request: &RequestKind, response: &ResponseKind,
             (ApiKey::InitProducerId as i16, 0, 0),
             (ApiKey::DescribeConfigs as i16, 1, 1),
             (ApiKey::DescribeCluster as i16, 2, 2),
+            (ApiKey::DescribeTopicPartitions as i16, 0, 0),
         ],
         "exact capability advertisement mismatch"
     );
@@ -5575,6 +5907,29 @@ fn assert_describe_cluster_unsupported(request: &RequestKind, response: &Respons
     assert_eq!(response.controller_id, BrokerId::from(-1));
     assert!(response.brokers.is_empty());
     assert_eq!(response.cluster_authorized_operations, i32::MIN);
+}
+
+fn assert_describe_topic_partitions_unsupported(
+    request: &RequestKind,
+    response: &ResponseKind,
+    _: i16,
+) {
+    let RequestKind::DescribeTopicPartitions(request) = request else {
+        panic!("expected DescribeTopicPartitions request fixture");
+    };
+    let ResponseKind::DescribeTopicPartitions(response) = response else {
+        panic!("expected DescribeTopicPartitions response");
+    };
+    assert_eq!(response.throttle_time_ms, 0);
+    assert_eq!(response.topics.len(), request.topics.len());
+    for (actual, expected) in response.topics.iter().zip(&request.topics) {
+        assert_unsupported(actual.error_code);
+        assert_eq!(actual.name.as_ref(), Some(&expected.name));
+        assert!(actual.topic_id.is_nil());
+        assert!(!actual.is_internal);
+        assert!(actual.partitions.is_empty());
+    }
+    assert_eq!(response.next_cursor, None);
 }
 
 fn ephemeral_config() -> Config {
@@ -6284,6 +6639,109 @@ async fn dispatch_create_topics_kind(
         panic!("expected CreateTopics response");
     };
     response
+}
+
+fn describe_topic_partitions_request(
+    topics: &[&str],
+    response_partition_limit: i32,
+    cursor: Option<(&str, i32)>,
+) -> DescribeTopicPartitionsRequest {
+    DescribeTopicPartitionsRequest::default()
+        .with_topics(
+            topics
+                .iter()
+                .map(|name| {
+                    TopicRequest::default()
+                        .with_name(TopicName::from(StrBytes::from_string((*name).to_owned())))
+                })
+                .collect(),
+        )
+        .with_response_partition_limit(response_partition_limit)
+        .with_cursor(cursor.map(|(name, partition_index)| {
+            DescribeTopicPartitionsRequestCursor::default()
+                .with_topic_name(TopicName::from(StrBytes::from_string(name.to_owned())))
+                .with_partition_index(partition_index)
+        }))
+}
+
+async fn dispatch_describe_topic_partitions(
+    dispatcher: &Dispatcher,
+    request: DescribeTopicPartitionsRequest,
+) -> DescribeTopicPartitionsResponse {
+    let response = dispatch_kind(
+        dispatcher,
+        ApiKey::DescribeTopicPartitions,
+        0,
+        RequestKind::DescribeTopicPartitions(request),
+    )
+    .await;
+    let ResponseKind::DescribeTopicPartitions(response) = response else {
+        panic!("expected DescribeTopicPartitions response");
+    };
+    response
+}
+
+fn assert_describe_topic_partitions_success(
+    topic: &DescribeTopicPartitionsResponseTopic,
+    expected_name: &str,
+    expected_id: Uuid,
+    expected_partitions: &[i32],
+    broker_id: i32,
+) {
+    assert_eq!(topic.error_code, 0, "{expected_name} topic error");
+    assert_eq!(
+        topic.name.as_ref().map(|name| name.as_str()),
+        Some(expected_name)
+    );
+    assert_eq!(topic.topic_id, expected_id);
+    assert!(!topic.topic_id.is_nil());
+    assert!(!topic.is_internal);
+    assert_eq!(topic.topic_authorized_operations, 3_576);
+    assert_eq!(
+        topic
+            .partitions
+            .iter()
+            .map(|partition| partition.partition_index)
+            .collect::<Vec<_>>(),
+        expected_partitions
+    );
+    for partition in &topic.partitions {
+        assert_eq!(partition.error_code, 0);
+        assert_eq!(partition.leader_id, BrokerId::from(broker_id));
+        assert_eq!(partition.leader_epoch, 0);
+        assert_eq!(partition.replica_nodes, vec![BrokerId::from(broker_id)]);
+        assert_eq!(partition.isr_nodes, vec![BrokerId::from(broker_id)]);
+        assert_eq!(partition.eligible_leader_replicas, None);
+        assert_eq!(partition.last_known_elr, None);
+        assert!(partition.offline_replicas.is_empty());
+    }
+}
+
+fn assert_describe_topic_partitions_error(
+    topic: &DescribeTopicPartitionsResponseTopic,
+    expected_name: &str,
+    expected_error_code: i16,
+) {
+    assert_eq!(topic.error_code, expected_error_code);
+    assert_eq!(
+        topic.name.as_ref().map(|name| name.as_str()),
+        Some(expected_name)
+    );
+    assert!(topic.topic_id.is_nil());
+    assert!(!topic.is_internal);
+    assert!(topic.partitions.is_empty());
+}
+
+fn assert_describe_topic_partitions_cursor(
+    actual: Option<&kafka_protocol::messages::describe_topic_partitions_response::Cursor>,
+    expected: Option<(&str, i32)>,
+    label: &str,
+) {
+    assert_eq!(
+        actual.map(|cursor| (cursor.topic_name.as_str(), cursor.partition_index)),
+        expected,
+        "{label} cursor"
+    );
 }
 
 fn decode_api_versions_response(

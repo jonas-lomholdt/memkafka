@@ -308,6 +308,21 @@
       "proofScenarios": [
         "apache-kafka-java-4.3.1"
       ]
+    },
+    {
+      "apiKey": 75,
+      "name": "DescribeTopicPartitions",
+      "supported": {
+        "min": 0,
+        "max": 0
+      },
+      "kafka43": {
+        "min": 0,
+        "max": 0
+      },
+      "proofScenarios": [
+        "apache-kafka-java-4.3.1"
+      ]
     }
   ]
 }

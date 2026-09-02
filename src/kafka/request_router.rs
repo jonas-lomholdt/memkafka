@@ -123,11 +123,11 @@ mod tests {
         ResponseError,
         messages::{
             ApiKey, ApiVersionsRequest, CreateTopicsRequest, DescribeClusterRequest,
-            DescribeConfigsRequest, DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest,
-            HeartbeatRequest, InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest,
-            ListGroupsRequest, ListOffsetsRequest, MetadataRequest, OffsetCommitRequest,
-            OffsetFetchRequest, ProduceRequest, RequestHeader, RequestKind, ResponseKind,
-            SyncGroupRequest, TopicName,
+            DescribeConfigsRequest, DescribeGroupsRequest, DescribeTopicPartitionsRequest,
+            FetchRequest, FindCoordinatorRequest, HeartbeatRequest, InitProducerIdRequest,
+            JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest, ListOffsetsRequest,
+            MetadataRequest, OffsetCommitRequest, OffsetFetchRequest, ProduceRequest,
+            RequestHeader, RequestKind, ResponseKind, SyncGroupRequest, TopicName,
             metadata_request::MetadataRequestTopic,
             produce_request::{PartitionProduceData, TopicProduceData},
         },
@@ -224,7 +224,7 @@ mod tests {
     fn every_advertised_boundary_routes_to_its_explicit_outcome() {
         assert_eq!(
             CAPABILITIES.len(),
-            18,
+            19,
             "the advertised boundary matrix changed"
         );
 
@@ -399,6 +399,9 @@ mod tests {
             ApiKey::DescribeCluster => {
                 RequestKind::DescribeCluster(DescribeClusterRequest::default())
             }
+            ApiKey::DescribeTopicPartitions => {
+                RequestKind::DescribeTopicPartitions(DescribeTopicPartitionsRequest::default())
+            }
             _ => panic!("router boundary fixture is missing {api_key:?}"),
         }
     }
@@ -425,6 +428,10 @@ mod tests {
                     | (ApiKey::InitProducerId, ResponseKind::InitProducerId(_))
                     | (ApiKey::DescribeConfigs, ResponseKind::DescribeConfigs(_))
                     | (ApiKey::DescribeCluster, ResponseKind::DescribeCluster(_))
+                    | (
+                        ApiKey::DescribeTopicPartitions,
+                        ResponseKind::DescribeTopicPartitions(_)
+                    )
             ),
             "expected {api_key:?} response variant, got {body:?}"
         );
