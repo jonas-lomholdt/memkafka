@@ -2221,20 +2221,8 @@ async fn every_kafka_listener_advertises_its_own_address() {
         metadata_responses[1].brokers[0].node_id
     );
     assert_eq!(
-        metadata_responses[0].topics[0].topic_id,
-        metadata_responses[1].topics[0].topic_id
-    );
-    assert_eq!(
-        metadata_responses[0].topics[0]
-            .partitions
-            .iter()
-            .map(|partition| partition.partition_index)
-            .collect::<Vec<_>>(),
-        metadata_responses[1].topics[0]
-            .partitions
-            .iter()
-            .map(|partition| partition.partition_index)
-            .collect::<Vec<_>>()
+        metadata_responses[0].topics, metadata_responses[1].topics,
+        "listeners must report identical complete topic and partition metadata"
     );
     assert_eq!(
         cluster_responses[0].cluster_id,
@@ -3561,10 +3549,9 @@ async fn modern_discovery_uses_one_topic_identity_across_apis() {
         1,
         "unknown ID must not mutate catalog"
     );
-    assert_eq!(catalog.topics[0].topic_id, topic_id);
     assert_eq!(
-        catalog.topics[0].name.as_ref().map(|name| name.as_str()),
-        Some("identity-topic")
+        catalog.topics[0], by_name.topics[0],
+        "unknown ID lookup must preserve complete existing topic and partition metadata"
     );
 
     server.shutdown().await;
