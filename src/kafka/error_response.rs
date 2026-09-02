@@ -146,7 +146,9 @@ fn unsupported_code() -> i16 {
 }
 
 fn unsupported_describe_cluster() -> DescribeClusterResponse {
-    DescribeClusterResponse::default().with_error_code(unsupported_code())
+    DescribeClusterResponse::default()
+        .with_error_code(unsupported_code())
+        .with_error_message(Some(StrBytes::from_static_str(UNSUPPORTED_VERSION_MESSAGE)))
 }
 
 fn unsupported_describe_topic_partitions(
@@ -1669,7 +1671,10 @@ mod tests {
         };
         assert_eq!(response.throttle_time_ms, 0);
         assert_unsupported(response.error_code);
-        assert_eq!(response.error_message, None);
+        assert_eq!(
+            response.error_message.as_ref().map(StrBytes::as_str),
+            Some(UNSUPPORTED_VERSION_MESSAGE)
+        );
         assert_eq!(response.endpoint_type, 1);
         assert!(response.cluster_id.is_empty());
         assert_eq!(response.controller_id, BrokerId::from(-1));

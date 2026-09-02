@@ -1,10 +1,10 @@
 # MemKafka v0.1 Design Specification
 
 **Date:** 2026-08-26  
-**Updated:** 2026-08-29
+**Updated:** 2026-09-02
 **Status:** Implemented
 
-**Implementation:** Kafka delivery, offsets, multi-member cooperative-sticky classic groups, forced consumer-topic creation, group-aware Kafbat UI message browsing, non-transactional idempotent production, and the Avro Schema Registry subset are complete and covered by pinned black-box clients and focused protocol tests.
+**Implementation:** Kafka delivery, offsets, modern topic and cluster discovery, multi-member cooperative-sticky classic groups, forced consumer-topic creation, group-aware Kafbat UI message browsing, non-transactional idempotent production, and the Avro Schema Registry subset are complete and covered by pinned black-box clients and focused protocol tests.
 
 ## 1. Summary
 
@@ -46,6 +46,8 @@ MemKafka is test infrastructure, not production infrastructure. It makes no dura
 It does not try to reproduce Kafka's internal architecture. There is one virtual broker, no replicated log, no controller quorum, and no internal topics. Kafka's wire protocol is an adapter over small in-memory state machines.
 
 The project should remain useful because it is narrow. Broad protocol compatibility can grow after v0.1 through additional real-client test suites, but v0.1 does not claim compatibility with every Kafka client.
+
+Near-instant startup and a lightweight footprint are product boundaries. New compatibility APIs should reuse the existing single-process in-memory state and execute only when a client calls them. Modern discovery therefore adds catalog lookups and response formatting, not background services, disk persistence, replication, or election machinery. No numeric startup or resource claim is made without a reproducible benchmark.
 
 ## 4. User experience and defaults
 
@@ -194,8 +196,12 @@ The initial Kafka API surface includes the narrow version set needed for these b
 - `DescribeGroups`
 - `InitProducerId`
 - `DescribeConfigs`
+- `DescribeCluster`
+- `DescribeTopicPartitions`
 
-The current advertised windows are `Produce 7`, `Fetch 4`, `ListOffsets 3`, `Metadata 4-9`, `ApiVersions 3-4`, `CreateTopics 4-6`, `FindCoordinator 2`, `JoinGroup 5`, `SyncGroup 3`, `Heartbeat 3`, `LeaveGroup 1-3`, `OffsetCommit 7`, `OffsetFetch 5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, and read-only `DescribeConfigs 1`.
+The current advertised windows are `Produce 7`, `Fetch 4`, `ListOffsets 3`, `Metadata 4-13`, `ApiVersions 3-4`, `CreateTopics 4-7`, `FindCoordinator 2`, `JoinGroup 5`, `SyncGroup 3`, `Heartbeat 3`, `LeaveGroup 1-3`, `OffsetCommit 7`, `OffsetFetch 5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, read-only `DescribeConfigs 1`, `DescribeCluster 2`, and `DescribeTopicPartitions 0`. That is exactly 19 advertised APIs.
+
+Every topic receives one non-nil UUID when it is created. Name and UUID indexes are updated atomically, and Metadata, CreateTopics, and DescribeTopicPartitions return the same identity. The UUID remains stable for that process lifetime and intentionally changes after restart because topic state is not persisted.
 
 In registry and manifest terminology, `supported` is MemKafka’s currently advertised and implemented contiguous window; `kafka43` is Apache Kafka 4.3’s complete stable request-version range for reference. `supported.min` preserves the current-client floor, `supported.max` is the present implementation ceiling, and `kafka43` is not MemKafka support or a materialized target window. Adding a supported version requires corresponding protocol and black-box coverage and must never change existing semantics silently.
 
@@ -469,6 +475,9 @@ The first four metadata and topic-creation scenarios and the baseline publish/co
 - return correct earliest/latest offsets and watermarks;
 - round-trip uncompressed, gzip, snappy, lz4, and zstd batches produced by the real client;
 - long-poll an empty Fetch, wake it on Produce, and time it out correctly.
+- use Apache Kafka Java 4.3.1 `Admin.describeCluster()` and observe cluster `memkafka`, broker `1`, and controller `1`;
+- observe the same non-zero topic UUID through CreateTopics, ListTopics, and DescribeTopics;
+- describe multiple topics through `DescribeTopicPartitions v0` with a response partition limit and receive every partition transparently across pages.
 
 ### 12.2 Consumer-group acceptance
 
@@ -587,7 +596,7 @@ The following are not implemented or simulated in v0.1:
 - transactions, exactly-once semantics, transactional IDs or batches, control batches, or producer epoch recovery;
 - KIP-848's newer consumer group protocol, `ConsumerGroupHeartbeat`, or broker-side assignors;
 - retention policies, log compaction, segment files, tiered storage, or DeleteRecords;
-- partition-count increases, topic deletion, ACLs, quotas, or administrative/configuration APIs beyond the explicitly tested Kafbat compatibility subset (`ListGroups v0`, `DescribeGroups v0`, and read-only `DescribeConfigs v1`);
+- topic deletion/recreation, partition-count increases, topic-UUID data-plane forms in Fetch/ListOffsets/offset commits, ACLs, quotas, or administrative/configuration APIs beyond the explicitly tested discovery and Kafbat subsets (`DescribeCluster v2`, `DescribeTopicPartitions v0`, `ListGroups v0`, `DescribeGroups v0`, and read-only `DescribeConfigs v1`);
 - TLS, SASL, authentication, authorization, or multi-tenant isolation;
 - realistic latency, network faults, disk faults, broker restarts, or performance benchmarking against Kafka;
 - legacy message-set formats predating RecordBatch magic `2`;

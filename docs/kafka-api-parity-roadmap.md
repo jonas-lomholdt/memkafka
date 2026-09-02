@@ -1,6 +1,6 @@
 # Kafka API parity roadmap
 
-> **Snapshot:** 2026-08-31, targeting Apache Kafka 4.3. This is a living compatibility map. Kafka will evolve, and reaching 77/77 API keys would still not prove behavioral parity.
+> **Snapshot:** 2026-09-02, targeting Apache Kafka 4.3. This is a living compatibility map. Kafka will evolve, and reaching 77/77 API keys would still not prove behavioral parity.
 
 ## Executive recommendation
 
@@ -20,14 +20,14 @@ Do not build a KRaft cluster, replica manager, disk log, or multi-process archit
 
 ### Snapshot scorecard
 
-| Measure | Historical 2026-08-29 assessment |
+| Measure | Current 2026-09-02 assessment |
 | --- | ---: |
 | Stable API keys in the [Kafka 4.3 protocol table](https://kafka.apache.org/43/design/protocol#api-keys) | 77 |
-| API keys advertised by MemKafka | 17 |
-| Advertised keys with a material version or semantic gap | 17 |
-| Stable keys not advertised | 60 |
+| API keys advertised by MemKafka | 19 |
+| Advertised keys with a material version or semantic gap | 19 |
+| Stable keys not advertised | 58 |
 
-The raw 17/77 count is useful as an inventory check, but not as a compatibility score:
+The raw 19/77 count is useful as an inventory check, but not as a compatibility score:
 
 - one key can contain many independently negotiated versions and behaviors;
 - Produce, Fetch, Metadata, and group coordination matter to ordinary clients far more than most controller APIs;
@@ -105,7 +105,7 @@ The source of truth for advertised versions is the central runtime capability re
 | 0 | Produce | 7 | 3-13 | Real Java, .NET, Go, and Rust clients append acknowledged ordered records; the flow-profile .NET client proves non-transactional idempotent production. | No transactions/control batches, broker epoch validation, newer flexible versions, or complete modern error surface. |
 | 1 | Fetch | 4 | 4-18 | Real clients fetch ordered batches, seek, repeat uncommitted reads, and use earliest/latest behavior; wire tests cover long-polling and byte limits. | No fetch sessions, topic IDs, current/last-fetched leader epochs, diverging epochs, preferred replicas, or isolation semantics. |
 | 2 | ListOffsets | 3 | 1-11 | Real clients prove earliest/latest and seeking; wire tests prove unknown-partition errors. | Only timestamps `-2` and `-1`; timestamp lookup is rejected, leader epoch is always `-1`, and newer flexible/topic-ID schemas are absent. |
-| 3 | Metadata | 4-9 | 0-13 | Real clients prove discovery, advertised address, auto-creation, explicit partition counts, and all-topic listing paths. | No topic IDs, newer flexible versions, rack data, listener/security semantics, or realistic cluster changes. |
+| 3 | Metadata | 4-13 | 0-13 | Real clients prove discovery, advertised address, auto-creation, explicit partition counts, all-topic listing, and stable UUID lookup by name or ID. | No rack data, listener/security semantics, deletion/recreation lifecycle, or realistic cluster changes. |
 | 8 | OffsetCommit | 7 | 2-10 | Real .NET consumers prove automatic/manual commit resume, redelivery without commit, and independent group offsets. | Static membership is rejected; retention timestamp, leader epoch, topic IDs, and newer versions are not implemented. |
 | 9 | OffsetFetch | 5 | 1-10 | Real .NET consumers prove committed-offset recovery and group isolation. | No multi-group request, topic IDs, member epoch, unstable transactional offsets, or full unknown-group behavior. |
 | 10 | FindCoordinator | 2 | 0-6 | Real group consumers discover the single coordinator. | Group coordinators only; transaction/share coordinator types and batched coordinator responses are absent. |
@@ -116,9 +116,11 @@ The source of truth for advertised versions is the central runtime capability re
 | 15 | DescribeGroups | 0 | 0-6 | Kafbat black-box coverage proves an active group is discoverable; wire tests assert state, metadata, assignments, ordering, and unknown groups. | No authorized operations, newer group fields/types, or version coverage beyond v0. |
 | 16 | ListGroups | 0 | 0-5 | Kafbat black-box coverage proves group listing; wire tests assert group IDs and protocol types. | No state/type filters, group states, or newer versions. |
 | 18 | ApiVersions | 3-4 | 0-4 | All pinned clients negotiate successfully; wire tests cover v3, v4, connection reuse, and Kafka-compatible unsupported-version fallback. | Advertised behavioral support remains intentionally limited to v3-v4. |
-| 19 | CreateTopics | 4-6 | 2-7 | Real Admin clients create topics, observe partition counts, and receive `INVALID_REPLICATION_FACTOR`; wire tests cover validation-only and errors. | Custom configs and manual replica assignments are rejected; v7 and topic-ID lifecycle are absent. |
+| 19 | CreateTopics | 4-7 | 2-7 | Real Admin clients create topics, observe partition counts and stable non-zero IDs, and receive `INVALID_REPLICATION_FACTOR`; wire tests cover validation-only and errors. | Custom configs and manual replica assignments are rejected; deletion/recreation lifecycle is absent. |
 | 22 | InitProducerId | 0 | 0-6 | A real idempotent .NET producer obtains an ID and publishes; wire tests prove distinct IDs and transactional-ID rejection. | Non-transactional allocation only, epoch always `0`; no transactional IDs, fencing/recovery, or newer versions. |
 | 32 | DescribeConfigs | 1 | 1-4 | The Kafbat black-box path negotiates the read-only API; wire tests cover known and unknown topic/broker resources. | Successful resources return empty config lists; no synonyms, documentation, config source/sensitivity, or non-empty values. |
+| 60 | DescribeCluster | 2 | 0-2 | Java 4.3.1 `Admin.describeCluster()` proves cluster ID, controller, broker, and endpoint; wire tests prove listener-specific advertised addresses. | Historical v0-v1 and security authorization fields are intentionally outside the current window. |
+| 75 | DescribeTopicPartitions | 0 | 0 | Java 4.3.1 transparently follows pagination and observes stable topic IDs and complete ordered partitions. | Topic deletion/recreation and partition growth are not implemented. |
 
 ### Current architectural strengths to preserve
 
@@ -126,6 +128,7 @@ The source of truth for advertised versions is the central runtime capability re
 - partition-local locking gives deterministic offsets and retry-safe idempotent sequence tracking;
 - classic group coordination is a real state machine, not a single-consumer shortcut;
 - the single broker is consistently broker, controller, leader, and replica;
+- one atomic catalog keeps every topic name, process-lifetime UUID, and partition set coherent across discovery APIs;
 - unsupported transactions, static membership, custom topic configs, and manual assignments fail instead of silently succeeding.
 
 ### Current structural risks
@@ -133,7 +136,7 @@ The source of truth for advertised versions is the central runtime capability re
 - the registry now aligns `ApiVersions` and dispatch version gates, but handler semantics remain uneven across each advertised window;
 - handlers are generally written to one shared generated request type rather than making version-specific semantics explicit;
 - schema-known adjacent versions now receive typed rejection before dispatch, while unknown keys, out-of-schema versions, and malformed requests intentionally close only their connection;
-- topic identity is name-only, which blocks modern Metadata, Fetch, offsets, deletion/recreation safety, and KIP-848;
+- topic identity is coherent across modern discovery, but UUID data-plane forms, deletion/recreation safety, and KIP-848 still need explicit state and acceptance coverage;
 - pinned request-capture and unsupported-version oracles now exist, but normalized behavioral differentials for success and stateful error paths remain future work.
 
 ## Complete Kafka 4.3 stable API-key matrix
@@ -146,7 +149,7 @@ Status means:
 - `partial`: advertised today, but version or semantic parity is incomplete;
 - `missing`: not advertised or dispatched.
 
-No API currently meets the strict `implemented` definition; the 17 advertised keys are `partial` and the other 60 are `missing`.
+No API currently meets the strict `implemented` definition; the 19 advertised keys are `partial` and the other 58 are `missing`.
 
 The local `kafka-protocol 0.18.0-memkafka.1` fork is generated from pinned Kafka 4.3.1 schemas and reaches the release's stable request/response maxima, including Streams keys 88 and 89. This is codec availability only: every row remains `partial` or `missing` until its behavior and real-client acceptance are implemented. See [`UPSTREAM.md`](../crates/kafka-protocol/UPSTREAM.md) for provenance, regeneration, and upgrade instructions.
 
@@ -157,10 +160,10 @@ The local `kafka-protocol 0.18.0-memkafka.1` fork is generated from pinned Kafka
 | 0 | Produce | 3-13 | partial | P0 | Preserve raw batches; add versioned errors, epochs, flexible forms, transactions, and exact side effects. |
 | 1 | Fetch | 4-18 | partial | P0 | Add sessions, topic IDs, leader epochs, tier/isolation fields, and correct incremental behavior. |
 | 2 | ListOffsets | 1-11 | partial | P0 | Resolve earliest/latest and record timestamps with correct leader epochs and errors. |
-| 3 | Metadata | 0-13 | partial | P0 | Add stable topic UUIDs, flexible versions, authorized operations, and consistent single-broker metadata. |
+| 3 | Metadata | 0-13 | partial | P0 | Preserve stable topic UUIDs and flexible v4-v13 behavior; add authorization and realistic lifecycle changes only when a client scenario needs them. |
 | 18 | ApiVersions | 0-4 | partial | P0 | Keep one capability registry and preserve the live-proven unsupported-version negotiation path while advertised support remains v3-v4. |
 | 23 | OffsetForLeaderEpoch | 2-4 | missing | P0 | Return deterministic partition end offsets for validated current/previous in-memory leader epochs. |
-| 75 | DescribeTopicPartitions | 0 | missing | P1 | Paginated, topic-ID-aware discovery for modern Admin clients. |
+| 75 | DescribeTopicPartitions | 0 | partial | P1 | Preserve paginated, topic-ID-aware discovery; extend it with topic lifecycle changes when those APIs exist. |
 
 ### Classic groups and offsets
 
@@ -182,14 +185,14 @@ The local `kafka-protocol 0.18.0-memkafka.1` fork is generated from pinned Kafka
 
 | Key | Name | Kafka 4.3 request range | Status | Priority | MemKafka target semantics / rationale |
 | ---: | --- | --- | --- | --- | --- |
-| 19 | CreateTopics | 2-7 | partial | P0 | Finish v7/topic IDs; keep replication factor 1 and reject unsupported assignments/configs precisely until modeled. |
+| 19 | CreateTopics | 2-7 | partial | P0 | Preserve v4-v7 topic IDs; keep replication factor 1 and reject unsupported assignments/configs precisely until modeled. |
 | 20 | DeleteTopics | 1-6 | missing | P1 | Delete by name or ID atomically; invalidate old IDs, logs, and metadata while handling group references. |
 | 21 | DeleteRecords | 0-2 | missing | P1 | Advance an in-memory log-start offset and make Fetch/ListOffsets enforce the new boundary. |
 | 32 | DescribeConfigs | 1-4 | partial | P1 | Return truthful broker/topic effective configs, sources, synonyms, sensitivity, and requested-key filtering. |
 | 33 | AlterConfigs | 0-2 | missing | P1 | Compatibility wrapper for supported mutable settings; reject unsupported keys, never silently accept them. |
 | 37 | CreatePartitions | 0-3 | missing | P1 | Grow partition vectors atomically, preserving all existing logs and rejecting manual assignments. |
 | 44 | IncrementalAlterConfigs | 0-1 | missing | P1 | Mutate only the small supported in-memory config set with validate-only and atomic error semantics. |
-| 60 | DescribeCluster | 0-2 | missing | P1 | Report cluster `memkafka`, broker/controller 1, endpoint, and authorized operations consistently. |
+| 60 | DescribeCluster | 0-2 | partial | P1 | Preserve the v2 cluster `memkafka`, broker/controller 1, and listener endpoint contract; add authorization only with a real security scenario. |
 | 74 | ListConfigResources | 0-1 | missing | P1 | Enumerate only resources whose MemKafka config state can be described truthfully. |
 
 ### Transactions and producer introspection
@@ -286,31 +289,33 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 
 **Ecosystem value:** makes current producer, consumer, and discovery support dependable across newer clients; prevents `ApiVersions`, decoding, dispatch, and docs from drifting.
 
-**Foundation status:** cuts 1 and 2 are delivered. This is a protocol and rejection foundation, not completion of the 17 advertised APIs; every API remains partial and its behavior/version gaps remain below.
+**Foundation status:** cuts 1, 2, and 3 are delivered. This is a protocol, rejection, and modern-discovery foundation, not completion of the 19 advertised APIs; every API remains partial and its behavior/version gaps remain below.
 
 **Delivered foundation:**
 
 - capture the API key/version pairs used by every pinned black-box client scenario and check them into a machine-readable request-evidence artifact;
 - keep key, evidence-backed floor, current ceiling, Kafka 4.3 range, handler, maturity, and proof lanes in one runtime capability registry;
-- generate or validate `ApiVersions`, dispatcher coverage, per-version test cases, and the checked-in compatibility artifact from it.
+- generate or validate `ApiVersions`, dispatcher coverage, per-version test cases, and the checked-in compatibility artifact from it;
 - vendor exact Kafka 4.3.1 schemas, generate the release's request/response maxima offline, and verify provenance and deterministic regeneration;
 - decode into structured outcomes and route schema-known unsupported versions before stateful dispatch;
-- return typed adjacent-version errors for all 17 advertised APIs without widening their supported windows;
+- return typed adjacent-version errors for all 19 advertised APIs without widening their supported windows;
 - exercise an exhaustive Rust matrix of every advertised floor, ceiling, adjacent typed rejection, and connection-survival path, plus focused flexible/tagged and rejected-mutation coverage;
-- compare all 28 adjacent rejection cases with Kafka 4.3.1's Java request classes and compare normalized unsupported `ApiVersions` header/body observations with a live pinned Kafka broker.
+- compare adjacent rejection cases with Kafka 4.3.1's Java request classes and compare normalized unsupported `ApiVersions` header/body observations with a live pinned Kafka broker;
+- keep one atomically updated topic name/UUID catalog, serve Metadata v4-v13 and CreateTopics v4-v7, and expose DescribeCluster v2 plus paginated DescribeTopicPartitions v0;
+- prove that discovery contract through focused Rust state tests, real TCP wire tests, Apache Kafka Java 4.3.1 Admin calls, the 19-API capability manifest, and pinned request evidence.
 
 **Remaining state and semantic work:**
 
 - extend version-specific handler semantics before widening any supported window;
 - extend the pinned Kafka 4.3 differential harness from unsupported-version shapes into success and stateful error behavior;
-- add stable topic IDs and propagate them through Metadata, Fetch, ListOffsets, commits, and topic recreation;
-- implement flexible versions/tagged fields as specified by [KIP-482](https://cwiki.apache.org/confluence/spaces/KAFKA/pages/120722234/KIP-482%2BThe%2BKafka%2BProtocol%2Bshould%2BSupport%2BOptional%2BTagged%2BFields);
+- propagate the existing stable topic IDs into Fetch, ListOffsets, commits, deletion, and topic recreation;
+- extend flexible versions/tagged fields beyond the delivered discovery slice as specified by [KIP-482](https://cwiki.apache.org/confluence/spaces/KAFKA/pages/120722234/KIP-482%2BThe%2BKafka%2BProtocol%2Bshould%2BSupport%2BOptional%2BTagged%2BFields);
 - implement Fetch sessions from [KIP-227](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=74687799), leader epochs, timestamp offsets, and complete current error paths;
 - finish every classic-group version inside the derived evidence-floor-to-`kafka43.max` parity span, including static membership.
 
 **Acceptance:** floor/ceiling and rejected-below/rejected-above probes for every advertised key; a future cross-artifact gate proves each advertised floor exactly matches current-client evidence; normalized Kafka 4.3 differentials for success and error paths; existing Java/.NET/Go/Rust/Kafbat lanes stay green; static-member restart and incremental Fetch scenarios pass through real clients.
 
-**Dependencies:** capability artifact schema; stable topic-ID store; behavior-specific state models.
+**Dependencies:** capability artifact schema; the delivered stable topic-ID store; behavior-specific state models.
 
 ### P1 — Daily AdminClient and tooling
 
@@ -318,7 +323,7 @@ These APIs do not require a real replica manager or KRaft implementation. They r
 
 **State and semantic work:**
 
-- DescribeCluster and paginated DescribeTopicPartitions;
+- build on the delivered DescribeCluster and paginated DescribeTopicPartitions discovery slice;
 - DeleteTopics with topic-ID invalidation and deterministic references cleanup;
 - CreatePartitions with immutable existing partitions;
 - DeleteRecords backed by a real in-memory log-start offset;
@@ -423,7 +428,7 @@ Each cut should be specified and reviewed independently. No dates or effort esti
 | ---: | --- | --- |
 | 1 (delivered) | Capture negotiated versions from every pinned current-client scenario against Kafka 4.3.1, and create one central runtime capability registry that validates `ApiVersions`, dispatch, and the generated compatibility manifest. | CI independently rejects registry/manifest drift and live/checked-in request-evidence drift. The evidence informs floor review but is not cross-validated against the registry; it proves version demand, not semantic parity. |
 | 2 (delivered) | Vendor pinned Kafka 4.3.1 schemas and make unsupported key/version handling response-aware, including flexible headers and ApiVersions fallback. | All advertised boundaries have typed Rust coverage; a Kafka Java/live-broker oracle checks adjacent rejection shapes without widening supported behavior. |
-| 3 | Introduce stable topic IDs and implement modern Metadata, DescribeCluster, and DescribeTopicPartitions together. | Java `Admin.describeCluster()` and paginated `describeTopics()` agree on one broker; delete/recreate preparation can distinguish topic incarnations. |
+| 3 (delivered) | Introduce stable topic IDs and implement modern Metadata, DescribeCluster, and DescribeTopicPartitions together. | Java `Admin.describeCluster()` and paginated `describeTopics()` agree on one broker and coherent topic IDs; focused Rust, real TCP wire, capability-manifest, and request-evidence proofs pass. |
 | 4 | Add Fetch session state, incremental updates/forgotten topics, and session errors. | A Java or librdkafka consumer sustains an incremental Fetch session across partition additions and recovers from an invalid session epoch. |
 | 5 | Add partition leader epochs, OffsetForLeaderEpoch, and timestamp ListOffsets. | Java `offsetsForTimes()` returns the first eligible record and a consumer validates/truncates against a deterministic leader epoch. |
 | 6 | Implement DeleteTopics by name/ID and topic recreation with a new UUID. | Java Admin deletes and recreates a topic; old-ID Fetch/Metadata requests fail and the new topic begins empty. |

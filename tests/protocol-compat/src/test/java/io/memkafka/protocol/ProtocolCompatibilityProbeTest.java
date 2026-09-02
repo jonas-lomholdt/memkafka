@@ -37,14 +37,20 @@ final class ProtocolCompatibilityProbeTest {
     @Test
     void missingTypedErrorCaseCannotPassCoverageValidation() {
         var cases = new ArrayList<>(ProtocolCompatibilityProbe.typedErrorCases());
-        assertEquals(28, cases.size(), "fixture must begin with the complete adjacent matrix");
+        assertEquals(27, cases.size(), "fixture must begin with the complete adjacent matrix");
+        assertTrue(cases.stream().anyMatch(testCase ->
+                testCase.apiKey() == ApiKeys.DESCRIBE_CLUSTER && testCase.version() == 1));
+        assertTrue(cases.stream().noneMatch(testCase ->
+                testCase.apiKey() == ApiKeys.METADATA && testCase.version() == 10));
+        assertTrue(cases.stream().noneMatch(testCase ->
+                testCase.apiKey() == ApiKeys.CREATE_TOPICS && testCase.version() == 7));
         cases.removeLast();
 
         var failure = assertThrows(
                 IllegalStateException.class,
                 () -> ProtocolCompatibilityProbe.validateTypedErrorCases(cases));
 
-        assertTrue(failure.getMessage().contains("28 unique cases"));
+        assertTrue(failure.getMessage().contains("27 unique cases"));
     }
 
     @Test
@@ -272,7 +278,11 @@ final class ProtocolCompatibilityProbeTest {
         return ProtocolCompatibilityProbe.typedErrorCases().stream()
                 .filter(testCase -> testCase.apiKey() == apiKey && testCase.version() == version)
                 .findFirst()
-                .orElseThrow();
+                .orElseGet(() -> new ProtocolCompatibilityProbe.TypedErrorCase(
+                        apiKey,
+                        version,
+                        12_345,
+                        ProtocolCompatibilityProbe.buildTypedRequest(apiKey, version)));
     }
 
     private static ResponseHeader responseHeader(

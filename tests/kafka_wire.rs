@@ -2402,6 +2402,10 @@ async fn describe_cluster_v1_returns_typed_unsupported_version() {
         response.error_code,
         ResponseError::UnsupportedVersion.code()
     );
+    assert_eq!(
+        response.error_message.as_ref().map(StrBytes::as_str),
+        Some("The version of API is not supported.")
+    );
     assert!(response.brokers.is_empty());
 }
 
@@ -6363,7 +6367,10 @@ fn assert_describe_cluster_unsupported(request: &RequestKind, response: &Respons
     assert_eq!(request.endpoint_type, 1);
     assert_eq!(response.throttle_time_ms, 0);
     assert_unsupported(response.error_code);
-    assert_eq!(response.error_message, None);
+    assert_eq!(
+        response.error_message.as_ref().map(StrBytes::as_str),
+        Some("The version of API is not supported.")
+    );
     assert_eq!(response.endpoint_type, 1);
     assert!(response.cluster_id.is_empty());
     assert_eq!(response.controller_id, BrokerId::from(-1));

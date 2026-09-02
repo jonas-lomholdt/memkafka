@@ -1,7 +1,11 @@
 # Kafka protocol error compatibility
 
 This oracle compares MemKafka with Apache Kafka's own `kafka-clients` error
-responses for 28 adjacent unsupported versions across 17 APIs. It also sends raw
+responses for 27 adjacent unsupported versions across 18 APIs. Metadata v10 and
+CreateTopics v7 left this matrix when they became supported; DescribeCluster v1
+entered as the schema-known version below its v2 floor. DescribeTopicPartitions
+v0 and the schema-maximum upper bounds have no schema-known adjacent version to
+encode as a typed request. The harness also sends raw
 unsupported ApiVersions v5 and v32767 requests to MemKafka and a live Kafka
 broker, then compares the uniquely decoded response encodings. Ordinary clients
 negotiate supported versions and therefore cannot exercise these paths.

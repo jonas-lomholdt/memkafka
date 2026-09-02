@@ -34,6 +34,9 @@ import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopic;
 import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopicCollection;
 import org.apache.kafka.common.message.CreateTopicsResponseData;
 import org.apache.kafka.common.message.CreateTopicsResponseDataJsonConverter;
+import org.apache.kafka.common.message.DescribeClusterRequestData;
+import org.apache.kafka.common.message.DescribeClusterResponseData;
+import org.apache.kafka.common.message.DescribeClusterResponseDataJsonConverter;
 import org.apache.kafka.common.message.DescribeConfigsRequestData;
 import org.apache.kafka.common.message.DescribeConfigsRequestData.DescribeConfigsResource;
 import org.apache.kafka.common.message.DescribeConfigsResponseData;
@@ -104,6 +107,7 @@ import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
 import org.apache.kafka.common.requests.CreateTopicsRequest;
+import org.apache.kafka.common.requests.DescribeClusterRequest;
 import org.apache.kafka.common.requests.DescribeConfigsRequest;
 import org.apache.kafka.common.requests.DescribeGroupsRequest;
 import org.apache.kafka.common.requests.FetchRequest;
@@ -128,15 +132,15 @@ public final class ProtocolCompatibilityProbe {
     private static final int READ_TIMEOUT_MS = 5_000;
     private static final int API_VERSIONS_CORRELATION_ID = 1234;
     private static final int FIRST_TYPED_CORRELATION_ID = 10_000;
-    private static final int EXPECTED_TYPED_CASES = 28;
+    private static final int EXPECTED_TYPED_CASES = 27;
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String CLIENT_ID = "memkafka-protocol-compatibility";
     private static final String ORACLE_ERROR_MESSAGE = "MemKafka compatibility oracle";
     private static final List<String> EXPECTED_CASE_KEYS = List.of(
-            "0:6", "0:8", "1:5", "2:2", "2:4", "3:3", "3:10",
+            "0:6", "0:8", "1:5", "2:2", "2:4", "3:3",
             "8:6", "8:8", "9:4", "9:6", "10:1", "10:3", "11:4", "11:6",
             "12:2", "12:4", "13:0", "13:4", "14:2", "14:4", "15:1",
-            "16:1", "18:2", "19:3", "19:7", "22:1", "32:2");
+            "16:1", "18:2", "19:3", "22:1", "32:2", "60:1");
 
     private ProtocolCompatibilityProbe() {}
 
@@ -269,14 +273,14 @@ public final class ProtocolCompatibilityProbe {
                 || unique.size() != EXPECTED_TYPED_CASES
                 || !actual.equals(EXPECTED_CASE_KEYS)) {
             throw new IllegalStateException(
-                    "typed-errors requires exactly 28 unique cases in API-key/version order; got " + actual);
+                    "typed-errors requires exactly 27 unique cases in API-key/version order; got " + actual);
         }
-        if (cases.stream().map(TypedErrorCase::apiKey).distinct().count() != 17) {
-            throw new IllegalStateException("typed-errors requires exactly 17 unique APIs");
+        if (cases.stream().map(TypedErrorCase::apiKey).distinct().count() != 18) {
+            throw new IllegalStateException("typed-errors requires exactly 18 unique APIs");
         }
     }
 
-    private static AbstractRequest buildTypedRequest(ApiKeys apiKey, short version) {
+    static AbstractRequest buildTypedRequest(ApiKeys apiKey, short version) {
         return switch (apiKey) {
             case PRODUCE -> produceRequest(version);
             case FETCH -> fetchRequest(version);
@@ -299,6 +303,8 @@ public final class ProtocolCompatibilityProbe {
                             .setTransactionTimeoutMs(10_000))
                     .build(version);
             case DESCRIBE_CONFIGS -> describeConfigsRequest(version);
+            case DESCRIBE_CLUSTER -> new DescribeClusterRequest(
+                    new DescribeClusterRequestData().setEndpointType((byte) 1), version);
             default -> throw new IllegalArgumentException("unexpected typed API: " + apiKey);
         };
     }
@@ -775,6 +781,8 @@ public final class ProtocolCompatibilityProbe {
                     (InitProducerIdResponseData) response.data(), version, false);
             case DESCRIBE_CONFIGS -> DescribeConfigsResponseDataJsonConverter.write(
                     (DescribeConfigsResponseData) response.data(), version, false);
+            case DESCRIBE_CLUSTER -> DescribeClusterResponseDataJsonConverter.write(
+                    (DescribeClusterResponseData) response.data(), version, false);
             default -> throw new IllegalArgumentException("unexpected response API: " + response.apiKey());
         };
     }

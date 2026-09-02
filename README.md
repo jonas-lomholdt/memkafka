@@ -4,7 +4,7 @@
 
 MemKafka is a fast, single-binary, in-memory Kafka-compatible broker for local development and integration tests. The same process exposes a Confluent-compatible Avro Schema Registry API.
 
-> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Confluent.Kafka also passes cooperative-sticky A/B/C rebalancing, automatic and explicit commits, and real Avro Schema Registry publish/consume through the pinned 2.15.0 serializer. A separate Confluent.Kafka 2.13.2 flow-profile suite proves consumer subscription auto-creation in force mode and idempotent publish/consume. Kafbat UI v1.5.0 discovers MemKafka and browses exact string and decoded Avro records with an active consumer group.
+> **Current status:** topic discovery, topic creation, Produce, Fetch, ListOffsets, partition ordering, and repeat delivery from an uncommitted offset work through four independent clients: Confluent.Kafka 2.15.0, Apache Kafka Java 4.3.1, rskafka 0.6.0, and franz-go 1.21.6. Java 4.3.1 also proves modern cluster discovery, stable topic UUIDs across Admin calls, and transparent topic-partition pagination. Confluent.Kafka passes cooperative-sticky A/B/C rebalancing, automatic and explicit commits, and real Avro Schema Registry publish/consume through the pinned 2.15.0 serializer. A separate Confluent.Kafka 2.13.2 flow-profile suite proves consumer subscription auto-creation in force mode and idempotent publish/consume. Kafbat UI v1.5.0 discovers MemKafka and browses exact string and decoded Avro records with an active consumer group.
 
 MemKafka is test infrastructure. It is not intended for production, and all state disappears when the process exits.
 
@@ -169,6 +169,10 @@ The current black-box suite passes independently with Confluent.Kafka 2.15.0, Ap
 - ten sequential records observed at contiguous offsets in partition order;
 - a second read from offset `0` without a commit, demonstrating in-process at-least-once redelivery.
 
+The Apache Kafka Java 4.3.1 suite additionally calls the real `Admin.describeCluster()` API, creates two topics, and verifies that CreateTopics, ListTopics, and DescribeTopics all report the same non-zero UUID for each topic. It sets a two-partition response limit while describing five partitions across those topics, proving that `DescribeTopicPartitions` pagination is transparent to the public Admin API.
+
+Topic UUIDs are stable for the lifetime of one MemKafka process. Because the catalog is memory-only, UUIDs intentionally change after restart; they are identities for one broker lifetime, not persisted identities.
+
 The Confluent.Kafka suite additionally proves real asynchronous Join/Sync barriers with `cooperative-sticky`; disjoint full coverage of six partitions across consumers A, B, and C; successive incremental rounds; graceful-leave and session-expiry redistribution; explicit seeking and latest reset; automatic and explicit commit restart recovery; independent group offsets; and redelivery after restarting without a commit.
 
 The same pinned .NET suite uses `CachedSchemaRegistryClient`, `AvroSerializer<GenericRecord>`, and `AvroDeserializer<GenericRecord>` to prove automatic registration, global IDs, subject versions, exact-schema deduplication, Confluent wire framing, successful Kafka publish/consume, and missing/unsupported-resource errors.
@@ -181,9 +185,9 @@ For Schema Registry interoperability, MemKafka exposes `GET /schemas/ids/{id}/ve
 
 MemKafka supports non-transactional idempotent production: it allocates process-local producer IDs at epoch `0`, validates producer identity and per-partition sequence numbers, and deduplicates exact recent retries without appending them again.
 
-The broker currently advertises `Produce 7`, `Fetch 4`, `ListOffsets 3`, `Metadata 4-9`, `ApiVersions 3-4`, `CreateTopics 4-6`, `FindCoordinator 2`, `JoinGroup 5`, `SyncGroup 3`, `Heartbeat 3`, `LeaveGroup 1-3`, `OffsetCommit 7`, `OffsetFetch 5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, and read-only `DescribeConfigs 1`.
+The broker currently advertises `Produce 7`, `Fetch 4`, `ListOffsets 3`, `Metadata 4-13`, `ApiVersions 3-4`, `CreateTopics 4-7`, `FindCoordinator 2`, `JoinGroup 5`, `SyncGroup 3`, `Heartbeat 3`, `LeaveGroup 1-3`, `OffsetCommit 7`, `OffsetFetch 5`, `ListGroups 0`, `DescribeGroups 0`, `InitProducerId 0`, read-only `DescribeConfigs 1`, `DescribeCluster 2`, and `DescribeTopicPartitions 0`.
 
-Those are the contiguous wire-version windows MemKafka supports today. In the generated [Kafka API capability manifest](docs/compatibility/kafka-api-capabilities.json), `supported.min` preserves the current-client floor and `supported.max` is the present implementation ceiling. They are not a claim that all 17 APIs are behaviorally complete.
+Those are the contiguous wire-version windows MemKafka supports today. In the generated [Kafka API capability manifest](docs/compatibility/kafka-api-capabilities.json), `supported.min` preserves the current-client floor and `supported.max` is the present implementation ceiling. They are not a claim that all 19 APIs are behaviorally complete.
 
 The `kafka43` object is Apache Kafka 4.3’s complete stable request-version range and is reference data only—not MemKafka support or a target window. The separate [pinned-client request evidence](docs/compatibility/kafka-4.3-client-requests.json) records the concrete versions requested by each current client against Apache Kafka 4.3.1. For an advertised API, the parity target is derived conceptually from the evidence-backed current-client floor through `kafka43.max`, subject to semantic coverage. The manifest does not materialize that derived parity target as a separate field. Versions below the floor remain outside the compatibility target even when they appear in the full `kafka43` range.
 

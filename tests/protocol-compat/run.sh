@@ -382,6 +382,6 @@ for version in 5 32767; do
 done
 
 LAST_COMMAND="completed all protocol compatibility comparisons"
-printf 'PASS   28 Kafka 4.3.1 typed-error cases across 17 APIs\n'
+printf 'PASS   27 Kafka 4.3.1 typed-error cases across 18 APIs\n'
 printf 'PASS   unsupported ApiVersions v5 and v32767 match Kafka 4.3.1\n'
 printf 'Protocol compatibility artifacts: %s\n' "${RUN_ARTIFACT_DIRECTORY}"

@@ -1,7 +1,7 @@
 # Kafka modern discovery design
 
-**Date:** 2026-09-01  
-**Roadmap slice:** Cut 3 in [`kafka-api-parity-roadmap.md`](kafka-api-parity-roadmap.md)  
+**Date:** 2026-09-01
+**Roadmap slice:** Cut 3 in [`kafka-api-parity-roadmap.md`](kafka-api-parity-roadmap.md)
 **Kafka baseline:** Apache Kafka 4.3.1
 
 ## Goal
