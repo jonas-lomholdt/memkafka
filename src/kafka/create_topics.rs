@@ -78,6 +78,7 @@ fn success_result(name: TopicName, metadata: TopicMetadata) -> CreatableTopicRes
         i32::try_from(metadata.partition_count)
             .expect("explicit Kafka partition count fits in a signed integer"),
     )
+    .with_topic_id(metadata.id)
 }
 
 fn validation_success_result(name: TopicName, partition_count: i32) -> CreatableTopicResult {

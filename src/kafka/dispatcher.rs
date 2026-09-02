@@ -59,7 +59,7 @@ impl Dispatcher {
             ApiKey::Metadata => match request.body() {
                 RequestKind::Metadata(body) => {
                     Ok(
-                        metadata::response(body, &self.broker, &self.advertised_kafka)
+                        metadata::response(body, version, &self.broker, &self.advertised_kafka)
                             .await
                             .into(),
                     )

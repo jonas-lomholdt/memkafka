@@ -6,6 +6,7 @@ pub mod connection;
 mod create_topics;
 mod describe_configs;
 mod describe_groups;
+mod discovery;
 pub mod dispatcher;
 #[allow(dead_code)] // ERROR_RESPONSE_API_KEYS is a test-enforced coverage declaration.
 mod error_response;

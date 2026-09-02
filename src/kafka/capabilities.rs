@@ -67,7 +67,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::Metadata,
         name: "Metadata",
-        supported: VersionWindow { min: 4, max: 9 },
+        supported: VersionWindow { min: 4, max: 13 },
         kafka_4_3: VersionWindow { min: 0, max: 13 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -166,7 +166,7 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
     ApiCapability {
         api_key: ApiKey::CreateTopics,
         name: "CreateTopics",
-        supported: VersionWindow { min: 4, max: 6 },
+        supported: VersionWindow { min: 4, max: 7 },
         kafka_4_3: VersionWindow { min: 2, max: 7 },
         proof_scenarios: &[
             "apache-kafka-java-4.3.1",
@@ -462,7 +462,7 @@ mod tests {
                 (ApiKey::Produce, 7, 7),
                 (ApiKey::Fetch, 4, 4),
                 (ApiKey::ListOffsets, 3, 3),
-                (ApiKey::Metadata, 4, 9),
+                (ApiKey::Metadata, 4, 13),
                 (ApiKey::OffsetCommit, 7, 7),
                 (ApiKey::OffsetFetch, 5, 5),
                 (ApiKey::FindCoordinator, 2, 2),
@@ -473,7 +473,7 @@ mod tests {
                 (ApiKey::DescribeGroups, 0, 0),
                 (ApiKey::ListGroups, 0, 0),
                 (ApiKey::ApiVersions, 3, 4),
-                (ApiKey::CreateTopics, 4, 6),
+                (ApiKey::CreateTopics, 4, 7),
                 (ApiKey::InitProducerId, 0, 0),
                 (ApiKey::DescribeConfigs, 1, 1),
             ]

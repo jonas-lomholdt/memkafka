@@ -58,6 +58,7 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
+use uuid::Uuid;
 
 const API_VERSIONS_VERSION: i16 = 3;
 
@@ -387,9 +388,9 @@ async fn api_versions_v3_round_trips_with_correlation_id() {
     assert_eq!(response.error_code, 0);
     assert_eq!(response.throttle_time_ms, 0);
     assert_eq!(response.api_keys.len(), 17);
-    assert_api_range(&response, ApiKey::Metadata, 4, 9);
+    assert_api_range(&response, ApiKey::Metadata, 4, 13);
     assert_api_range(&response, ApiKey::ApiVersions, 3, 4);
-    assert_api_range(&response, ApiKey::CreateTopics, 4, 6);
+    assert_api_range(&response, ApiKey::CreateTopics, 4, 7);
     assert_api_range(&response, ApiKey::Produce, 7, 7);
     assert_api_range(&response, ApiKey::ListOffsets, 3, 3);
     assert_api_range(&response, ApiKey::Fetch, 4, 4);
@@ -470,9 +471,9 @@ async fn tcp_api_versions_keeps_connection_open_for_multiple_requests() {
 
         assert_eq!(header.correlation_id, correlation_id);
         assert_eq!(body.api_keys.len(), 17);
-        assert_api_range(&body, ApiKey::Metadata, 4, 9);
+        assert_api_range(&body, ApiKey::Metadata, 4, 13);
         assert_api_range(&body, ApiKey::ApiVersions, 3, 4);
-        assert_api_range(&body, ApiKey::CreateTopics, 4, 6);
+        assert_api_range(&body, ApiKey::CreateTopics, 4, 7);
         assert_api_range(&body, ApiKey::Produce, 7, 7);
         assert_api_range(&body, ApiKey::ListOffsets, 3, 3);
         assert_api_range(&body, ApiKey::Fetch, 4, 4);
@@ -697,6 +698,11 @@ async fn advertised_api_same_connection_matrix() {
         one_neighbor_exceptions,
         vec![
             (
+                ApiKey::Metadata,
+                BoundaryDirection::Upper,
+                BoundaryDirection::Lower
+            ),
+            (
                 ApiKey::ListGroups,
                 BoundaryDirection::Lower,
                 BoundaryDirection::Upper
@@ -764,7 +770,6 @@ async fn tagged_field_boundary_rejections_remain_decodable() {
         (ApiKey::Produce, 9, 101, 201),
         (ApiKey::Fetch, 12, 102, 202),
         (ApiKey::OffsetFetch, 6, 103, 203),
-        (ApiKey::CreateTopics, 7, 104, 204),
     ]
     .into_iter()
     .enumerate()
@@ -2253,6 +2258,348 @@ async fn metadata_maps_invalid_names_to_code_17_without_mutating() {
 }
 
 #[tokio::test]
+async fn metadata_v4_through_v9_preserve_name_based_behavior() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("legacy-name", 3, 1)
+        .await
+        .expect("create legacy topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    for version in 4..=9 {
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("legacy-name"))),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("legacy-missing"))),
+                    MetadataRequestTopic::default().with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        )
+        .await;
+
+        assert_eq!(
+            response.error_code, 0,
+            "Metadata v{version} top-level error"
+        );
+        assert_eq!(response.topics.len(), 3, "Metadata v{version} topics");
+        assert_eq!(response.topics[0].error_code, 0, "Metadata v{version} hit");
+        assert_eq!(response.topics[0].partitions.len(), 3);
+        assert!(response.topics[0].topic_id.is_nil());
+        assert_eq!(
+            response.topics[1].error_code,
+            ResponseError::UnknownTopicOrPartition.code(),
+            "Metadata v{version} miss"
+        );
+        assert!(response.topics[1].topic_id.is_nil());
+        assert_eq!(
+            response.topics[2].error_code,
+            ResponseError::InvalidTopicException.code(),
+            "Metadata v{version} null-name behavior"
+        );
+        assert_eq!(response.topics[2].name, None);
+        assert!(response.topics[2].topic_id.is_nil());
+        assert!(response.topics[2].partitions.is_empty());
+    }
+
+    assert_eq!(broker.topics().list().await.len(), 1);
+}
+
+#[tokio::test]
+async fn metadata_v13_resolves_names_and_metadata_v12_v13_resolve_ids() {
+    let broker = test_broker_state(false);
+    let created = broker
+        .topics()
+        .create_explicit("identified", 2, 1)
+        .await
+        .expect("create identified topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let by_name = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name("identified"))),
+            ]))
+            .with_allow_auto_topic_creation(false),
+    )
+    .await;
+    assert_eq!(by_name.error_code, 0);
+    assert_eq!(by_name.topics[0].topic_id, created.id);
+
+    let unknown_id = Uuid::new_v4();
+    for version in [12, 13] {
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_topic_id(created.id)
+                        .with_name(None),
+                    MetadataRequestTopic::default()
+                        .with_topic_id(unknown_id)
+                        .with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        )
+        .await;
+
+        assert_eq!(
+            response.error_code, 0,
+            "Metadata v{version} top-level error"
+        );
+        assert_eq!(response.topics[0].error_code, 0);
+        assert_eq!(response.topics[0].topic_id, created.id);
+        assert_eq!(
+            response.topics[0].name.as_ref().map(|name| name.as_str()),
+            Some("identified")
+        );
+        assert_eq!(response.topics[0].partitions.len(), 2);
+        assert_eq!(
+            response.topics[1].error_code,
+            ResponseError::UnknownTopicId.code()
+        );
+        assert_eq!(response.topics[1].topic_id, unknown_id);
+        assert_eq!(response.topics[1].name, None);
+        assert!(response.topics[1].partitions.is_empty());
+    }
+
+    assert_eq!(broker.topics().list().await.len(), 1);
+}
+
+#[tokio::test]
+async fn metadata_v12_v13_use_request_wide_uuid_mode_for_mixed_entries() {
+    let broker = test_broker_state(true);
+    let identified = broker
+        .topics()
+        .create_explicit("identified", 1, 1)
+        .await
+        .expect("create identified topic");
+    broker
+        .topics()
+        .create_explicit("name-only", 1, 1)
+        .await
+        .expect("create name-only topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    for version in [12, 13] {
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default()
+                        .with_topic_id(identified.id)
+                        .with_name(None),
+                    MetadataRequestTopic::default().with_name(Some(topic_name("name-only"))),
+                    MetadataRequestTopic::default()
+                        .with_name(Some(topic_name("must-not-auto-create"))),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        )
+        .await;
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(response.topics[0].topic_id, identified.id);
+        for topic in &response.topics[1..] {
+            assert_eq!(topic.error_code, ResponseError::UnknownTopicId.code());
+            assert!(topic.topic_id.is_nil());
+            assert_eq!(topic.name, None);
+            assert!(topic.partitions.is_empty());
+        }
+    }
+
+    assert!(
+        broker
+            .topics()
+            .get("must-not-auto-create")
+            .await
+            .expect("valid topic name")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn metadata_v13_distinguishes_null_and_empty_topic_lists() {
+    let broker = test_broker_state(false);
+    let zebra = broker
+        .topics()
+        .create_explicit("zebra-id", 1, 1)
+        .await
+        .expect("create zebra");
+    let alpha = broker
+        .topics()
+        .create_explicit("alpha-id", 2, 1)
+        .await
+        .expect("create alpha");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let all = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default().with_topics(None),
+    )
+    .await;
+    assert_eq!(all.error_code, 0);
+    assert_eq!(
+        all.topics
+            .iter()
+            .map(|topic| (
+                topic.name.as_ref().expect("listed topic name").as_str(),
+                topic.topic_id,
+            ))
+            .collect::<Vec<_>>(),
+        vec![("alpha-id", alpha.id), ("zebra-id", zebra.id)]
+    );
+
+    let none = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default().with_topics(Some(Vec::new())),
+    )
+    .await;
+    assert_eq!(none.error_code, 0);
+    assert!(none.topics.is_empty());
+    assert_eq!(broker.topics().list().await.len(), 2);
+}
+
+#[tokio::test]
+async fn metadata_modern_name_mode_preserves_errors_and_authorization_flags() {
+    let broker = test_broker_state(false);
+    broker
+        .topics()
+        .create_explicit("authorized", 1, 1)
+        .await
+        .expect("create authorized topic");
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let authorized = dispatch_metadata_kind(
+        &dispatcher,
+        10,
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name("authorized"))),
+            ]))
+            .with_allow_auto_topic_creation(false)
+            .with_include_cluster_authorized_operations(true)
+            .with_include_topic_authorized_operations(true),
+    )
+    .await;
+    assert_eq!(authorized.cluster_authorized_operations, 8096);
+    assert_eq!(authorized.topics[0].topic_authorized_operations, 3576);
+
+    let errors = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name("missing"))),
+                MetadataRequestTopic::default().with_name(Some(topic_name("bad/name"))),
+            ]))
+            .with_allow_auto_topic_creation(true)
+            .with_include_topic_authorized_operations(true),
+    )
+    .await;
+    assert_eq!(errors.error_code, 0);
+    assert_eq!(
+        errors.topics[0].error_code,
+        ResponseError::UnknownTopicOrPartition.code()
+    );
+    assert_eq!(
+        errors.topics[1].error_code,
+        ResponseError::InvalidTopicException.code()
+    );
+    assert!(errors.topics.iter().all(|topic| topic.topic_id.is_nil()));
+    assert!(
+        errors
+            .topics
+            .iter()
+            .all(|topic| topic.topic_authorized_operations == 3576)
+    );
+    assert_eq!(errors.cluster_authorized_operations, i32::MIN);
+    assert_eq!(broker.topics().list().await.len(), 1);
+}
+
+#[tokio::test]
+async fn metadata_v10_v11_reject_uuid_or_null_name_without_mutation() {
+    for version in [10, 11] {
+        let broker = test_broker_state(true);
+        let existing = broker
+            .topics()
+            .create_explicit("existing", 1, 1)
+            .await
+            .expect("create existing topic");
+        let dispatcher = test_dispatcher_for(broker.clone());
+        let response = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("existing"))),
+                    MetadataRequestTopic::default()
+                        .with_topic_id(existing.id)
+                        .with_name(None),
+                    MetadataRequestTopic::default().with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        )
+        .await;
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(response.topics.len(), 3);
+        assert!(response.topics.iter().all(|topic| {
+            topic.error_code == ResponseError::InvalidRequest.code()
+                && topic.topic_id.is_nil()
+                && topic.partitions.is_empty()
+        }));
+        assert_eq!(broker.topics().list().await, vec![existing]);
+    }
+}
+
+#[tokio::test]
+async fn metadata_v13_sets_top_level_error_for_semantic_rejection() {
+    for version in [12, 13] {
+        let broker = test_broker_state(true);
+        broker
+            .topics()
+            .create_explicit("existing", 1, 1)
+            .await
+            .expect("create existing topic");
+        let response = dispatch_metadata_kind(
+            &test_dispatcher_for(broker.clone()),
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("must-not-resolve"))),
+                    MetadataRequestTopic::default().with_name(None),
+                ]))
+                .with_allow_auto_topic_creation(true),
+        )
+        .await;
+
+        assert!(response.topics.iter().all(|topic| {
+            topic.error_code == ResponseError::InvalidRequest.code()
+                && topic.topic_id.is_nil()
+                && topic.partitions.is_empty()
+        }));
+        assert_eq!(
+            response.error_code,
+            if version == 13 {
+                ResponseError::InvalidRequest.code()
+            } else {
+                0
+            }
+        );
+        assert_eq!(broker.topics().list().await.len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn create_topics_v6_creates_six_partitions_over_tcp() {
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -2397,6 +2744,99 @@ async fn create_topics_validate_only_reports_success_without_mutating() {
     assert_eq!(response.topics[0].error_code, 0);
     assert_eq!(response.topics[0].num_partitions, 4);
     assert_eq!(response.topics[0].replication_factor, 1);
+    assert!(broker.topics().list().await.is_empty());
+}
+
+#[tokio::test]
+async fn create_topics_v7_returns_non_nil_id_used_by_metadata_v10_through_v13() {
+    let broker = test_broker_state(false);
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let created = dispatch_create_topics_kind(
+        &dispatcher,
+        7,
+        CreateTopicsRequest::default()
+            .with_topics(vec![creatable_topic("modern-create", 4, 1)])
+            .with_timeout_ms(1_000),
+    )
+    .await;
+    let created_id = created.topics[0].topic_id;
+    assert_eq!(created.topics[0].error_code, 0);
+    assert!(!created_id.is_nil());
+    assert_eq!(broker.topics().list().await[0].id, created_id);
+
+    for version in 10..=13 {
+        let metadata = dispatch_metadata_kind(
+            &dispatcher,
+            version,
+            MetadataRequest::default()
+                .with_topics(Some(vec![
+                    MetadataRequestTopic::default().with_name(Some(topic_name("modern-create"))),
+                ]))
+                .with_allow_auto_topic_creation(false),
+        )
+        .await;
+        assert_eq!(metadata.topics[0].error_code, 0, "Metadata v{version}");
+        assert_eq!(
+            metadata.topics[0].topic_id, created_id,
+            "Metadata v{version}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_topics_v7_validate_only_and_errors_return_nil_ids() {
+    let broker = test_broker_state(false);
+    let dispatcher = test_dispatcher_for(broker.clone());
+
+    let validation = dispatch_create_topics_kind(
+        &dispatcher,
+        7,
+        CreateTopicsRequest::default()
+            .with_topics(vec![creatable_topic("preview-v7", 2, 1)])
+            .with_validate_only(true),
+    )
+    .await;
+    assert_eq!(validation.topics[0].error_code, 0);
+    assert!(validation.topics[0].topic_id.is_nil());
+
+    let metadata = dispatch_metadata_kind(
+        &dispatcher,
+        13,
+        MetadataRequest::default()
+            .with_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic_name("preview-v7"))),
+            ]))
+            .with_allow_auto_topic_creation(false),
+    )
+    .await;
+    assert_eq!(
+        metadata.topics[0].error_code,
+        ResponseError::UnknownTopicOrPartition.code()
+    );
+    assert!(metadata.topics[0].topic_id.is_nil());
+
+    let errors = dispatch_create_topics_kind(
+        &dispatcher,
+        7,
+        CreateTopicsRequest::default().with_topics(vec![
+            creatable_topic("bad/name", 2, 1),
+            creatable_topic("bad-replication", 2, 2),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        errors
+            .topics
+            .iter()
+            .map(|topic| topic.error_code)
+            .collect::<Vec<_>>(),
+        vec![
+            ResponseError::InvalidTopicException.code(),
+            ResponseError::InvalidReplicationFactor.code(),
+        ]
+    );
+    assert!(errors.topics.iter().all(|topic| topic.topic_id.is_nil()));
     assert!(broker.topics().list().await.is_empty());
 }
 
@@ -4802,7 +5242,7 @@ fn assert_api_versions_supported(request: &RequestKind, response: &ResponseKind,
             (ApiKey::Produce as i16, 7, 7),
             (ApiKey::Fetch as i16, 4, 4),
             (ApiKey::ListOffsets as i16, 3, 3),
-            (ApiKey::Metadata as i16, 4, 9),
+            (ApiKey::Metadata as i16, 4, 13),
             (ApiKey::OffsetCommit as i16, 7, 7),
             (ApiKey::OffsetFetch as i16, 5, 5),
             (ApiKey::FindCoordinator as i16, 2, 2),
@@ -4813,7 +5253,7 @@ fn assert_api_versions_supported(request: &RequestKind, response: &ResponseKind,
             (ApiKey::DescribeGroups as i16, 0, 0),
             (ApiKey::ListGroups as i16, 0, 0),
             (ApiKey::ApiVersions as i16, 3, 4),
-            (ApiKey::CreateTopics as i16, 4, 6),
+            (ApiKey::CreateTopics as i16, 4, 7),
             (ApiKey::InitProducerId as i16, 0, 0),
             (ApiKey::DescribeConfigs as i16, 1, 1),
         ],
@@ -5243,6 +5683,24 @@ async fn dispatch_metadata_request(
     response
 }
 
+async fn dispatch_metadata_kind(
+    dispatcher: &Dispatcher,
+    version: i16,
+    request: MetadataRequest,
+) -> MetadataResponse {
+    let response = dispatch_kind(
+        dispatcher,
+        ApiKey::Metadata,
+        version,
+        RequestKind::Metadata(request),
+    )
+    .await;
+    let ResponseKind::Metadata(response) = response else {
+        panic!("expected Metadata response");
+    };
+    response
+}
+
 fn creatable_topic(name: &'static str, partitions: i32, replication_factor: i16) -> CreatableTopic {
     CreatableTopic::default()
         .with_name(TopicName::from(StrBytes::from_static_str(name)))
@@ -5562,6 +6020,24 @@ async fn dispatch_create_topics_request(
     .await;
     let (header, response) = decode_create_topics_response(encoded);
     assert_eq!(header.correlation_id, correlation_id);
+    response
+}
+
+async fn dispatch_create_topics_kind(
+    dispatcher: &Dispatcher,
+    version: i16,
+    request: CreateTopicsRequest,
+) -> CreateTopicsResponse {
+    let response = dispatch_kind(
+        dispatcher,
+        ApiKey::CreateTopics,
+        version,
+        RequestKind::CreateTopics(request),
+    )
+    .await;
+    let ResponseKind::CreateTopics(response) = response else {
+        panic!("expected CreateTopics response");
+    };
     response
 }
 
