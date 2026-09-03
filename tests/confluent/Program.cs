@@ -89,6 +89,10 @@ try
     AssertTopicPartitions(explicitMetadata, explicitTopic, 6);
     Console.WriteLine("pass   explicit topic has six partitions");
 
+    await AssertPartitionSelectionAfterExplicitTopicCreation(admin, bootstrapServers);
+    Console.WriteLine(
+        "pass   implicit partition selection works immediately after explicit topic creation");
+
     var invalidTopic = $"invalid-rf-{Guid.NewGuid():N}";
     try
     {
@@ -214,6 +218,40 @@ static void AssertAdvertisedAddress(
         throw new InvalidOperationException(
             $"broker advertises '{actualAddress}', expected '{expectedAddress}'");
     }
+}
+
+static async Task AssertPartitionSelectionAfterExplicitTopicCreation(
+    IAdminClient admin,
+    string bootstrapServers)
+{
+    await ImplicitPartitionSelectionAcceptance.AssertKeyedAsync(
+        admin,
+        bootstrapServers,
+        "explicit-idempotent",
+        enableIdempotence: true,
+        explicitPartition: true,
+        iterations: 4);
+    await ImplicitPartitionSelectionAcceptance.AssertKeyedAsync(
+        admin,
+        bootstrapServers,
+        "implicit-keyed-non-idempotent",
+        enableIdempotence: false,
+        explicitPartition: false,
+        iterations: 8);
+    await ImplicitPartitionSelectionAcceptance.AssertKeyedAsync(
+        admin,
+        bootstrapServers,
+        "implicit-keyed-idempotent",
+        enableIdempotence: true,
+        explicitPartition: false,
+        iterations: 12);
+    await ImplicitPartitionSelectionAcceptance.AssertKeylessAsync(
+        admin,
+        bootstrapServers,
+        "implicit-keyless-idempotent",
+        enableIdempotence: true,
+        explicitPartition: false,
+        iterations: 8);
 }
 
 static async Task AssertSchemaRegistryAndAvro(

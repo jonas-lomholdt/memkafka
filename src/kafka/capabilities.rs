@@ -181,7 +181,11 @@ pub(crate) static CAPABILITIES: &[ApiCapability] = &[
         name: "InitProducerId",
         supported: VersionWindow { min: 0, max: 0 },
         kafka_4_3: VersionWindow { min: 0, max: 6 },
-        proof_scenarios: &["apache-kafka-java-4.3.1", "confluent-kafka-flow-2.13.2"],
+        proof_scenarios: &[
+            "apache-kafka-java-4.3.1",
+            "confluent-kafka-2.15.0",
+            "confluent-kafka-flow-2.13.2",
+        ],
     },
     ApiCapability {
         api_key: ApiKey::DescribeConfigs,
@@ -435,7 +439,11 @@ mod tests {
                     ApiKey::InitProducerId,
                     "InitProducerId",
                     (0, 6),
-                    &["apache-kafka-java-4.3.1", "confluent-kafka-flow-2.13.2",][..]
+                    &[
+                        "apache-kafka-java-4.3.1",
+                        "confluent-kafka-2.15.0",
+                        "confluent-kafka-flow-2.13.2",
+                    ][..]
                 ),
                 (
                     ApiKey::DescribeConfigs,
