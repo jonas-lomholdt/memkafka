@@ -13,4 +13,9 @@
     <PackageReference Include="Confluent.SchemaRegistry" Version="2.15.0" />
     <PackageReference Include="Confluent.SchemaRegistry.Serdes.Avro" Version="2.15.0" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../shared/ImplicitPartitionSelectionAcceptance.cs"
+             Link="ImplicitPartitionSelectionAcceptance.cs" />
+  </ItemGroup>
 </Project>

@@ -147,6 +147,16 @@ try
         new Offset(0)));
     AssertOrderedValues(ConsumeExactly(orderedConsumer, 10), idempotentTopic);
 
+    await ImplicitPartitionSelectionAcceptance.AssertKeyedAsync(
+        admin,
+        bootstrapServers,
+        "flow-implicit-keyed-idempotent",
+        enableIdempotence: true,
+        explicitPartition: false,
+        iterations: 12);
+    Console.WriteLine(
+        "pass   Confluent.Kafka 2.13.2 implicitly selects partition 0 after topic creation");
+
     Console.WriteLine("PASS   Confluent.Kafka 2.13.2 forced subscriptions and idempotent produce/consume");
 }
 finally

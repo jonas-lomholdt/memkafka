@@ -10,4 +10,9 @@
   <ItemGroup>
     <PackageReference Include="Confluent.Kafka" Version="2.13.2" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../shared/ImplicitPartitionSelectionAcceptance.cs"
+             Link="ImplicitPartitionSelectionAcceptance.cs" />
+  </ItemGroup>
 </Project>

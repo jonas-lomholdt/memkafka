@@ -198,6 +198,13 @@ jobs:
           dotnet run --no-restore
           --project tests/confluent/MemKafka.Acceptance.csproj
 
+      - name: Run Confluent.Kafka 2.13.2 flow compatibility container tests
+        env:
+          MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
+        run: >-
+          dotnet run --no-restore
+          --project tests/flow-compat/MemKafka.FlowCompatibility.csproj
+
       - name: Run Apache Kafka Java client black-box tests
         env:
           MEMKAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
