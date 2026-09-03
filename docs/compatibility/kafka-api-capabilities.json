@@ -276,6 +276,7 @@
       },
       "proofScenarios": [
         "apache-kafka-java-4.3.1",
+        "confluent-kafka-2.15.0",
         "confluent-kafka-flow-2.13.2"
       ]
     },
